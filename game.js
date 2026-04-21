@@ -1347,6 +1347,19 @@
     // Update - top-level tick. Keeps sub-systems in a clear order.
     // ---------------------------------------------------------------
     function update(dt) {
+        // When the player is dead the world is frozen - no enemy AI,
+        // no spawns, no camera tracking - and the tick listens only
+        // for the restart key. This is the single chokepoint for
+        // "game stopped", so any future pause / menu / dialog state
+        // can plug in here the same way.
+        if (!player.alive) {
+            if (keysJustPressed["r"] || keysJustPressed["R"]) {
+                restartGame();
+            }
+            clearJustPressed();
+            return;
+        }
+
         updateMovement(dt);
         updateCombatInput();
         attack.update(dt);
@@ -1357,6 +1370,61 @@
         spawner.update(dt);
         camera.follow(player, dt);
         clearJustPressed();
+    }
+
+    // ---------------------------------------------------------------
+    // Restart - resets every piece of run-scoped state back to its
+    // boot values. New systems that hold run state (e.g. pickups,
+    // xp, map seed) reset themselves here so the reset story stays in
+    // one obvious place.
+    // ---------------------------------------------------------------
+    function restartGame() {
+        // Stats
+        stats.reset();
+
+        // Player
+        player.x = WORLD_W / 2 - 16;
+        player.y = WORLD_H / 2 - 16;
+        player.hp = player.maxHp;
+        player.alive = true;
+        player.iframes = 0;
+        player.facing.x = 0;
+        player.facing.y = 1;
+        player.facingDir = DIR_DOWN;
+        player.animator.setDir(DIR_DOWN);
+        player.animator.setState("idle");
+
+        // Attack
+        attack.active = false;
+        attack.timer = 0;
+        attack.cooldownTimer = 0;
+        attack.progress = 0;
+        attack.hitEnemies.clear();
+
+        // Enemies - wipe the array in place (preserves other refs)
+        // and reseed from the spawner.
+        enemies.length = 0;
+        spawner.timer = 0;
+        spawner.seed();
+
+        // Camera - jump straight to the player so the world doesn't
+        // pan in from wherever the death happened.
+        camera.snap(player);
+
+        // Touch inputs - make sure nothing is carrying over state
+        // from the moment of death (e.g. finger still on the joystick
+        // when HP hit zero).
+        joystick.active = false;
+        joystick.pointerId = null;
+        joystick.dx = 0;
+        joystick.dy = 0;
+        attackButton.pressed = false;
+        attackButton.pointerId = null;
+        attackButton.justPressed = false;
+
+        // Loop timing - prevent a huge dt spike on the first tick
+        // after the restart keystroke.
+        lastTime = performance.now();
     }
 
     // ---------------------------------------------------------------
@@ -1464,18 +1532,45 @@
     }
 
     function drawGameOver() {
-        ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+        const cx = VIEW_W / 2;
+        const cy = VIEW_H / 2;
+
+        // Dim the world behind the panel.
+        ctx.fillStyle = "rgba(0, 0, 0, 0.65)";
         ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
-        ctx.fillStyle = "#ffd166";
-        ctx.font = "bold 48px system-ui, sans-serif";
+        ctx.save();
         ctx.textAlign = "center";
-        ctx.fillText("GAME OVER", VIEW_W / 2, VIEW_H / 2);
+        ctx.textBaseline = "alphabetic";
 
+        // Title
+        ctx.fillStyle = "#ffd166";
+        ctx.font = "bold 52px system-ui, sans-serif";
+        ctx.fillText("GAME OVER", cx, cy - 40);
+
+        // Final score - the headline stat.
         ctx.fillStyle = "#a0a0b8";
         ctx.font = "14px system-ui, sans-serif";
-        ctx.fillText("Refresh the page to try again", VIEW_W / 2, VIEW_H / 2 + 32);
-        ctx.textAlign = "start"; // restore default
+        ctx.fillText("FINAL SCORE", cx, cy + 4);
+
+        ctx.fillStyle = "#e8e8f0";
+        ctx.font = "bold 40px system-ui, sans-serif";
+        ctx.fillText(String(stats.score).padStart(5, "0"), cx, cy + 46);
+
+        // Kill count tucked underneath so it reads but doesn't compete.
+        ctx.fillStyle = "#a0a0b8";
+        ctx.font = "13px system-ui, sans-serif";
+        ctx.fillText(`Enemies defeated: ${stats.kills}`, cx, cy + 70);
+
+        // Restart prompt - gently pulses so it draws the eye without
+        // feeling noisy. Uses performance.now so it ticks even while
+        // the update loop is frozen.
+        const pulse = 0.6 + 0.4 * Math.abs(Math.sin(performance.now() * 0.004));
+        ctx.fillStyle = `rgba(255, 209, 102, ${pulse.toFixed(3)})`;
+        ctx.font = "bold 16px system-ui, sans-serif";
+        ctx.fillText("Press  R  to restart", cx, cy + 106);
+
+        ctx.restore();
     }
 
     function drawEnemyCounter() {
