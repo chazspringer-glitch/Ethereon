@@ -187,57 +187,80 @@
             id: "grove",
             name: "Sunlit Grove",
             safe: true,               // combat disabled; NPC city
+            // Expanded grove: 100 x 72 tiles = 3200 x 2304 px, so
+            // the city can host three distinct districts plus roads
+            // without feeling cramped. Other levels stay at default
+            // dimensions.
+            cols: 100,
+            rows: 72,
             baseTile: TILE_GRASS,
             borderTile: TILE_STONE,
-            // Scatter table is the fallback for any tile the tileFn
-            // below doesn't handle - kept near-empty so the designed
-            // layout reads clearly.
             scatter: [],
-            // Designed town layout:
-            //   main east-west stone path across the middle
-            //   short path north to the shop door
-            //   stone plaza south of center with a water fountain
-            //   four dense tree groves in the corners
-            //   a few scattered stones + rare flower-trees elsewhere
+            // Designed town layout, zoned around a central plaza:
+            //
+            //   - Central hub: stone plaza with a fountain at the
+            //     exact world center, anchored by the Elder.
+            //   - Market district (NE): secondary stone plaza with
+            //     a shop and a branch road connecting it to the hub.
+            //   - Residential district (SW): path-tiled courtyard
+            //     fronting three small houses with a branch road
+            //     from the hub.
+            //   - Trees: dense clusters in NW and SE corners so the
+            //     outskirts read as wild woods, not empty grass.
+            //   - Main cross: horizontal + vertical roads bisect the
+            //     map, with branch roads off to each district. Walking
+            //     from district to district always follows tile path.
             tileFn(c, r, cols, rows) {
-                const cx = Math.floor(cols / 2);      // 37
-                const cy = Math.floor(rows / 2);      // 28
-                const plazaR = cy + 4;                // plaza row center
-                const shopDoorC = 31;                 // matches the shop door tile
-                const shopDoorR = 27;
+                const cx = Math.floor(cols / 2);   // 50
+                const cy = Math.floor(rows / 2);   // 36
 
-                // Fountain: water pool at plaza center
-                if (c === cx && r === plazaR) return TILE_WATER;
+                // Market and residential anchors.
+                const mC = 75, mR = 18;
+                const rC = 25, rR = 54;
 
-                // Plaza: stone disc around (cx, plazaR), radius ~3
+                // Central plaza: stone disc around (cx, cy), r ~4.
                 const pdx = c - cx;
-                const pdy = r - plazaR;
-                if (pdx * pdx + pdy * pdy <= 9) return TILE_STONE;
+                const pdy = r - cy;
+                if (pdx * pdx + pdy * pdy <= 16) {
+                    if (c === cx && r === cy) return TILE_WATER; // fountain
+                    return TILE_STONE;
+                }
 
-                // Plaza entry path: one-tile column north from main
-                // path to the plaza rim.
-                if (c === cx && r >= cy + 1 && r < plazaR - 2) return TILE_PATH;
+                // Market plaza: smaller stone disc in the NE.
+                const mdx = c - mC;
+                const mdy = r - mR;
+                if (mdx * mdx + mdy * mdy <= 20) return TILE_STONE;
 
-                // Shop approach path: two-tile column from main path
-                // up to the shop's south wall.
-                if ((c === shopDoorC || c === shopDoorC + 1) &&
-                    r >= shopDoorR && r <= cy) return TILE_PATH;
+                // Residential courtyard: path-tile disc in the SW.
+                const rdx = c - rC;
+                const rdy = r - rR;
+                if (rdx * rdx + rdy * rdy <= 25) return TILE_PATH;
 
-                // Main east-west road across the middle (2 tiles tall).
+                // Main east-west road (2 tiles tall).
                 if (r === cy || r === cy - 1) return TILE_PATH;
 
-                // Tree groves in each corner - bounded boxes with
-                // hash-driven density so they feel organic.
-                const h = hash2(c, r);
-                const nwX = c >= 3 && c <= 20;
-                const neX = c >= cols - 21 && c <= cols - 4;
-                const topY = r >= 3 && r <= 12;
-                const botY = r >= rows - 13 && r <= rows - 4;
-                if ((nwX || neX) && topY && h < 0.42) return TILE_TREE;
-                if ((nwX || neX) && botY && h < 0.38) return TILE_TREE;
+                // Main north-south road (2 tiles wide).
+                if (c === cx || c === cx - 1) return TILE_PATH;
 
-                // Light decoration scattered across the rest: rare
-                // trees and a sprinkle of stones for texture.
+                // Market branch: from the hub north to the market.
+                if (c === mC && r >= mR && r <= cy) return TILE_PATH;
+
+                // Residential branch: from the hub south to the
+                // residential courtyard.
+                if (c === rC && r >= cy && r <= rR) return TILE_PATH;
+
+                // Tree groves in NW + SE corners only - keep the
+                // inhabited quarters visually clear.
+                const h = hash2(c, r);
+                const nwBox =
+                    c >= 3 && c <= 22 && r >= 3 && r <= 16;
+                const seBox =
+                    c >= cols - 23 && c <= cols - 4 &&
+                    r >= rows - 17 && r <= rows - 4;
+                if (nwBox && h < 0.44) return TILE_TREE;
+                if (seBox && h < 0.40) return TILE_TREE;
+
+                // Sparse scatter everywhere else for texture.
                 if (h < 0.012) return TILE_STONE;
                 if (h > 0.988) return TILE_TREE;
 
@@ -247,26 +270,45 @@
             enemyOpts: {},
             exits: { east: "caverns" },
             npcs: [],  // filled in after NPC_TEMPLATES
-            // One visible building for now. Each entry is a flat rect
-            // with a door sub-rect; walking into the door rect triggers
-            // a level transition to `interior`. Add more shops / inn
-            // / houses by pushing more objects here.
+            // City buildings. The shop sits in the market district
+            // (NE) and opens into an interior. The three houses are
+            // visual-only (no `interior` set) so `maybeEnterBuilding`
+            // skips them - plenty of room to add interiors later.
             buildings: [
                 {
                     id: "shop",
                     label: "SHOP",
-                    // Building body
-                    x: 940, y: 756, w: 160, h: 130,
-                    // Door (visible + trigger rect), bottom-center
-                    doorX: 1004, doorY: 862, doorW: 32, doorH: 24,
-                    // Visual tints
+                    // Market district, north face of the plaza so its
+                    // door opens south onto the stone square.
+                    x: 2240, y: 480, w: 160, h: 130,
+                    doorX: 2304, doorY: 588, doorW: 32, doorH: 22,
                     wall: "#8c5a3c",
                     roof: "#5a3a22",
-                    // Which level opens when the player enters.
                     interior: "shop_interior",
-                    // Where to drop the player inside the interior
-                    // (near its south door so they can walk out again).
                     entry: { x: 224, y: 250 },
+                },
+                // Residential district (SW). Three houses flank the
+                // path courtyard. All visual-only for now.
+                {
+                    id: "house_1",
+                    label: "",
+                    x: 560, y: 1600, w: 128, h: 100,
+                    doorX: 612, doorY: 1678, doorW: 24, doorH: 22,
+                    wall: "#a08060", roof: "#6a4a2a",
+                },
+                {
+                    id: "house_2",
+                    label: "",
+                    x: 740, y: 1680, w: 128, h: 96,
+                    doorX: 792, doorY: 1754, doorW: 24, doorH: 22,
+                    wall: "#96765a", roof: "#603c22",
+                },
+                {
+                    id: "house_3",
+                    label: "",
+                    x: 720, y: 1500, w: 120, h: 90,
+                    doorX: 770, doorY: 1570, doorW: 24, doorH: 20,
+                    wall: "#a88a6a", roof: "#744830",
                 },
             ],
         },
@@ -344,8 +386,10 @@
             exits: {
                 south: {
                     level: "grove",
-                    // Drop the player just below the shop building's door.
-                    arriveAt: { x: 1004, y: 896 },
+                    // Drop the player just below the shop's door in
+                    // the market district (matches the grove shop
+                    // building's doorX / doorY + h below).
+                    arriveAt: { x: 2304, y: 630 },
                 },
             },
             npcs: [],  // merchant appended after dialogue is defined
@@ -3811,15 +3855,14 @@
         new Npc({
             id: "elder",
             name: "Village Elder",
-            // On the stone plaza south of the main road, a few tiles
-            // east of the fountain.
-            x: 1232,
-            y: 1024,
+            // Central hub - on the plaza just east of the fountain.
+            // Plaza center at world (1600, 1152).
+            x: 1644,
+            y: 1172,
             width: 32, height: 32,
             interactRange: 60,
-            // Slightly wider so the Elder paces the plaza instead of
-            // pinning to one spot.
-            wanderRadius: 60,
+            // Wide enough to pace the plaza.
+            wanderRadius: 72,
             speed: 24,
             colors: { robe: "#6b4e91", trim: "#503872", sash: "#ffd166", hat: "#4a2f70" },
             dialogue: {
@@ -3861,10 +3904,9 @@
         new Npc({
             id: "villager",
             name: "Villager",
-            // In the SW quarter between the tree grove and the main
-            // road - tending the old gardens, as their dialogue says.
-            x: 680,
-            y: 1260,
+            // Residential district - amid the houses in the SW.
+            x: 800,
+            y: 1760,
             width: 32, height: 32,
             interactRange: 60,
             wanderRadius: 140,
@@ -3904,12 +3946,13 @@
         new Npc({
             id: "scout",
             name: "Scout",
-            // Patrolling near the east gate (the exit to the caverns).
-            x: 2100,
-            y: 880,
+            // Near the east gate (the exit to the caverns). The
+            // gate sits at the east edge of the map on the main
+            // east-west road (row 36 = y 1152).
+            x: 2900,
+            y: 1140,
             width: 32, height: 32,
             interactRange: 60,
-            // Wider radius + faster pace - they're on watch.
             wanderRadius: 110,
             speed: 54,
             colors: { robe: "#3c5c8c", trim: "#223a5a", sash: "#8ad9ff", hat: "#1a2c46" },
@@ -4641,9 +4684,9 @@
         energyWeapon.cooldownMax = baseStats.energyCooldown;
         powerMove.damage = baseStats.powerDamage;
 
-        // Player
-        player.x = WORLD_W / 2 - 16;
-        player.y = WORLD_H / 2 - 16;
+        // Player state (position is set *after* we switch zones
+        // below so WORLD_W / WORLD_H reflect grove, not whatever
+        // zone the player died in).
         player.hp = player.maxHp;
         player.alive = true;
         player.iframes = 0;
@@ -4665,12 +4708,19 @@
         // Enemies - wipe the array in place (preserves other refs),
         // rewind the difficulty ramp, and reseed from the spawner
         // using whatever level we're about to load (grove on restart).
+        // world.load runs *before* the player position warp below so
+        // WORLD_W / WORLD_H reflect the grove dimensions.
         enemies.length = 0;
         currentLevel = LEVELS.grove;
         world.load(currentLevel);
         spawner.configure(currentLevel);
         spawner.reset();
         spawner.seed();
+
+        // Now WORLD_* are grove dims - warp the player to the
+        // grove's center (the main plaza tile).
+        player.x = WORLD_W / 2 - player.width / 2;
+        player.y = WORLD_H / 2 - player.height / 2;
 
         // Inventory / drops / UI state - fresh run has no loot.
         player.inventory.length = 0;
