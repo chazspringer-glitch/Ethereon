@@ -308,6 +308,21 @@
             enemyOpts: { hp: 5, speed: 110, reward: 25, xpReward: 18 },
             exits: { west: "caverns" },
             npcs: [],
+            // Boss of the shrine. Appears once per visit, tracked in
+            // `defeatedBosses` so finishing it sticks for the rest of
+            // the run.
+            boss: {
+                name: "Shrine Keeper",
+                // World-center spawn so the player sees it immediately
+                // on entering from the west gate.
+                x: 2400 / 2 - 32,
+                y: 1792 / 2 - 32,
+                hp: 30,
+                speed: 72,
+                reward: 500,
+                xpReward: 120,
+                contactDamage: 25,
+            },
         },
 
         // Interior of the grove shop. Much smaller than an outdoor
@@ -2089,8 +2104,31 @@
         drops.push({ x, y, itemId, age: 0 });
     }
 
+    // Called from every kill path (sword, energy projectile, power
+    // move) so score, drops, quest progress, and boss defeat all
+    // fire together. Keeping it in one function means future death
+    // hooks (combo counter, on-kill heals) go in a single spot.
+    function onEnemyDefeated(enemy) {
+        stats.addKill(enemy);
+        rollEnemyDrop(enemy);
+        if (enemy.isBoss && enemy.levelId) {
+            defeatedBosses.add(enemy.levelId);
+            questLog.showToast(`${enemy.name} defeated!`, 2.6);
+            sound.play("levelUp");
+        }
+    }
+
     // Rolls on enemy death. Tunable drop table in one place.
     function rollEnemyDrop(enemy) {
+        // Bosses guarantee both a potion and a coin on death so the
+        // room always leaves something meaningful behind.
+        if (enemy.isBoss) {
+            const cx = enemy.x + enemy.width / 2;
+            const cy = enemy.y + enemy.height / 2;
+            spawnDrop(cx - 14, cy, "potion");
+            spawnDrop(cx + 14, cy, "coin");
+            return;
+        }
         const r = Math.random();
         const cx = enemy.x + enemy.width / 2;
         const cy = enemy.y + enemy.height / 2;
@@ -2223,10 +2261,7 @@
                         p.y < b.y + b.h && p.y + p.h > b.y
                     ) {
                         e.takeHit(p.damage);
-                        if (!e.alive) {
-                            stats.addKill(e);
-                            rollEnemyDrop(e);
-                        }
+                        if (!e.alive) onEnemyDefeated(e);
                         p.alive = false;
                         break;
                     }
@@ -2442,10 +2477,7 @@
             if (dx * dx + dy * dy <= r2) {
                 e.takeHit(powerMove.damage);
                 powerMove.hitEnemies.add(e);
-                if (!e.alive) {
-                    stats.addKill(e);
-                    rollEnemyDrop(e);
-                }
+                if (!e.alive) onEnemyDefeated(e);
             }
         }
     }
@@ -2717,6 +2749,222 @@
     }
 
     // ---------------------------------------------------------------
+    // Boss
+    //
+    // A heavier enemy with a deliberate attack loop rather than
+    // blind pursuit. Three phases:
+    //
+    //   stalk    - slow pursuit while they size the player up
+    //   wind-up  - short telegraph (red aura pulse) before a charge
+    //   charge   - locked-direction dash at ~4x base speed
+    //   recover  - brief stand-still window, vulnerable to attack
+    //
+    // The whole pattern is on a single `stateTimer`, so tuning is
+    // done by editing the durations and speeds at the top of the
+    // file. Bosses inherit from Enemy so they ride the same hit-
+    // flash / takeHit / bounds path as regular mobs.
+    // ---------------------------------------------------------------
+    class Boss extends Enemy {
+        constructor(x, y, opts = {}) {
+            super(x, y, {
+                width: 64,
+                height: 64,
+                speed: opts.speed ?? 70,
+                hp: opts.hp ?? 28,
+                reward: opts.reward ?? 500,
+                xpReward: opts.xpReward ?? 100,
+                contactDamage: opts.contactDamage ?? 25,
+                ...opts,
+            });
+            this.isBoss = true;
+            this.name = opts.name ?? "Shrine Keeper";
+            // Level this boss belongs to, so its defeat can be
+            // remembered without respawning on every visit.
+            this.levelId = opts.levelId ?? null;
+
+            this.behavior = "stalk";
+            this.stateTimer = 1.8;
+            this.chargeVx = 0;
+            this.chargeVy = 0;
+            this.bobPhase = Math.random() * Math.PI * 2;
+
+            // Tunables
+            this.stalkDuration = 1.8;        // time between charges
+            this.windUpDuration = 0.45;      // telegraph window
+            this.chargeDuration = 0.55;      // dash window
+            this.chargeSpeedMultiplier = 4;  // of base speed
+            this.recoverDuration = 1.2;      // vulnerable pause
+        }
+
+        update(dt, target) {
+            if (!this.alive) return;
+            if (this.hitFlash > 0) {
+                this.hitFlash = Math.max(0, this.hitFlash - dt);
+            }
+
+            this.stateTimer -= dt;
+            this.bobPhase += dt * 3;
+
+            switch (this.behavior) {
+                case "stalk":
+                    this._stepToward(target, this.speed, dt);
+                    if (this.stateTimer <= 0) {
+                        this.behavior = "windup";
+                        this.stateTimer = this.windUpDuration;
+                    }
+                    break;
+
+                case "windup":
+                    // Freeze in place and telegraph. The red aura
+                    // pulse in draw() tells the player to dodge.
+                    if (this.stateTimer <= 0) {
+                        // Lock in the charge direction at this moment.
+                        const cx = this.x + this.width / 2;
+                        const cy = this.y + this.height / 2;
+                        const tx = target.x + target.width / 2;
+                        const ty = target.y + target.height / 2;
+                        const dx = tx - cx;
+                        const dy = ty - cy;
+                        const d = Math.hypot(dx, dy) || 1;
+                        const s = this.speed * this.chargeSpeedMultiplier;
+                        this.chargeVx = (dx / d) * s;
+                        this.chargeVy = (dy / d) * s;
+                        this.behavior = "charge";
+                        this.stateTimer = this.chargeDuration;
+                    }
+                    break;
+
+                case "charge":
+                    this.x += this.chargeVx * dt;
+                    this.y += this.chargeVy * dt;
+                    // Stay on the map during a dash.
+                    this.x = Math.max(0, Math.min(WORLD_W - this.width, this.x));
+                    this.y = Math.max(0, Math.min(WORLD_H - this.height, this.y));
+                    if (this.stateTimer <= 0) {
+                        this.behavior = "recover";
+                        this.stateTimer = this.recoverDuration;
+                    }
+                    break;
+
+                case "recover":
+                    // Vulnerable window - boss stands still.
+                    if (this.stateTimer <= 0) {
+                        this.behavior = "stalk";
+                        this.stateTimer = this.stalkDuration + Math.random() * 0.8;
+                    }
+                    break;
+            }
+        }
+
+        _stepToward(target, speed, dt) {
+            const cx = this.x + this.width / 2;
+            const cy = this.y + this.height / 2;
+            const tx = target.x + target.width / 2;
+            const ty = target.y + target.height / 2;
+            const dx = tx - cx;
+            const dy = ty - cy;
+            const d = Math.hypot(dx, dy);
+            if (d > 0.5) {
+                const inv = 1 / d;
+                this.x += dx * inv * speed * dt;
+                this.y += dy * inv * speed * dt;
+            }
+        }
+
+        draw(ctx) {
+            if (!this.alive) return;
+            const x = Math.round(this.x);
+            const y = Math.round(this.y);
+
+            // Shadow
+            ctx.fillStyle = "rgba(0, 0, 0, 0.42)";
+            ctx.beginPath();
+            ctx.ellipse(x + 32, y + 60, 22, 5, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Wind-up telegraph: pulsing red aura around the boss.
+            if (this.behavior === "windup") {
+                const t = 1 - this.stateTimer / this.windUpDuration; // 0 -> 1
+                const pulse = 0.35 + 0.55 * Math.abs(Math.sin(t * 18));
+                ctx.save();
+                ctx.globalAlpha = pulse * 0.6;
+                ctx.fillStyle = "#ff3030";
+                ctx.beginPath();
+                ctx.arc(x + 32, y + 32, 44 + t * 8, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+
+            // Charge streak: motion-blur feel via a semi-transparent
+            // trail box behind the boss.
+            if (this.behavior === "charge") {
+                ctx.save();
+                ctx.globalAlpha = 0.28;
+                ctx.fillStyle = "#ff6a6a";
+                ctx.fillRect(x - 6, y - 6, 76, 76);
+                ctx.restore();
+            }
+
+            const bob = Math.sin(this.bobPhase) * 1;
+
+            // Body
+            ctx.fillStyle = "#8c1e3e";
+            ctx.fillRect(x + 4, y + 10, 56, 48);
+            ctx.fillStyle = "#5a0f26";
+            ctx.fillRect(x + 4, y + 50, 56, 8);
+            // Shoulder highlight
+            ctx.fillStyle = "#b83a5a";
+            ctx.fillRect(x + 6, y + 12, 52, 3);
+
+            // Brow
+            ctx.fillStyle = "#3c0812";
+            ctx.fillRect(x + 12, y + 22 + bob, 12, 3);
+            ctx.fillRect(x + 40, y + 22 + bob, 12, 3);
+
+            // Eyes (glow red in recover, menacing white otherwise)
+            const eyeColor = this.behavior === "recover" ? "#ffa0a0" : "#ffe6e6";
+            ctx.fillStyle = eyeColor;
+            ctx.fillRect(x + 14, y + 26 + bob, 8, 6);
+            ctx.fillRect(x + 42, y + 26 + bob, 8, 6);
+            ctx.fillStyle = "#1a1a24";
+            ctx.fillRect(x + 16, y + 28 + bob, 4, 4);
+            ctx.fillRect(x + 44, y + 28 + bob, 4, 4);
+
+            // Mouth with tooth line
+            ctx.fillStyle = "#1a1a24";
+            ctx.fillRect(x + 18, y + 42, 28, 6);
+            ctx.fillStyle = "#ffe6e6";
+            for (let tx = x + 20; tx < x + 46; tx += 4) {
+                ctx.fillRect(tx, y + 43, 2, 2);
+            }
+
+            // Hit flash (source-atop over the body - same trick as Enemy).
+            if (this.hitFlash > 0) {
+                const a = Math.min(1, this.hitFlash / this.hitFlashDuration);
+                ctx.save();
+                ctx.globalCompositeOperation = "source-atop";
+                ctx.fillStyle = `rgba(255, 255, 255, ${a.toFixed(3)})`;
+                ctx.fillRect(x, y, this.width, this.height);
+                ctx.restore();
+            }
+        }
+    }
+
+    // Track which bosses have been defeated this run so they don't
+    // respawn every time the player revisits their room. Cleared on
+    // restart like the door-lock set.
+    const defeatedBosses = new Set();
+
+    function spawnBoss(config, levelId) {
+        if (!config) return null;
+        if (defeatedBosses.has(levelId)) return null;
+        if (enemies.length >= MAX_ENEMIES) return null;
+        const boss = new Boss(config.x, config.y, { ...config, levelId });
+        enemies.push(boss);
+        return boss;
+    }
+
+    // ---------------------------------------------------------------
     // Enemy spawning
     // ---------------------------------------------------------------
     const enemies = [];
@@ -2829,11 +3077,16 @@
         // *starting* cap so the opening reads as calm; the ramp grows
         // it from there. Each spawn uses the current level's
         // enemyOpts so caverns get tougher enemies than the grove.
+        // The level's boss (if any and still undefeated this run) is
+        // dropped into place after the mob group.
         seed() {
             const n = this.maxActive;
             for (let i = 0; i < n; i++) {
                 const spot = this.findSpot();
                 if (spot) spawnEnemy(spot.x, spot.y, this.enemyOpts);
+            }
+            if (currentLevel.boss) {
+                spawnBoss(currentLevel.boss, currentLevel.id);
             }
         },
 
@@ -3595,6 +3848,7 @@
                     { keywords: ["east", "cavern", "dungeon", "danger"], response: "East lies the Echo Caverns, and beyond, the Shrine. Tread carefully." },
                     { keywords: ["shrine", "lock", "gate", "sealed"], response: "The shrine gate is sealed with a golden lock. Prove yourself, and I'll hand you the key." },
                     { keywords: ["key", "golden", "unlock"], response: "Complete my second task - the Experienced Hunter - and the Golden Key is yours." },
+                    { keywords: ["boss", "keeper", "guardian"], response: "The Shrine Keeper guards the heart. Watch its rush - strike only when it rests." },
                     { keywords: ["star", "fall", "sky"], response: "When the star fell, the world broke. We rebuilt here." },
                     { keywords: ["weapon", "sword", "energy"], response: "Begin with the sword. The energy blast is for those who prefer distance." },
                     { keywords: ["power", "ability"], response: "Your power move clears crowds - use it sparingly; it needs time to recharge." },
@@ -3683,6 +3937,7 @@
                     { keywords: ["cavern"], response: "Enemies there hit harder than grove critters. Three blows each, at least." },
                     { keywords: ["shrine", "lock", "sealed"], response: "The shrine's gate is locked past the caverns. The Elder holds the key." },
                     { keywords: ["key", "golden", "unlock"], response: "The Golden Key? Elder's got it - earn it by finishing their second hunt." },
+                    { keywords: ["boss", "keeper", "guardian", "monster"], response: "Something big lives past the shrine gate. Don't charge it - bait the rush and punish the pause." },
                     { keywords: ["weapon", "sword", "energy"], response: "Sword for quick work, energy for range. Switch with 1 / 2 or the swap button." },
                     { keywords: ["power", "ability"], response: "The power burst hits everyone around you. Save it for crowds." },
                     { keywords: ["heal", "health", "potion"], response: "Potions drop sometimes. Don't waste them on scratches." },
@@ -3777,10 +4032,7 @@
                 // Only award once per enemy, right when the hit is
                 // what killed them - multi-hit enemies (opts.hp > 1)
                 // won't award until the final blow.
-                if (!e.alive) {
-                    stats.addKill(e);
-                    rollEnemyDrop(e);
-                }
+                if (!e.alive) onEnemyDefeated(e);
             }
         }
     }
@@ -4437,6 +4689,9 @@
         // Doors - a fresh run means fresh locks.
         unlockedDoors.clear();
 
+        // Bosses - every boss stands again on a fresh run.
+        defeatedBosses.clear();
+
         // Weapons - back to the starting loadout, clear any in-flight
         // projectiles, and reset each weapon's internal timers.
         player.weaponIndex = 0;
@@ -4535,6 +4790,7 @@
         drawXpBar();
         drawCooldownBar();
         drawEnemyCounter();
+        drawBossHealth();
         joystick.draw(ctx);
         attackButton.draw(ctx);
         weaponSwapButton.draw(ctx);
@@ -4670,6 +4926,79 @@
         ctx.lineWidth = 1;
         roundRectPath(ctx, x + 0.5, y + 0.5, barW - 1, barH - 1, r);
         ctx.stroke();
+
+        ctx.restore();
+    }
+
+    // Boss health: wide bar at the top-center of the screen with
+    // the boss's name. Only rendered while a live boss is in the
+    // current level's enemies array. Shares the rounded-rect +
+    // shadowed-text helpers with the rest of the HUD so it fits
+    // visually without ceremony.
+    function drawBossHealth() {
+        let boss = null;
+        for (const e of enemies) {
+            if (e.alive && e.isBoss) { boss = e; break; }
+        }
+        if (!boss) return;
+
+        const w = Math.min(440, VIEW_W - 32);
+        const h = 14;
+        const x = Math.floor((VIEW_W - w) / 2);
+        const y = 32;
+
+        ctx.save();
+
+        // Panel backdrop
+        roundRectPath(ctx, x - 10, y - 22, w + 20, h + 32, 8);
+        ctx.fillStyle = "rgba(18, 18, 30, 0.78)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(224, 102, 102, 0.55)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Name banner
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        drawShadowedText(
+            boss.name.toUpperCase(),
+            x + w / 2, y - 18,
+            "#e06666",
+            "bold 12px system-ui, sans-serif"
+        );
+
+        // HP track
+        roundRectPath(ctx, x, y, w, h, 6);
+        ctx.fillStyle = "#200808";
+        ctx.fill();
+
+        // HP fill - red with a subtle specular like the player HP.
+        const frac = Math.max(0, boss.hp / boss.maxHp);
+        if (frac > 0) {
+            ctx.save();
+            ctx.clip();
+            ctx.fillStyle = "#e06666";
+            ctx.fillRect(x, y, w * frac, h);
+            ctx.fillStyle = "rgba(255, 255, 255, 0.22)";
+            ctx.fillRect(x, y + 2, w * frac, 2);
+            ctx.restore();
+        }
+
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
+        ctx.lineWidth = 1;
+        roundRectPath(ctx, x + 0.5, y + 0.5, w - 1, h - 1, 6);
+        ctx.stroke();
+
+        // Numeric HP right of the bar
+        ctx.textAlign = "right";
+        ctx.textBaseline = "middle";
+        drawShadowedText(
+            `${Math.ceil(boss.hp)} / ${boss.maxHp}`,
+            x + w - 4, y + h + 10,
+            "#e06666",
+            "bold 11px system-ui, sans-serif"
+        );
+        ctx.textAlign = "left";
 
         ctx.restore();
     }
