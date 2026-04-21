@@ -1395,6 +1395,7 @@
         name: "Sword",
         shortName: "SWORD",   // compact label for the mobile swap button
         color: "#ffd166",
+        damage: 1,            // per-hit damage; bump for heavier melee variants
         get ready() {
             return !attack.active && attack.cooldownTimer <= 0;
         },
@@ -1403,7 +1404,13 @@
             if (attack.cooldownTimer <= 0) return 1;
             return 1 - attack.cooldownTimer / attack.cooldown;
         },
-        fire(player) { attack.tryStart(player); },
+        fire(player) {
+            // Latch this weapon's damage into the attack module so the
+            // collision path picks it up. Melee variants only need to
+            // ship a different `damage` value.
+            attack.damage = this.damage;
+            attack.tryStart(player);
+        },
         update(_dt) { /* attack module ticks itself */ },
         reset() { /* attack state is reset elsewhere */ },
     };
@@ -1463,6 +1470,12 @@
         cooldown: 0.35,
         reach: 36,
         thickness: 40,
+
+        // Damage dealt per hit. Latched by the active melee weapon on
+        // `tryStart` so future weapon variants (broadsword, dagger,
+        // boss sword) can ship their own damage value without
+        // touching the collision code.
+        damage: 1,
 
         // Runtime state
         active: false,
@@ -1587,9 +1600,19 @@
             this.width = opts.width ?? 32;
             this.height = opts.height ?? 32;
             this.speed = opts.speed ?? 90;
-            this.hp = opts.hp ?? 1;
+
+            // Hit points. Basic enemies take multiple hits now so
+            // combat has weight; the HP pip (rendered when maxHp > 1)
+            // is what gives the player mid-fight feedback on how much
+            // damage they've dealt.
+            this.hp = opts.hp ?? 3;
             this.maxHp = this.hp;
             this.alive = true;
+
+            // Contact damage dealt to the player on overlap. Exposed
+            // on the instance so bosses / elites can hit harder via
+            // opts.contactDamage without touching the collision code.
+            this.contactDamage = opts.contactDamage ?? 10;
 
             // Points awarded on defeat. Variant enemies (elites,
             // bosses) can override via opts.reward.
@@ -1858,7 +1881,7 @@
         for (const e of enemies) {
             if (!e.alive || attack.hitEnemies.has(e)) continue;
             if (rectsOverlap(box, e.bounds())) {
-                e.takeHit(1);
+                e.takeHit(attack.damage);
                 attack.hitEnemies.add(e);
                 // Only award once per enemy, right when the hit is
                 // what killed them - multi-hit enemies (opts.hp > 1)
@@ -1886,7 +1909,7 @@
         for (const e of enemies) {
             if (!e.alive) continue;
             if (rectsOverlap(_playerBox, e.bounds())) {
-                damagePlayer(10);
+                damagePlayer(e.contactDamage);
                 break; // one damage event per frame is enough
             }
         }
