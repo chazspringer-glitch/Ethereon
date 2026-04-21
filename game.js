@@ -760,6 +760,68 @@
     };
 
     // ---------------------------------------------------------------
+    // Screen shake
+    //
+    // Tiny module. `trigger(mag, dur)` starts (or extends) a shake
+    // with the given magnitude in world pixels for `dur` seconds.
+    // Offsets are sampled per-draw via offsetX() / offsetY() and
+    // added to the world-space translate, so the world appears to
+    // rattle while the HUD stays stable (HUD draws outside the
+    // world transform).
+    //
+    // Shakes layer additively up to their peak magnitude - a quick
+    // second trigger during an existing shake extends rather than
+    // replaces it.
+    // ---------------------------------------------------------------
+    const shake = {
+        timer: 0,
+        duration: 0,
+        peak: 0,
+
+        trigger(magnitude, duration) {
+            // Keep the max of any still-decaying shake so smaller
+            // follow-up hits don't cut a big shake short.
+            if (this.peak < magnitude) this.peak = magnitude;
+            if (this.timer < duration) {
+                this.timer = duration;
+                this.duration = duration;
+            }
+        },
+
+        update(dt) {
+            if (this.timer > 0) {
+                this.timer = Math.max(0, this.timer - dt);
+                if (this.timer === 0) {
+                    this.peak = 0;
+                    this.duration = 0;
+                }
+            }
+        },
+
+        // Current magnitude: linear fade from peak to 0 over duration.
+        magnitude() {
+            if (this.timer <= 0) return 0;
+            return this.peak * (this.timer / this.duration);
+        },
+
+        offsetX() {
+            const m = this.magnitude();
+            return m === 0 ? 0 : (Math.random() - 0.5) * 2 * m;
+        },
+
+        offsetY() {
+            const m = this.magnitude();
+            return m === 0 ? 0 : (Math.random() - 0.5) * 2 * m;
+        },
+
+        reset() {
+            this.timer = 0;
+            this.peak = 0;
+            this.duration = 0;
+        },
+    };
+
+    // ---------------------------------------------------------------
     // Sprite system
     //
     // Mirrors the shape of a real 2D engine without the framework:
@@ -2066,6 +2128,9 @@
         player.hp = Math.max(0, player.hp - final);
         player.iframes = player.iframeDuration;
         sound.play("playerHurt");
+        // Harder shake on damage than on an enemy hit so taking a
+        // hit feels distinct from landing one.
+        shake.trigger(8, 0.22);
 
         if (player.hp <= 0) {
             player.alive = false;
@@ -2521,7 +2586,10 @@
                         p.x < b.x + b.w && p.x + p.w > b.x &&
                         p.y < b.y + b.h && p.y + p.h > b.y
                     ) {
-                        e.takeHit(p.damage);
+                        e.takeHit(p.damage, {
+                            x: p.x + p.w / 2,
+                            y: p.y + p.h / 2,
+                        });
                         if (!e.alive) onEnemyDefeated(e);
                         p.alive = false;
                         break;
@@ -2662,6 +2730,7 @@
             this.activeTimer = this.activeDuration;
             this.hitEnemies.clear();
             sound.play("power");
+            shake.trigger(10, 0.3);
             return true;
         },
 
@@ -2736,7 +2805,7 @@
             const dx = ex - cx;
             const dy = ey - cy;
             if (dx * dx + dy * dy <= r2) {
-                e.takeHit(powerMove.damage);
+                e.takeHit(powerMove.damage, { x: cx, y: cy });
                 powerMove.hitEnemies.add(e);
                 if (!e.alive) onEnemyDefeated(e);
             }
@@ -2782,6 +2851,8 @@
             this.activeTimer = this.activeDuration;
             this.hitEnemies.clear();
             sound.play("super");
+            // Dramatic shake for the nuke. Long + strong.
+            shake.trigger(18, 0.7);
             return true;
         },
 
@@ -2867,7 +2938,7 @@
             const dx = ex - cx;
             const dy = ey - cy;
             if (dx * dx + dy * dy <= r2) {
-                e.takeHit(superPower.damage);
+                e.takeHit(superPower.damage, { x: cx, y: cy });
                 superPower.hitEnemies.add(e);
                 if (!e.alive) onEnemyDefeated(e);
             }
@@ -3056,12 +3127,43 @@
             // lasts; `hitFlash` counts down and drives opacity.
             this.hitFlashDuration = 0.14;
             this.hitFlash = 0;
+
+            // Knockback impulse. `takeHit(dmg, from)` sets these
+            // from the hit direction and `update` integrates them
+            // with exponential decay. `knockbackScale` (0..1) lets
+            // bosses / elites resist - set low on heavy enemies.
+            this.kbVx = 0;
+            this.kbVy = 0;
+            this.knockbackScale = opts.knockbackScale ?? 1.0;
         }
 
         update(dt, target) {
             if (!this.alive) return;
 
             if (this.hitFlash > 0) this.hitFlash = Math.max(0, this.hitFlash - dt);
+
+            // Knockback integration: while the impulse is alive the
+            // enemy slides away from the hit source and their AI
+            // is suppressed for the frame. Exponential decay so it
+            // feels like a thrust, not a teleport.
+            if (this.kbVx !== 0 || this.kbVy !== 0) {
+                this.x += this.kbVx * dt;
+                this.y += this.kbVy * dt;
+                const decay = Math.exp(-8 * dt);
+                this.kbVx *= decay;
+                this.kbVy *= decay;
+                // Clamp to world so knockback can't push off-map.
+                this.x = Math.max(0, Math.min(WORLD_W - this.width, this.x));
+                this.y = Math.max(0, Math.min(WORLD_H - this.height, this.y));
+                if (Math.abs(this.kbVx) < 4 && Math.abs(this.kbVy) < 4) {
+                    this.kbVx = 0;
+                    this.kbVy = 0;
+                }
+                // Fall through to animator update below, skip AI.
+                this.animator.setState("walk");
+                this.animator.update(dt);
+                return;
+            }
 
             // Steer toward the target's center using a unit vector,
             // so diagonal approach isn't faster than cardinal approach.
@@ -3118,11 +3220,40 @@
             }
         }
 
-        takeHit(damage = 1) {
+        takeHit(damage = 1, from = null) {
             this.hp -= damage;
             this.hitFlash = this.hitFlashDuration;
             sound.play("enemyHit");
-            if (this.hp <= 0) this.alive = false;
+
+            // Small screen shake on impact; slightly bigger for
+            // kill hits so the payoff reads.
+            const killing = this.hp <= 0;
+            shake.trigger(killing ? 5 : 3, killing ? 0.18 : 0.10);
+
+            // Knockback away from the hit source. `from` is a
+            // { x, y } point in world space (attacker center /
+            // projectile center); skipped if the caller didn't
+            // supply one or this enemy resists.
+            if (from && this.knockbackScale > 0) {
+                const cx = this.x + this.width / 2;
+                const cy = this.y + this.height / 2;
+                const dx = cx - from.x;
+                const dy = cy - from.y;
+                const d = Math.hypot(dx, dy);
+                if (d > 0.01) {
+                    const kbSpeed = 220 * this.knockbackScale;
+                    this.kbVx = (dx / d) * kbSpeed;
+                    this.kbVy = (dy / d) * kbSpeed;
+                } else {
+                    // Hit from inside - push randomly so nothing
+                    // stays perfectly stuck.
+                    const a = Math.random() * Math.PI * 2;
+                    this.kbVx = Math.cos(a) * 120 * this.knockbackScale;
+                    this.kbVy = Math.sin(a) * 120 * this.knockbackScale;
+                }
+            }
+
+            if (killing) this.alive = false;
         }
 
         // Expose a rect in the shape used by rectsOverlap / getHitbox.
@@ -3166,6 +3297,9 @@
                 reward: opts.reward ?? 500,
                 xpReward: opts.xpReward ?? 100,
                 contactDamage: opts.contactDamage ?? 25,
+                // Heavy - mostly shrugs off knockback, so the player
+                // can't simply juggle them with a sword.
+                knockbackScale: opts.knockbackScale ?? 0.2,
                 ...opts,
             });
             this.isBoss = true;
@@ -4962,10 +5096,12 @@
         const box = attack.getHitbox(player);
         if (!box) return;
 
+        const px = player.x + player.width / 2;
+        const py = player.y + player.height / 2;
         for (const e of enemies) {
             if (!e.alive || attack.hitEnemies.has(e)) continue;
             if (rectsOverlap(box, e.bounds())) {
-                e.takeHit(attack.damage);
+                e.takeHit(attack.damage, { x: px, y: py });
                 attack.hitEnemies.add(e);
                 // Only award once per enemy, right when the hit is
                 // what killed them - multi-hit enemies (opts.hp > 1)
@@ -5358,6 +5494,7 @@
         for (const w of weapons) w.update(dt);
         powerMove.update(dt);
         superPower.update(dt);
+        shake.update(dt);
 
         // Combat systems only tick in hostile zones. In safe zones
         // (NPC cities) enemy AI, spawning, and contact damage are all
@@ -5659,6 +5796,10 @@
         // Super power - same rewind, long cooldown back to 0.
         superPower.reset();
 
+        // Screen shake - any mid-cast impulses clear so respawn
+        // isn't still rattling.
+        shake.reset();
+
         // Camera - jump straight to the player so the world doesn't
         // pan in from wherever the death happened.
         camera.snap(player);
@@ -5703,9 +5844,14 @@
 
         // --- World space ---
         // Round the translate to whole pixels to avoid tile-seam
-        // shimmering when the camera is sub-pixel offset.
+        // shimmering when the camera is sub-pixel offset. Screen
+        // shake is added on top; since the HUD draws outside this
+        // save/restore, only the world rattles.
         ctx.save();
-        ctx.translate(-Math.round(camera.x), -Math.round(camera.y));
+        ctx.translate(
+            -Math.round(camera.x) + Math.round(shake.offsetX()),
+            -Math.round(camera.y) + Math.round(shake.offsetY())
+        );
 
         world.draw(ctx, camera);
 
