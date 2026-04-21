@@ -855,6 +855,47 @@
     }
 
     // ---------------------------------------------------------------
+    // Run stats
+    //
+    // The one place score / kills / (eventually) xp + level live.
+    // Keeping it a tiny module with a single `addScore` chokepoint
+    // means future rewards (pickups, combos, multipliers) and
+    // leveling can plug in here without touching callers:
+    //
+    //   - score          current run total
+    //   - kills          enemies defeated this run
+    //   - scoreModifiers (amount) => amount  - combo/multiplier hook
+    //   - onScoreChanged listeners - fire after score changes; a
+    //                    future leveling system checks xp thresholds
+    //                    here without needing to hard-wire into
+    //                    combat code.
+    // ---------------------------------------------------------------
+    const stats = {
+        score: 0,
+        kills: 0,
+        scoreModifiers: [],
+        onScoreChanged: [],
+
+        addScore(amount) {
+            let final = amount;
+            for (const mod of this.scoreModifiers) final = mod(final);
+            if (final <= 0) return;
+            this.score += final;
+            for (const fn of this.onScoreChanged) fn(this.score, final);
+        },
+
+        addKill(enemy) {
+            this.kills += 1;
+            this.addScore(enemy?.reward ?? 10);
+        },
+
+        reset() {
+            this.score = 0;
+            this.kills = 0;
+        },
+    };
+
+    // ---------------------------------------------------------------
     // Attack module
     //
     // A single, self-contained piece of state describing the player's
@@ -1000,6 +1041,10 @@
             this.hp = opts.hp ?? 1;
             this.maxHp = this.hp;
             this.alive = true;
+
+            // Points awarded on defeat. Variant enemies (elites,
+            // bosses) can override via opts.reward.
+            this.reward = opts.reward ?? 10;
 
             // Sprite + animation (each enemy owns its own animator so
             // their walk cycles aren't locked in lockstep).
@@ -1194,6 +1239,10 @@
             if (rectsOverlap(box, e.bounds())) {
                 e.takeHit(1);
                 attack.hitEnemies.add(e);
+                // Only award once per enemy, right when the hit is
+                // what killed them - multi-hit enemies (opts.hp > 1)
+                // won't award until the final blow.
+                if (!e.alive) stats.addKill(e);
             }
         }
     }
@@ -1340,6 +1389,7 @@
         ctx.restore();
 
         // --- Screen space (HUD) ---
+        drawScore();
         drawHealthBar();
         drawCooldownBar();
         drawEnemyCounter();
@@ -1347,6 +1397,29 @@
         attackButton.draw(ctx);
 
         if (!player.alive) drawGameOver();
+    }
+
+    // Top-left stat panel. Score anchors the block at y=14 and the
+    // health bar sits beneath it - keeps the reading order "what
+    // you've earned -> what you have left."
+    function drawScore() {
+        const x = 16;
+        const y = 14;
+
+        ctx.save();
+        ctx.textBaseline = "top";
+
+        // Label
+        ctx.fillStyle = "#a0a0b8";
+        ctx.font = "11px system-ui, sans-serif";
+        ctx.fillText("SCORE", x, y);
+
+        // Value - padded to a fixed width so the HUD doesn't jitter.
+        ctx.fillStyle = "#ffd166";
+        ctx.font = "bold 20px system-ui, sans-serif";
+        ctx.fillText(String(stats.score).padStart(5, "0"), x + 46, y - 2);
+
+        ctx.restore();
     }
 
     function drawPlayer() {
@@ -1367,7 +1440,7 @@
         const barW = 180;
         const barH = 14;
         const x = 16;
-        const y = 16;
+        const y = 40;  // sits beneath the score readout
 
         const frac = Math.max(0, player.hp / player.maxHp);
 
