@@ -1076,6 +1076,7 @@
             enemyHit: 0.05,
             playerHurt: 0.4,
             power: 0.1,
+            super: 0.2,
             levelUp: 1.5,
         },
 
@@ -1116,6 +1117,7 @@
                 case "enemyHit":   this._enemyHit(now); break;
                 case "playerHurt": this._playerHurt(now); break;
                 case "power":      this._power(now); break;
+                case "super":      this._super(now); break;
                 case "levelUp":    this._levelUp(now); break;
             }
         },
@@ -1204,6 +1206,30 @@
             osc2.start(t);
             osc1.stop(t + 0.4);
             osc2.stop(t + 0.4);
+        },
+
+        // Super: layered descending chord over ~0.8s. Three
+        // oscillators for body, richness, and a high ping, all
+        // sweeping downward together.
+        _super(t) {
+            const partials = [
+                { type: "sawtooth", startHz: 220, endHz: 60,  gain: 0.35 },
+                { type: "square",   startHz: 440, endHz: 160, gain: 0.22 },
+                { type: "triangle", startHz: 880, endHz: 320, gain: 0.18 },
+            ];
+            for (const p of partials) {
+                const osc = this.ctx.createOscillator();
+                const g = this.ctx.createGain();
+                osc.type = p.type;
+                osc.frequency.setValueAtTime(p.startHz, t);
+                osc.frequency.exponentialRampToValueAtTime(p.endHz, t + 0.8);
+                g.gain.setValueAtTime(0.0001, t);
+                g.gain.exponentialRampToValueAtTime(p.gain, t + 0.02);
+                g.gain.exponentialRampToValueAtTime(0.0001, t + 0.85);
+                osc.connect(g).connect(this.master);
+                osc.start(t);
+                osc.stop(t + 0.9);
+            }
         },
     };
 
@@ -1584,6 +1610,104 @@
     };
 
     // ---------------------------------------------------------------
+    // Super Power button (touch / pointer)
+    //
+    // Sits beside the power button. Shares the same
+    // press-visual-feedback + cooldown-ring idiom, tinted purple so
+    // it reads as distinct from POWER / ATK. Fires `superPower`.
+    // ---------------------------------------------------------------
+    const superPowerButton = {
+        x: 0, y: 0,
+        radius: 38,
+
+        layout() {
+            this.x = VIEW_W - 178;
+            this.y = VIEW_H - 170;
+        },
+
+        pressed: false,
+        pointerId: null,
+        justPressed: false,
+
+        contains(x, y) {
+            const dx = x - this.x;
+            const dy = y - this.y;
+            return dx * dx + dy * dy <= this.radius * this.radius;
+        },
+
+        onDown(x, y, pointerId) {
+            if (this.pressed) return false;
+            if (!this.contains(x, y)) return false;
+            this.pressed = true;
+            this.pointerId = pointerId;
+            this.justPressed = true;
+            return true;
+        },
+
+        onUp(pointerId) {
+            if (this.pointerId !== pointerId) return;
+            this.pressed = false;
+            this.pointerId = null;
+        },
+
+        consumeJustPressed() {
+            const v = this.justPressed;
+            this.justPressed = false;
+            return v;
+        },
+
+        draw(ctx) {
+            const cy = this.y + (this.pressed ? 2 : 0);
+            const ready = superPower.ready;
+            const frac = superPower.cooldownFrac();
+
+            ctx.save();
+
+            // Base circle - muted while charging, vivid purple ready.
+            ctx.globalAlpha = this.pressed ? 0.95 : 0.6;
+            ctx.fillStyle = ready ? "#b06bff" : "#3e2a60";
+            ctx.beginPath();
+            ctx.arc(this.x, cy, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Pie-slice cooldown fill (same as POWER button).
+            if (!ready) {
+                ctx.globalAlpha = 0.85;
+                ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+                ctx.beginPath();
+                ctx.moveTo(this.x, cy);
+                ctx.arc(
+                    this.x, cy, this.radius - 2,
+                    -Math.PI / 2 + frac * Math.PI * 2,
+                    Math.PI * 1.5
+                );
+                ctx.closePath();
+                ctx.fill();
+            }
+
+            // Rim
+            ctx.globalAlpha = 0.95;
+            ctx.strokeStyle = ready ? "#f0d8ff" : "#888";
+            ctx.lineWidth = this.pressed ? 4 : 3;
+            ctx.beginPath();
+            ctx.arc(this.x, cy, this.radius, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Label - lightning bolt + "SUPER".
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = "#1a1a24";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.font = "bold 16px system-ui, sans-serif";
+            ctx.fillText("⚡", this.x, cy - 7);
+            ctx.font = "bold 10px system-ui, sans-serif";
+            ctx.fillText("SUPER", this.x, cy + 8);
+
+            ctx.restore();
+        },
+    };
+
+    // ---------------------------------------------------------------
     // Interact button (touch / pointer)
     //
     // Appears bottom-center only when the player is standing near an
@@ -1668,6 +1792,7 @@
         attackButton.layout();
         weaponSwapButton.layout();
         powerButton.layout();
+        superPowerButton.layout();
         interactButton.layout();
     });
     // Button layouts need to be valid before the first frame, but
@@ -1675,6 +1800,7 @@
     // layouts once now that every button is defined.
     attackButton.layout();
     weaponSwapButton.layout();
+    superPowerButton.layout();
     powerButton.layout();
     interactButton.layout();
 
@@ -1828,6 +1954,11 @@
             e.preventDefault();
             return;
         }
+        if (superPowerButton.onDown(x, y, e.pointerId)) {
+            canvas.setPointerCapture(e.pointerId);
+            e.preventDefault();
+            return;
+        }
         if (interactButton.onDown(x, y, e.pointerId)) {
             canvas.setPointerCapture(e.pointerId);
             e.preventDefault();
@@ -1855,6 +1986,7 @@
         attackButton.onUp(e.pointerId);
         weaponSwapButton.onUp(e.pointerId);
         powerButton.onUp(e.pointerId);
+        superPowerButton.onUp(e.pointerId);
         interactButton.onUp(e.pointerId);
         restartButton.onUp(e.pointerId);
     }
@@ -2594,6 +2726,137 @@
             if (dx * dx + dy * dy <= r2) {
                 e.takeHit(powerMove.damage);
                 powerMove.hitEnemies.add(e);
+                if (!e.alive) onEnemyDefeated(e);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Super Power
+    //
+    // The "nuke". Triples the power-move's reach, quadruples the
+    // damage, and lasts nearly a full second - but takes ~15 seconds
+    // to recharge so using it is a real commitment.
+    //
+    // The animation layers three concentric rings expanding at
+    // staggered speeds + a bright central flash that fades over the
+    // first fraction of the window. Visually loud so it reads as a
+    // once-in-a-fight moment.
+    // ---------------------------------------------------------------
+    const superPower = {
+        // Tunables
+        cooldownMax: 15.0,
+        activeDuration: 0.85,
+        radius: 220,
+        damage: 12,
+
+        // Runtime
+        cooldownTimer: 0,
+        activeTimer: 0,
+        hitEnemies: new Set(),
+
+        get ready() {
+            return this.cooldownTimer <= 0 && this.activeTimer <= 0;
+        },
+
+        cooldownFrac() {
+            if (this.cooldownTimer <= 0) return 1;
+            return 1 - this.cooldownTimer / this.cooldownMax;
+        },
+
+        activate(_entity) {
+            if (!this.ready) return false;
+            this.cooldownTimer = this.cooldownMax;
+            this.activeTimer = this.activeDuration;
+            this.hitEnemies.clear();
+            sound.play("super");
+            return true;
+        },
+
+        update(dt) {
+            if (this.activeTimer > 0) {
+                this.activeTimer = Math.max(0, this.activeTimer - dt);
+            }
+            if (this.cooldownTimer > 0) {
+                this.cooldownTimer = Math.max(0, this.cooldownTimer - dt);
+            }
+        },
+
+        reset() {
+            this.cooldownTimer = 0;
+            this.activeTimer = 0;
+            this.hitEnemies.clear();
+        },
+
+        draw(ctx, entity) {
+            if (this.activeTimer <= 0) return;
+            const t = 1 - this.activeTimer / this.activeDuration;  // 0 -> 1
+            const cx = Math.round(entity.x + entity.width / 2);
+            const cy = Math.round(entity.y + entity.height / 2);
+
+            ctx.save();
+
+            // Central flash: brightest at the start of the cast,
+            // fades out in the first third of the window.
+            if (t < 0.35) {
+                const flash = 1 - t / 0.35;
+                ctx.globalAlpha = flash;
+                ctx.fillStyle = "#fff6d6";
+                ctx.beginPath();
+                ctx.arc(cx, cy, 90 - t * 60, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Three expanding rings staggered in start time and color
+            // so the blast reads as multi-layered energy, not a
+            // single ring.
+            const rings = [
+                { start: 0.00, color: "#ffd166", width: 12 },
+                { start: 0.18, color: "#ff8e3a", width: 9 },
+                { start: 0.36, color: "#fff6d6", width: 6 },
+            ];
+            for (const ring of rings) {
+                const localT = (t - ring.start) / (1 - ring.start);
+                if (localT <= 0 || localT >= 1) continue;
+                const r = this.radius * localT;
+                const alpha = (1 - localT) * 0.85;
+                ctx.globalAlpha = alpha;
+                ctx.strokeStyle = ring.color;
+                ctx.lineWidth = ring.width * (1 - localT) + 2;
+                ctx.beginPath();
+                ctx.arc(cx, cy, r, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+
+            // Trailing outer halo - final flourish.
+            if (t > 0.4 && t < 0.9) {
+                const ht = (t - 0.4) / 0.5;
+                ctx.globalAlpha = (1 - ht) * 0.25;
+                ctx.fillStyle = "#ffd166";
+                ctx.beginPath();
+                ctx.arc(cx, cy, this.radius * (0.7 + ht * 0.3), 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            ctx.restore();
+        },
+    };
+
+    function updateSuperPowerCollision() {
+        if (superPower.activeTimer <= 0) return;
+        const cx = player.x + player.width / 2;
+        const cy = player.y + player.height / 2;
+        const r2 = superPower.radius * superPower.radius;
+
+        for (const e of enemies) {
+            if (!e.alive || superPower.hitEnemies.has(e)) continue;
+            const ex = e.x + e.width / 2;
+            const ey = e.y + e.height / 2;
+            const dx = ex - cx;
+            const dy = ey - cy;
+            if (dx * dx + dy * dy <= r2) {
+                e.takeHit(superPower.damage);
+                superPower.hitEnemies.add(e);
                 if (!e.alive) onEnemyDefeated(e);
             }
         }
@@ -4877,6 +5140,14 @@
         if (keyboardPower || touchPower) {
             powerMove.activate(player);
         }
+
+        // Super power - the "nuke". Longer cooldown, huge AoE +
+        // animation. F on keyboard, SUPER button on touch.
+        const keyboardSuper = keysJustPressed["f"] || keysJustPressed["F"];
+        const touchSuper = superPowerButton.consumeJustPressed();
+        if (keyboardSuper || touchSuper) {
+            superPower.activate(player);
+        }
     }
 
     // ---------------------------------------------------------------
@@ -4968,6 +5239,7 @@
         attack.update(dt);
         for (const w of weapons) w.update(dt);
         powerMove.update(dt);
+        superPower.update(dt);
 
         // Combat systems only tick in hostile zones. In safe zones
         // (NPC cities) enemy AI, spawning, and contact damage are all
@@ -4977,6 +5249,7 @@
             updateEnemies(dt);
             updateAttackCollision();
             updatePowerMoveCollision();
+            updateSuperPowerCollision();
             updateEnemyContact();
             spawner.update(dt);
         }
@@ -5265,6 +5538,9 @@
         // Power move - rewind cooldown and clear any active burst.
         powerMove.reset();
 
+        // Super power - same rewind, long cooldown back to 0.
+        superPower.reset();
+
         // Camera - jump straight to the player so the world doesn't
         // pan in from wherever the death happened.
         camera.snap(player);
@@ -5284,6 +5560,9 @@
         powerButton.pressed = false;
         powerButton.pointerId = null;
         powerButton.justPressed = false;
+        superPowerButton.pressed = false;
+        superPowerButton.pointerId = null;
+        superPowerButton.justPressed = false;
         interactButton.pressed = false;
         interactButton.pointerId = null;
         interactButton.justPressed = false;
@@ -5342,6 +5621,10 @@
         // Power move ring - big AoE, goes over the weapon hitbox.
         powerMove.draw(ctx, player);
 
+        // Super power - the nuke. Draws last so its layered rings
+        // paint over everything else in the world layer.
+        superPower.draw(ctx, player);
+
         // Projectiles over everything else in the world layer.
         drawProjectiles(ctx);
 
@@ -5359,6 +5642,7 @@
         attackButton.draw(ctx);
         weaponSwapButton.draw(ctx);
         powerButton.draw(ctx);
+        superPowerButton.draw(ctx);
         interactButton.draw(ctx);
         drawQuestPanel();
 
