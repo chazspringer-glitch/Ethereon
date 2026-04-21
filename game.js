@@ -1127,11 +1127,12 @@
     const enemies = [];
 
     // Hard safety cap on simultaneously-active enemies. The `spawner`
-    // below owns the gameplay-tuned population target; MAX_ENEMIES is
-    // the ceiling any future system (bosses, events, scripted waves)
-    // must respect. Raise once a broadphase (spatial grid, quadtree)
-    // is in place.
-    const MAX_ENEMIES = 5;
+    // below owns the gameplay-tuned population target (which grows
+    // with elapsed run time); MAX_ENEMIES is the ceiling that any
+    // future system - bosses, events, scripted waves, the difficulty
+    // ramp - must respect. Raise once a broadphase (spatial grid,
+    // quadtree) is in place.
+    const MAX_ENEMIES = 12;
 
     // `spawnEnemy` is the low-level primitive: add an enemy at the
     // given coords, or refuse if we're at the hard cap. Every higher-
@@ -1147,19 +1148,56 @@
     // ---------------------------------------------------------------
     // Spawner
     //
-    // Keeps the world populated up to `maxActive` by picking random
-    // positions on the map that satisfy simple constraints (inside
-    // bounds with a margin, far enough from the player, not on a
-    // solid tile). Dropping `maxActive` or changing the constraints
-    // is the extension point for future difficulty tuning, zones, or
-    // scripted waves.
+    // Picks random positions on the map that satisfy simple rules
+    // (inside bounds with a margin, far enough from the player, not
+    // on a solid tile) and trickles enemies in over time.
+    //
+    // Difficulty ramp
+    //   The current `maxActive` and spawn `interval` are linearly
+    //   interpolated from (startMaxActive, startInterval) to
+    //   (endMaxActive, endInterval) over `rampSeconds` of elapsed
+    //   run time. After that they plateau at the endpoint - a bounded
+    //   curve, not runaway scaling. `reset()` puts the ramp back to
+    //   its start on restart.
+    //
+    //   All the knobs sit at the top of the object so tuning is a
+    //   single-line change.
     // ---------------------------------------------------------------
     const spawner = {
-        maxActive: MAX_ENEMIES,      // gameplay-tuned population target
-        interval: 2.5,               // seconds between respawn attempts
-        timer: 0,                    // counts down between attempts
+        // --- Difficulty ramp (tunable) ---
+        startMaxActive: 5,           // opening population target
+        endMaxActive: MAX_ENEMIES,   // fully-ramped target (hard cap)
+        startInterval: 2.5,          // seconds between spawns at start
+        endInterval: 0.6,            // seconds between spawns at peak
+        rampSeconds: 120,            // time to reach full difficulty
+
+        // --- Placement constraints ---
         minDistFromPlayer: 200,      // don't spawn right on top of the player
         margin: 64,                  // keep clear of the stone border
+
+        // --- Runtime state ---
+        maxActive: 5,
+        interval: 2.5,
+        timer: 0,
+        elapsed: 0,
+
+        // Recompute maxActive / interval from the current `elapsed`.
+        // Cheap (a few arithmetic ops), and once the ramp peaks we
+        // pin the values and skip the math entirely each tick.
+        refresh() {
+            if (this.elapsed >= this.rampSeconds) {
+                this.interval = this.endInterval;
+                this.maxActive = this.endMaxActive;
+                return;
+            }
+            const t = this.elapsed / this.rampSeconds;
+            this.interval =
+                this.startInterval + (this.endInterval - this.startInterval) * t;
+            this.maxActive = Math.floor(
+                this.startMaxActive +
+                    (this.endMaxActive - this.startMaxActive) * t
+            );
+        },
 
         // Try random candidate positions until one meets our rules.
         // Caps attempts so a bad config (e.g. margins that leave no
@@ -1187,17 +1225,22 @@
             return null;
         },
 
-        // Populate the world at boot.
+        // Populate the world at boot. Seeds to the *starting* cap so
+        // the opening reads as calm; the ramp grows it from there.
         seed() {
-            for (let i = 0; i < this.maxActive; i++) {
+            const n = this.maxActive;
+            for (let i = 0; i < n; i++) {
                 const spot = this.findSpot();
                 if (spot) spawnEnemy(spot.x, spot.y);
             }
         },
 
-        // Called each tick. Trickles new enemies in when the world
-        // drops below its target population.
+        // Called each tick. Advances the difficulty clock, then
+        // trickles new enemies in when the world drops below target.
         update(dt) {
+            this.elapsed += dt;
+            this.refresh();
+
             if (enemies.length >= this.maxActive) {
                 this.timer = 0;
                 return;
@@ -1209,7 +1252,17 @@
             const spot = this.findSpot();
             if (spot) spawnEnemy(spot.x, spot.y);
         },
+
+        // Rewind to the opening difficulty. Called by restartGame.
+        reset() {
+            this.elapsed = 0;
+            this.timer = 0;
+            this.refresh();
+        },
     };
+
+    // Initialize runtime values from the opening config before seeding.
+    spawner.reset();
 
     spawner.seed();
 
@@ -1401,10 +1454,10 @@
         attack.progress = 0;
         attack.hitEnemies.clear();
 
-        // Enemies - wipe the array in place (preserves other refs)
-        // and reseed from the spawner.
+        // Enemies - wipe the array in place (preserves other refs),
+        // rewind the difficulty ramp, and reseed from the spawner.
         enemies.length = 0;
-        spawner.timer = 0;
+        spawner.reset();
         spawner.seed();
 
         // Camera - jump straight to the player so the world doesn't
