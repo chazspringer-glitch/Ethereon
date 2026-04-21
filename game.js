@@ -629,6 +629,97 @@
         },
     };
 
+    // ---------------------------------------------------------------
+    // Attack button (touch / pointer)
+    //
+    // A fixed circular button in the bottom-right corner that fires
+    // an attack on press. Independent of the keyboard SPACE handler:
+    // both sources call through `attack.tryStart(player)` via
+    // `updateCombatInput`, so either one works and the attack cooldown
+    // applies uniformly.
+    //
+    // Uses an edge-triggered `justPressed` flag consumed by the
+    // update tick, which mirrors how we already handle keysJustPressed
+    // - one tap = one attack attempt.
+    // ---------------------------------------------------------------
+    const attackButton = {
+        x: VIEW_W - 80,
+        y: VIEW_H - 80,
+        radius: 54,
+
+        pressed: false,        // pointer still held on button - drives visual feedback
+        pointerId: null,
+        justPressed: false,    // set on down, cleared by consumeJustPressed()
+
+        contains(x, y) {
+            const dx = x - this.x;
+            const dy = y - this.y;
+            return dx * dx + dy * dy <= this.radius * this.radius;
+        },
+
+        onDown(x, y, pointerId) {
+            if (this.pressed) return false;
+            if (!this.contains(x, y)) return false;
+            this.pressed = true;
+            this.pointerId = pointerId;
+            this.justPressed = true;
+            return true;
+        },
+
+        onUp(pointerId) {
+            if (this.pointerId !== pointerId) return;
+            this.pressed = false;
+            this.pointerId = null;
+        },
+
+        consumeJustPressed() {
+            const v = this.justPressed;
+            this.justPressed = false;
+            return v;
+        },
+
+        draw(ctx) {
+            ctx.save();
+
+            // Subtle "depressed" shift when pressed for extra feedback.
+            const cy = this.y + (this.pressed ? 2 : 0);
+
+            // Base fill - brighter while pressed.
+            ctx.globalAlpha = this.pressed ? 0.95 : 0.6;
+            ctx.fillStyle = this.pressed ? "#ff8a6a" : "#c84a4a";
+            ctx.beginPath();
+            ctx.arc(this.x, cy, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Outer ring
+            ctx.globalAlpha = 0.9;
+            ctx.strokeStyle = "#ffffff";
+            ctx.lineWidth = this.pressed ? 4 : 3;
+            ctx.stroke();
+
+            // Inner highlight when pressed
+            if (this.pressed) {
+                ctx.globalAlpha = 0.35;
+                ctx.fillStyle = "#ffffff";
+                ctx.beginPath();
+                ctx.arc(this.x, cy, this.radius - 6, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Label
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = "#ffffff";
+            ctx.font = "bold 20px system-ui, sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText("ATK", this.x, cy);
+            ctx.textAlign = "start";
+            ctx.textBaseline = "alphabetic";
+
+            ctx.restore();
+        },
+    };
+
     // Convert a pointer event's clientX/Y into canvas-space coordinates
     // (the 960x540 internal grid). The canvas is CSS-scaled, so we
     // divide out that scale factor here.
@@ -642,6 +733,17 @@
 
     canvas.addEventListener("pointerdown", (e) => {
         const { x, y } = pointerToCanvas(e);
+
+        // Try the attack button first - it's a fixed rect, so this
+        // hit test is O(1) and never blocks the joystick since the
+        // button lives on the right half and the joystick only spawns
+        // on the left half.
+        if (attackButton.onDown(x, y, e.pointerId)) {
+            canvas.setPointerCapture(e.pointerId);
+            e.preventDefault();
+            return;
+        }
+
         if (joystick.onDown(x, y, e.pointerId)) {
             // Keep receiving move/up even if the pointer leaves the
             // canvas, which is especially important for touch drags.
@@ -651,14 +753,16 @@
     });
 
     canvas.addEventListener("pointermove", (e) => {
-        if (!joystick.active || joystick.pointerId !== e.pointerId) return;
-        const { x, y } = pointerToCanvas(e);
-        joystick.onMove(x, y, e.pointerId);
-        e.preventDefault();
+        if (joystick.pointerId === e.pointerId) {
+            const { x, y } = pointerToCanvas(e);
+            joystick.onMove(x, y, e.pointerId);
+            e.preventDefault();
+        }
     });
 
     function endPointer(e) {
         joystick.onUp(e.pointerId);
+        attackButton.onUp(e.pointerId);
     }
     canvas.addEventListener("pointerup", endPointer);
     canvas.addEventListener("pointercancel", endPointer);
@@ -1071,7 +1175,9 @@
     // ---------------------------------------------------------------
     function updateCombatInput() {
         if (!player.alive) return;
-        if (keysJustPressed[" "] || keysJustPressed["Spacebar"]) {
+        const keyboardAttack = keysJustPressed[" "] || keysJustPressed["Spacebar"];
+        const touchAttack = attackButton.consumeJustPressed();
+        if (keyboardAttack || touchAttack) {
             attack.tryStart(player);
         }
     }
@@ -1125,6 +1231,7 @@
         drawCooldownBar();
         drawEnemyCounter();
         joystick.draw(ctx);
+        attackButton.draw(ctx);
 
         if (!player.alive) drawGameOver();
     }
