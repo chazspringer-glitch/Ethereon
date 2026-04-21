@@ -282,7 +282,16 @@
             ],
             enemyCount: 7,
             enemyOpts: { hp: 4, speed: 100 },
-            exits: { west: "grove", east: "shrine" },
+            exits: {
+                west: "grove",
+                // Shrine gate is sealed. The Elder's second quest
+                // hands out the golden key that opens it.
+                east: {
+                    level: "shrine",
+                    keyId: "gold_key",
+                    lockedMessage: 'The shrine gate is sealed. You need a Golden Key.',
+                },
+            },
             npcs: [],
         },
         shrine: {
@@ -1929,6 +1938,9 @@
             target: 10,
             rewardXp: 80,
             rewardScore: 150,
+            // Hands over the shrine key on completion - gates the
+            // caverns-to-shrine transition behind this quest.
+            rewardItem: "gold_key",
             next: null,
         },
     };
@@ -1974,8 +1986,14 @@
             this.completedIds.add(tmpl.id);
             stats.addXp(tmpl.rewardXp);
             stats.addScore(tmpl.rewardScore);
+            if (tmpl.rewardItem) {
+                addToInventory(tmpl.rewardItem);
+            }
             sound.play("levelUp");
-            this.showToast(`Quest complete: ${tmpl.title}!`);
+            const itemSuffix = tmpl.rewardItem && ITEMS[tmpl.rewardItem]
+                ? `  (+ ${ITEMS[tmpl.rewardItem].name})`
+                : "";
+            this.showToast(`Quest complete: ${tmpl.title}!${itemSuffix}`);
             this.active = null;
         },
 
@@ -2032,6 +2050,16 @@
             name: "Gold Coin",
             color: "#ffd166",
             use(_player) { stats.addScore(20); },
+        },
+        // Keys are inventory tokens the door system consumes on
+        // unlock. `use` is a no-op - keys are spent by walking
+        // through a matching locked exit, not from the inventory.
+        gold_key: {
+            id: "gold_key",
+            name: "Golden Key",
+            color: "#ffd166",
+            isKey: true,
+            use(_player) {},
         },
     };
 
@@ -3079,6 +3107,64 @@
         }
     }
 
+    // Paints a small padlock hovering over each locked border gate
+    // in the current level. Stops rendering the moment the door is
+    // in `unlockedDoors`.
+    function drawLockIndicators(ctx) {
+        const exits = currentLevel.exits;
+        const fromId = currentLevel.id;
+        const sides = ["west", "east", "north", "south"];
+
+        for (const dir of sides) {
+            const exit = resolveExit(exits[dir]);
+            if (!exit || !exit.keyId) continue;
+            if (unlockedDoors.has(doorKey(fromId, dir))) continue;
+
+            let x, y;
+            const midX = WORLD_W / 2;
+            const midY = WORLD_H / 2;
+            const inset = 22;
+            if (dir === "west")       { x = inset;           y = midY; }
+            else if (dir === "east")  { x = WORLD_W - inset; y = midY; }
+            else if (dir === "north") { x = midX;            y = inset; }
+            else                      { x = midX;            y = WORLD_H - inset; }
+
+            drawPadlock(ctx, Math.round(x), Math.round(y));
+        }
+    }
+
+    // Small gold padlock: shackle + body + keyhole. Drawn at world
+    // coords so it scrolls with the border gate.
+    function drawPadlock(ctx, cx, cy) {
+        ctx.save();
+        // Faint dark halo so the lock reads on any tile behind it.
+        ctx.fillStyle = "rgba(12, 12, 22, 0.55)";
+        ctx.beginPath();
+        ctx.arc(cx, cy, 13, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Shackle
+        ctx.strokeStyle = "#ffd166";
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(cx, cy - 3, 5, Math.PI, 0);
+        ctx.stroke();
+
+        // Body
+        ctx.fillStyle = "#ffd166";
+        ctx.fillRect(cx - 7, cy - 2, 14, 11);
+        ctx.fillStyle = "#caa048";
+        ctx.fillRect(cx - 7, cy + 8, 14, 1);
+
+        // Keyhole
+        ctx.fillStyle = "#3c2818";
+        ctx.beginPath();
+        ctx.arc(cx, cy + 3, 1.6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillRect(cx - 0.8, cy + 3, 1.6, 4);
+        ctx.restore();
+    }
+
     // AABB test between a player-sized rect and a building door.
     function buildingDoorOverlap(b, p) {
         return (
@@ -3507,7 +3593,8 @@
                     { keywords: ["shop", "merchant", "buy"], response: "Hemlen's shop lies west of the plaza. Tell them the Elder sent you." },
                     { keywords: ["quest", "work", "job", "help"], response: "Hunts, mostly. Select 'Any work?' and I'll set you a task." },
                     { keywords: ["east", "cavern", "dungeon", "danger"], response: "East lies the Echo Caverns, and beyond, the Shrine. Tread carefully." },
-                    { keywords: ["shrine"], response: "The Shrine is old - older than the star-fall. Relics still stir there." },
+                    { keywords: ["shrine", "lock", "gate", "sealed"], response: "The shrine gate is sealed with a golden lock. Prove yourself, and I'll hand you the key." },
+                    { keywords: ["key", "golden", "unlock"], response: "Complete my second task - the Experienced Hunter - and the Golden Key is yours." },
                     { keywords: ["star", "fall", "sky"], response: "When the star fell, the world broke. We rebuilt here." },
                     { keywords: ["weapon", "sword", "energy"], response: "Begin with the sword. The energy blast is for those who prefer distance." },
                     { keywords: ["power", "ability"], response: "Your power move clears crowds - use it sparingly; it needs time to recharge." },
@@ -3594,7 +3681,8 @@
                     { keywords: ["name", "who"], response: "A scout. I watch the east gate." },
                     { keywords: ["east", "gate"], response: "East is the Echo Caverns. Don't go unprepared." },
                     { keywords: ["cavern"], response: "Enemies there hit harder than grove critters. Three blows each, at least." },
-                    { keywords: ["shrine"], response: "Past the caverns. Deep trouble - relic-bearing beasts." },
+                    { keywords: ["shrine", "lock", "sealed"], response: "The shrine's gate is locked past the caverns. The Elder holds the key." },
+                    { keywords: ["key", "golden", "unlock"], response: "The Golden Key? Elder's got it - earn it by finishing their second hunt." },
                     { keywords: ["weapon", "sword", "energy"], response: "Sword for quick work, energy for range. Switch with 1 / 2 or the swap button." },
                     { keywords: ["power", "ability"], response: "The power burst hits everyone around you. Save it for crowds." },
                     { keywords: ["heal", "health", "potion"], response: "Potions drop sometimes. Don't waste them on scratches." },
@@ -3644,7 +3732,8 @@
                     { keywords: ["potion", "heal", "health"], response: "Health potions will be first in stock when the caravan finally arrives." },
                     { keywords: ["sword", "weapon"], response: "I'll carry iron swords soon. For now, your starting blade serves." },
                     { keywords: ["caravan", "late", "overdue"], response: "Roads are rough east of here. I half suspect bandits - or worse." },
-                    { keywords: ["shrine"], response: "Lights. Humming. Nobody comes back happy from the shrine." },
+                    { keywords: ["shrine", "lock", "sealed", "gate"], response: "Lights. Humming. And a sealed gate. You'll need the Elder's Golden Key to even step inside." },
+                    { keywords: ["key", "golden", "unlock"], response: "Key's not for sale, friend - it's the Elder's to give. Do their tasks." },
                     { keywords: ["elder", "village"], response: "The Elder keeps order. A good sort, even if they drive a hard bargain." },
                     { keywords: ["gold", "money", "coin", "price"], response: "Coins open doors, traveler. Slay beasts, gather coin, prosper." },
                 ],
@@ -3843,15 +3932,66 @@
     // EXIT_TRIGGER_PX of the midpoint of an edge that has an exit.
     // Exit values can be either a level id string (player arrives
     // at the default inset on the opposite side) or an object like
-    // { level: "grove", arriveAt: { x, y } } for a specific warp
-    // point - used by interiors that pop the player back to the
-    // spot they entered from.
+    // { level: "grove", arriveAt: { x, y }, keyId: "gold_key",
+    //   lockedMessage: "..." } for specific warp points and/or
+    // locked doors. `keyId` gates the transition on the player
+    // carrying that inventory item; `lockedMessage` is the toast
+    // shown when they don't.
     function resolveExit(exit) {
-        if (typeof exit === "string") return { level: exit, arriveAt: null };
+        if (typeof exit === "string") {
+            return { level: exit, arriveAt: null, keyId: null, lockedMessage: null };
+        }
         if (exit && typeof exit === "object") {
-            return { level: exit.level, arriveAt: exit.arriveAt ?? null };
+            return {
+                level: exit.level,
+                arriveAt: exit.arriveAt ?? null,
+                keyId: exit.keyId ?? null,
+                lockedMessage: exit.lockedMessage ?? null,
+            };
         }
         return null;
+    }
+
+    // ---------------------------------------------------------------
+    // Locked doors
+    //
+    // An exit with a `keyId` blocks the transition until the player
+    // carries that item. The key is consumed the first time the door
+    // is opened, and the door is remembered in `unlockedDoors` keyed
+    // by "<levelId>:<direction>" so crossing back and forth after
+    // the initial unlock is free.
+    //
+    // Feedback toasts are throttled so a player mashing against the
+    // wall doesn't flood the screen.
+    // ---------------------------------------------------------------
+    const unlockedDoors = new Set();
+    function doorKey(levelId, dir) { return `${levelId}:${dir}`; }
+
+    let _lastLockedToast = 0;
+    function showLockedFeedback(msg) {
+        const now = performance.now();
+        if (now - _lastLockedToast < 1200) return;
+        _lastLockedToast = now;
+        questLog.showToast(msg ?? "The door is locked.", 1.8);
+    }
+
+    // Consumes the key (if needed + present) and marks the door
+    // unlocked. Returns true when the transition is allowed.
+    function tryUnlock(fromLevelId, dir, keyId) {
+        if (!keyId) return true;
+
+        const k = doorKey(fromLevelId, dir);
+        if (unlockedDoors.has(k)) return true;
+
+        const idx = player.inventory.indexOf(keyId);
+        if (idx === -1) return false;
+
+        player.inventory.splice(idx, 1);
+        unlockedDoors.add(k);
+        sound.play("levelUp");  // reuse the existing cheerful cue
+        const keyName = ITEMS[keyId]?.name ?? "key";
+        questLog.showToast(`${keyName} turns - the lock clicks open!`, 2.0);
+        return true;
     }
 
     function maybeTransitionOnEdge(nextX, nextY) {
@@ -3861,28 +4001,45 @@
         const pcy = nextY + player.height / 2;
 
         const exits = currentLevel.exits;
+        const fromId = currentLevel.id;
 
         const west = resolveExit(exits.west);
         if (west && nextX < 0 &&
             Math.abs(pcy - midY) < EXIT_TRIGGER_PX) {
+            if (!tryUnlock(fromId, "west", west.keyId)) {
+                showLockedFeedback(west.lockedMessage);
+                return false;
+            }
             transitionTo(west.level, "east", west.arriveAt);
             return true;
         }
         const east = resolveExit(exits.east);
         if (east && nextX + player.width > WORLD_W &&
             Math.abs(pcy - midY) < EXIT_TRIGGER_PX) {
+            if (!tryUnlock(fromId, "east", east.keyId)) {
+                showLockedFeedback(east.lockedMessage);
+                return false;
+            }
             transitionTo(east.level, "west", east.arriveAt);
             return true;
         }
         const north = resolveExit(exits.north);
         if (north && nextY < 0 &&
             Math.abs(pcx - midX) < EXIT_TRIGGER_PX) {
+            if (!tryUnlock(fromId, "north", north.keyId)) {
+                showLockedFeedback(north.lockedMessage);
+                return false;
+            }
             transitionTo(north.level, "south", north.arriveAt);
             return true;
         }
         const south = resolveExit(exits.south);
         if (south && nextY + player.height > WORLD_H &&
             Math.abs(pcx - midX) < EXIT_TRIGGER_PX) {
+            if (!tryUnlock(fromId, "south", south.keyId)) {
+                showLockedFeedback(south.lockedMessage);
+                return false;
+            }
             transitionTo(south.level, "north", south.arriveAt);
             return true;
         }
@@ -4277,6 +4434,9 @@
         // Shop - close any open shop window.
         shop.close();
 
+        // Doors - a fresh run means fresh locks.
+        unlockedDoors.clear();
+
         // Weapons - back to the starting loadout, clear any in-flight
         // projectiles, and reset each weapon's internal timers.
         player.weaponIndex = 0;
@@ -4341,6 +4501,9 @@
         // and roof. Drawn beneath NPCs and the player so characters
         // read on top when standing in front.
         for (const b of currentLevel.buildings || []) drawBuilding(ctx, b);
+
+        // Padlock icon on any still-locked border gate.
+        drawLockIndicators(ctx);
 
         // NPCs - one per entry in the current level's roster. Drawn
         // beneath the player so the player always reads on top. Each
