@@ -5,12 +5,13 @@
  *   - Input:   tracks which keys are held and which were pressed this frame.
  *   - Player:  entity state (position, size, facing direction).
  *   - Attack:  self-contained combat module (state, timers, hitbox, draw).
+ *   - Enemies: Enemy class + a flat array of instances.
  *   - Update:  advances game state based on time elapsed.
  *   - Draw:    renders the current game state to the canvas.
  *   - Loop:    a requestAnimationFrame loop that calls update/draw every frame.
  *
  * Everything is vanilla JS - no libraries. Expand by adding new entities,
- * collision, maps, enemies, etc. in their own clearly-named sections.
+ * collision, maps, etc. in their own clearly-named sections.
  */
 
 (() => {
@@ -95,6 +96,10 @@
         dirX: 1,
         dirY: 0,
 
+        // Tracks which enemies the current swing has already hit, so
+        // one swing can't damage the same enemy on multiple frames.
+        hitEnemies: new Set(),
+
         tryStart(entity) {
             if (this.active || this.cooldownTimer > 0) return false;
             this.active = true;
@@ -102,6 +107,7 @@
             this.progress = 0;
             this.dirX = entity.facing.x;
             this.dirY = entity.facing.y;
+            this.hitEnemies.clear();
             return true;
         },
 
@@ -167,6 +173,131 @@
     };
 
     // ---------------------------------------------------------------
+    // Geometry helpers
+    // ---------------------------------------------------------------
+    // AABB overlap. Uses {x, y, w, h}. Cheap; safe to call per enemy.
+    function rectsOverlap(a, b) {
+        return (
+            a.x < b.x + b.w &&
+            a.x + a.w > b.x &&
+            a.y < b.y + b.h &&
+            a.y + a.h > b.y
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Enemy class
+    //
+    // Each enemy is a small stateful object that moves toward a
+    // target (the player) each frame. Kept as a class so multiple
+    // enemies - or later subclasses like RangedEnemy, BossEnemy -
+    // can share this interface.
+    //
+    // `alive` acts as a tombstone; the enemies array is compacted
+    // once per frame so dead enemies don't linger in memory.
+    // ---------------------------------------------------------------
+    class Enemy {
+        constructor(x, y, opts = {}) {
+            this.x = x;
+            this.y = y;
+            this.width = opts.width ?? 28;
+            this.height = opts.height ?? 28;
+            this.speed = opts.speed ?? 90;
+            this.color = opts.color ?? "#e06666";
+            this.hp = opts.hp ?? 1;
+            this.maxHp = this.hp;
+            this.alive = true;
+        }
+
+        update(dt, target) {
+            if (!this.alive) return;
+
+            // Steer toward the target's center using a unit vector,
+            // so diagonal approach isn't faster than cardinal approach.
+            const cx = this.x + this.width / 2;
+            const cy = this.y + this.height / 2;
+            const tx = target.x + target.width / 2;
+            const ty = target.y + target.height / 2;
+
+            const dx = tx - cx;
+            const dy = ty - cy;
+            const dist = Math.hypot(dx, dy);
+
+            if (dist > 0.5) {
+                const inv = 1 / dist;
+                this.x += dx * inv * this.speed * dt;
+                this.y += dy * inv * this.speed * dt;
+            }
+        }
+
+        draw(ctx) {
+            if (!this.alive) return;
+            ctx.fillStyle = this.color;
+            ctx.fillRect(this.x, this.y, this.width, this.height);
+
+            // Tiny HP pip so future multi-hit enemies are readable.
+            if (this.maxHp > 1) {
+                const frac = Math.max(0, this.hp / this.maxHp);
+                ctx.fillStyle = "#1a1a24";
+                ctx.fillRect(this.x, this.y - 6, this.width, 3);
+                ctx.fillStyle = "#7ad17a";
+                ctx.fillRect(this.x, this.y - 6, this.width * frac, 3);
+            }
+        }
+
+        takeHit(damage = 1) {
+            this.hp -= damage;
+            if (this.hp <= 0) this.alive = false;
+        }
+
+        // Expose a rect in the shape used by rectsOverlap/getHitbox.
+        bounds() {
+            return { x: this.x, y: this.y, w: this.width, h: this.height };
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Enemy spawning
+    // ---------------------------------------------------------------
+    const enemies = [];
+
+    function spawnEnemy(x, y, opts) {
+        enemies.push(new Enemy(x, y, opts));
+    }
+
+    // Spawn a starting group at the four corners of the arena.
+    spawnEnemy(60, 60);
+    spawnEnemy(WIDTH - 90, 60);
+    spawnEnemy(60, HEIGHT - 90);
+    spawnEnemy(WIDTH - 90, HEIGHT - 90);
+
+    // ---------------------------------------------------------------
+    // Enemy update + collision with the player's attack
+    // ---------------------------------------------------------------
+    function updateEnemies(dt) {
+        // Reverse iteration lets us splice dead enemies cheaply.
+        for (let i = enemies.length - 1; i >= 0; i--) {
+            const e = enemies[i];
+            e.update(dt, player);
+            if (!e.alive) enemies.splice(i, 1);
+        }
+    }
+
+    function updateAttackCollision() {
+        if (!attack.active) return;
+        const box = attack.getHitbox(player);
+        if (!box) return;
+
+        for (const e of enemies) {
+            if (!e.alive || attack.hitEnemies.has(e)) continue;
+            if (rectsOverlap(box, e.bounds())) {
+                e.takeHit(1);
+                attack.hitEnemies.add(e);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
     // Movement - reads input, moves the player, updates facing.
     // ---------------------------------------------------------------
     function updateMovement(dt) {
@@ -215,6 +346,8 @@
         updateMovement(dt);
         updateCombatInput();
         attack.update(dt);
+        updateEnemies(dt);
+        updateAttackCollision();
         clearJustPressed();
     }
 
@@ -229,6 +362,9 @@
         // A simple grid to give a sense of movement.
         drawGrid(32, "#33334a");
 
+        // Enemies beneath the player so the player always reads on top.
+        for (const e of enemies) e.draw(ctx);
+
         // Player
         ctx.fillStyle = player.color;
         ctx.fillRect(player.x, player.y, player.width, player.height);
@@ -236,8 +372,15 @@
         // Attack hitbox on top of the player.
         attack.draw(ctx, player);
 
-        // HUD: cooldown indicator.
+        // HUD
         drawCooldownBar();
+        drawEnemyCounter();
+    }
+
+    function drawEnemyCounter() {
+        ctx.fillStyle = "#a0a0b8";
+        ctx.font = "12px system-ui, sans-serif";
+        ctx.fillText(`Enemies: ${enemies.length}`, WIDTH - 96, HEIGHT - 16);
     }
 
     function drawGrid(cellSize, color) {
