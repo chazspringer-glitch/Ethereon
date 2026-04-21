@@ -575,6 +575,8 @@
         keys[e.key] = true;
         // Stop the page from scrolling with arrow keys or space.
         if (e.key.startsWith("Arrow") || e.key === " ") e.preventDefault();
+        // First key press on mobile / post-reload unlocks audio.
+        sound.resume();
     });
 
     window.addEventListener("keyup", (e) => {
@@ -584,6 +586,124 @@
     function clearJustPressed() {
         for (const k in keysJustPressed) delete keysJustPressed[k];
     }
+
+    // ---------------------------------------------------------------
+    // Sound
+    //
+    // Uses the Web Audio API directly (no asset files, no library) to
+    // synthesize short placeholder blips for attack, enemy hit, and
+    // player damage. Each effect is one oscillator + one gain
+    // envelope - cheap, latency-free, and auto-cleans up after
+    // `stop()`.
+    //
+    // Spam protection: every named effect has a per-effect cooldown
+    // (`cooldowns[name]`). `play(name)` no-ops if the last play was
+    // within that window - so a single swing that hits two enemies
+    // in the same frame plays only one hit sound, and rapid-fire
+    // damage tickles can't drown the mix.
+    //
+    // Mobile autoplay: AudioContexts start suspended on iOS / Chrome
+    // until a user gesture. `resume()` is called from the existing
+    // keydown and pointerdown handlers so the first input unlocks
+    // audio transparently.
+    // ---------------------------------------------------------------
+    const sound = {
+        ctx: null,
+        master: null,
+        enabled: true,
+        lastPlayed: Object.create(null),
+
+        // Minimum seconds between successive plays of the same effect.
+        cooldowns: {
+            attack: 0.08,
+            enemyHit: 0.05,
+            playerHurt: 0.4,
+        },
+
+        _init() {
+            if (this.ctx || !this.enabled) return;
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) { this.enabled = false; return; }
+            try {
+                this.ctx = new Ctor();
+                this.master = this.ctx.createGain();
+                this.master.gain.value = 0.35;
+                this.master.connect(this.ctx.destination);
+            } catch (_e) {
+                this.enabled = false;
+            }
+        },
+
+        resume() {
+            if (!this.enabled) return;
+            this._init();
+            if (this.ctx && this.ctx.state === "suspended") {
+                this.ctx.resume();
+            }
+        },
+
+        play(name) {
+            if (!this.enabled) return;
+            this._init();
+            if (!this.ctx) return;
+
+            const now = this.ctx.currentTime;
+            const cd = this.cooldowns[name] ?? 0;
+            if (now - (this.lastPlayed[name] ?? -Infinity) < cd) return;
+            this.lastPlayed[name] = now;
+
+            switch (name) {
+                case "attack":     this._attack(now); break;
+                case "enemyHit":   this._enemyHit(now); break;
+                case "playerHurt": this._playerHurt(now); break;
+            }
+        },
+
+        // Short rising square-wave blip - "swish".
+        _attack(t) {
+            const osc = this.ctx.createOscillator();
+            const g = this.ctx.createGain();
+            osc.type = "square";
+            osc.frequency.setValueAtTime(220, t);
+            osc.frequency.exponentialRampToValueAtTime(640, t + 0.07);
+            g.gain.setValueAtTime(0.0001, t);
+            g.gain.exponentialRampToValueAtTime(0.3, t + 0.01);
+            g.gain.exponentialRampToValueAtTime(0.0001, t + 0.1);
+            osc.connect(g).connect(this.master);
+            osc.start(t);
+            osc.stop(t + 0.12);
+        },
+
+        // Sharp descending square - "thwack".
+        _enemyHit(t) {
+            const osc = this.ctx.createOscillator();
+            const g = this.ctx.createGain();
+            osc.type = "square";
+            osc.frequency.setValueAtTime(460, t);
+            osc.frequency.exponentialRampToValueAtTime(140, t + 0.08);
+            g.gain.setValueAtTime(0.0001, t);
+            g.gain.exponentialRampToValueAtTime(0.35, t + 0.005);
+            g.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
+            osc.connect(g).connect(this.master);
+            osc.start(t);
+            osc.stop(t + 0.1);
+        },
+
+        // Low buzzy sawtooth with a pitch drop - "hurt".
+        _playerHurt(t) {
+            const osc = this.ctx.createOscillator();
+            const g = this.ctx.createGain();
+            osc.type = "sawtooth";
+            osc.frequency.setValueAtTime(180, t);
+            osc.frequency.exponentialRampToValueAtTime(80, t + 0.2);
+            g.gain.setValueAtTime(0.0001, t);
+            g.gain.exponentialRampToValueAtTime(0.35, t + 0.01);
+            g.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+            osc.connect(g).connect(this.master);
+            osc.start(t);
+            osc.stop(t + 0.24);
+        },
+    };
 
     // ---------------------------------------------------------------
     // Virtual joystick (touch / pointer)
@@ -792,6 +912,9 @@
     }
 
     canvas.addEventListener("pointerdown", (e) => {
+        // First touch / click on mobile unlocks audio.
+        sound.resume();
+
         const { x, y } = pointerToCanvas(e);
 
         // Try the attack button first - it's a fixed rect, so this
@@ -880,6 +1003,7 @@
 
         player.hp = Math.max(0, player.hp - final);
         player.iframes = player.iframeDuration;
+        sound.play("playerHurt");
 
         if (player.hp <= 0) player.alive = false;
     }
@@ -974,6 +1098,7 @@
             this.dirX = entity.facing.x;
             this.dirY = entity.facing.y;
             this.hitEnemies.clear();
+            sound.play("attack");
             return true;
         },
 
@@ -1156,6 +1281,7 @@
         takeHit(damage = 1) {
             this.hp -= damage;
             this.hitFlash = this.hitFlashDuration;
+            sound.play("enemyHit");
             if (this.hp <= 0) this.alive = false;
         }
 
