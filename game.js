@@ -986,6 +986,9 @@
         // functions here that take (amount) and return a modified amount
         // (e.g. armor reduction, damage resistance).
         damageModifiers: [],
+
+        // Collected items, flat array of ids from the ITEMS catalog.
+        inventory: [],
     };
 
     // ---------------------------------------------------------------
@@ -1053,6 +1056,129 @@
             this.kills = 0;
         },
     };
+
+    // ---------------------------------------------------------------
+    // Items & inventory
+    //
+    // Design:
+    //   ITEMS is a read-only catalog of item *templates* keyed by id.
+    //   Each template carries display info (name, color) and a `use`
+    //   function - the extension point for item effects. Potions,
+    //   gold, weapons, keys, etc. all live here with no changes
+    //   needed to pickup, drop, or rendering code.
+    //
+    //   `player.inventory` is a flat array of item ids. Counts are
+    //   computed on demand at draw time, which keeps add/remove O(1)
+    //   and the structure obvious. For a future 9-slot hotbar you'd
+    //   either cap the array or split it into hotbar + backpack.
+    //
+    //   `drops` holds world-space item entities that exist until the
+    //   player walks over them. A separate concern from inventory so
+    //   either can evolve independently (timed despawn, magnet
+    //   pickup radius, etc.).
+    // ---------------------------------------------------------------
+    const ITEMS = {
+        potion: {
+            id: "potion",
+            name: "Health Potion",
+            color: "#e06666",
+            // Plugs into the existing healPlayer chokepoint. When a
+            // "use" flow is wired in, this fires.
+            use(_player) { healPlayer(30); },
+        },
+        coin: {
+            id: "coin",
+            name: "Gold Coin",
+            color: "#ffd166",
+            use(_player) { stats.addScore(20); },
+        },
+    };
+
+    // Helpers on the player. Defined here (rather than as methods on
+    // the object literal) so future effects can call back into the
+    // game's systems without circular setup order.
+    function addToInventory(itemId) {
+        player.inventory.push(itemId);
+    }
+
+    // Removes the item at `index` and runs its use effect. Not wired
+    // to a key yet - kept here as the single chokepoint for future
+    // hotbar bindings.
+    function useInventoryItem(index) {
+        const id = player.inventory[index];
+        if (!id) return;
+        const tmpl = ITEMS[id];
+        if (!tmpl) return;
+        player.inventory.splice(index, 1);
+        tmpl.use(player);
+    }
+
+    // World drops - stay in world space, picked up on overlap.
+    const drops = [];
+
+    function spawnDrop(x, y, itemId) {
+        drops.push({ x, y, itemId, age: 0 });
+    }
+
+    // Rolls on enemy death. Tunable drop table in one place.
+    function rollEnemyDrop(enemy) {
+        const r = Math.random();
+        const cx = enemy.x + enemy.width / 2;
+        const cy = enemy.y + enemy.height / 2;
+        if (r < 0.25)      spawnDrop(cx, cy, "potion");
+        else if (r < 0.55) spawnDrop(cx, cy, "coin");
+        // else nothing
+    }
+
+    function updateDrops(_dt) {
+        if (!player.alive) return;
+        const pxMin = player.x;
+        const pyMin = player.y;
+        const pxMax = player.x + player.width;
+        const pyMax = player.y + player.height;
+
+        for (let i = drops.length - 1; i >= 0; i--) {
+            const d = drops[i];
+            d.age += _dt;
+            const dxMin = d.x - 8;
+            const dyMin = d.y - 8;
+            const dxMax = d.x + 8;
+            const dyMax = d.y + 8;
+            if (
+                pxMin < dxMax && pxMax > dxMin &&
+                pyMin < dyMax && pyMax > dyMin
+            ) {
+                addToInventory(d.itemId);
+                drops.splice(i, 1);
+            }
+        }
+    }
+
+    function drawDrops(ctx) {
+        for (const d of drops) {
+            const tmpl = ITEMS[d.itemId];
+            if (!tmpl) continue;
+            const bob = Math.sin(d.age * 6) * 2;
+            const cx = Math.round(d.x);
+            const cy = Math.round(d.y + bob);
+
+            // Shadow - always at the drop's baseline so bob reads.
+            ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
+            ctx.beginPath();
+            ctx.ellipse(cx, Math.round(d.y + 10), 7, 2.5, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Body
+            ctx.fillStyle = tmpl.color;
+            ctx.fillRect(cx - 5, cy - 5, 10, 10);
+            // Tiny specular
+            ctx.fillStyle = "rgba(255, 255, 255, 0.35)";
+            ctx.fillRect(cx - 4, cy - 4, 3, 2);
+        }
+    }
+
+    // Inventory UI toggle state. Set from the `I` key in update().
+    let inventoryOpen = false;
 
     // ---------------------------------------------------------------
     // Attack module
@@ -1474,7 +1600,10 @@
                 // Only award once per enemy, right when the hit is
                 // what killed them - multi-hit enemies (opts.hp > 1)
                 // won't award until the final blow.
-                if (!e.alive) stats.addKill(e);
+                if (!e.alive) {
+                    stats.addKill(e);
+                    rollEnemyDrop(e);
+                }
             }
         }
     }
@@ -1618,6 +1747,11 @@
             return;
         }
 
+        // Inventory toggle - edge-triggered, alive-only.
+        if (keysJustPressed["i"] || keysJustPressed["I"]) {
+            inventoryOpen = !inventoryOpen;
+        }
+
         updateMovement(dt);
         updateCombatInput();
         attack.update(dt);
@@ -1625,6 +1759,7 @@
         updateAttackCollision();
         updateEnemyContact();
         updatePlayerStatus(dt);
+        updateDrops(dt);
         spawner.update(dt);
         camera.follow(player, dt);
         clearJustPressed();
@@ -1667,6 +1802,11 @@
         spawner.reset();
         spawner.seed();
 
+        // Inventory / drops / UI state - fresh run has no loot.
+        player.inventory.length = 0;
+        drops.length = 0;
+        inventoryOpen = false;
+
         // Camera - jump straight to the player so the world doesn't
         // pan in from wherever the death happened.
         camera.snap(player);
@@ -1704,6 +1844,10 @@
 
         world.draw(ctx, camera);
 
+        // Drops beneath enemies and player so they can't be obscured
+        // by a live enemy standing over the same tile.
+        drawDrops(ctx);
+
         // Enemies beneath the player so the player always reads on top.
         for (const e of enemies) e.draw(ctx);
 
@@ -1725,6 +1869,7 @@
         joystick.draw(ctx);
         attackButton.draw(ctx);
 
+        if (inventoryOpen) drawInventory();
         if (!player.alive) drawGameOver();
     }
 
@@ -1847,6 +1992,89 @@
             `HP  ${Math.ceil(player.hp)} / ${player.maxHp}`,
             x + barW + 10, y + barH / 2,
             "#e8e8f0",
+            "12px system-ui, sans-serif"
+        );
+
+        ctx.restore();
+    }
+
+    // Inventory panel - centered on screen. Aggregates `player.inventory`
+    // into counts at draw time, so add/remove stays O(1) and the UI
+    // stays accurate without a dedicated counts cache.
+    function drawInventory() {
+        const w = 340;
+        const h = 260;
+        const x = Math.floor((VIEW_W - w) / 2);
+        const y = Math.floor((VIEW_H - h) / 2);
+
+        // Dim the world behind the panel.
+        ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+        ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+        // Panel (reuses the rounded-rect + shadow-text helpers).
+        ctx.save();
+        roundRectPath(ctx, x, y, w, h, 10);
+        ctx.fillStyle = "rgba(18, 18, 30, 0.92)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255, 209, 102, 0.45)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Title
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        drawShadowedText(
+            "INVENTORY",
+            x + w / 2, y + 14,
+            "#ffd166",
+            "bold 18px system-ui, sans-serif"
+        );
+
+        // Build counts from the flat id array.
+        const counts = Object.create(null);
+        for (const id of player.inventory) {
+            counts[id] = (counts[id] ?? 0) + 1;
+        }
+        const ids = Object.keys(counts);
+
+        if (ids.length === 0) {
+            drawShadowedText(
+                "( empty )",
+                x + w / 2, y + 60,
+                "#a0a0b8",
+                "14px system-ui, sans-serif"
+            );
+        } else {
+            ctx.textAlign = "left";
+            let ly = y + 54;
+            for (const id of ids) {
+                const tmpl = ITEMS[id];
+                if (!tmpl) continue;
+
+                // Colored swatch
+                ctx.fillStyle = tmpl.color;
+                ctx.fillRect(x + 28, ly + 4, 12, 12);
+                ctx.strokeStyle = "rgba(0, 0, 0, 0.6)";
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x + 28.5, ly + 4.5, 11, 11);
+
+                // Name + count
+                drawShadowedText(
+                    `${tmpl.name}  x${counts[id]}`,
+                    x + 50, ly + 3,
+                    "#e8e8f0",
+                    "14px system-ui, sans-serif"
+                );
+                ly += 24;
+            }
+        }
+
+        // Close hint
+        ctx.textAlign = "center";
+        drawShadowedText(
+            "Press  I  to close",
+            x + w / 2, y + h - 30,
+            "#a0a0b8",
             "12px system-ui, sans-serif"
         );
 
