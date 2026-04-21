@@ -109,10 +109,17 @@
     resizeDisplay();
 
     const TILE = 32;
-    const WORLD_COLS = 75;          // 75 * 32 = 2400
-    const WORLD_ROWS = 56;          // 56 * 32 = 1792
-    const WORLD_W = TILE * WORLD_COLS;
-    const WORLD_H = TILE * WORLD_ROWS;
+    // Default (outdoor) zone size. Interiors override via level.cols/rows.
+    // These are `let` so `world.load` can resize the playable area
+    // between zones - the tile buffer itself is allocated once at the
+    // max dimensions below and only the first (cols * rows) entries
+    // are touched for smaller levels.
+    const MAX_WORLD_COLS = 75;          // 75 * 32 = 2400
+    const MAX_WORLD_ROWS = 56;          // 56 * 32 = 1792
+    let WORLD_COLS = MAX_WORLD_COLS;
+    let WORLD_ROWS = MAX_WORLD_ROWS;
+    let WORLD_W = TILE * WORLD_COLS;
+    let WORLD_H = TILE * WORLD_ROWS;
 
     // ---------------------------------------------------------------
     // Game state machine
@@ -191,6 +198,28 @@
             enemyOpts: {},
             exits: { east: "caverns" },
             npcs: [],  // filled in after NPC_TEMPLATES
+            // One visible building for now. Each entry is a flat rect
+            // with a door sub-rect; walking into the door rect triggers
+            // a level transition to `interior`. Add more shops / inn
+            // / houses by pushing more objects here.
+            buildings: [
+                {
+                    id: "shop",
+                    label: "SHOP",
+                    // Building body
+                    x: 940, y: 756, w: 160, h: 130,
+                    // Door (visible + trigger rect), bottom-center
+                    doorX: 1004, doorY: 862, doorW: 32, doorH: 24,
+                    // Visual tints
+                    wall: "#8c5a3c",
+                    roof: "#5a3a22",
+                    // Which level opens when the player enters.
+                    interior: "shop_interior",
+                    // Where to drop the player inside the interior
+                    // (near its south door so they can walk out again).
+                    entry: { x: 224, y: 250 },
+                },
+            ],
         },
         caverns: {
             id: "caverns",
@@ -222,6 +251,34 @@
             exits: { west: "caverns" },
             npcs: [],
         },
+
+        // Interior of the grove shop. Much smaller than an outdoor
+        // level - cols/rows override the defaults, and the camera
+        // module auto-centers any level smaller than the viewport.
+        // The south wall has a path gap that serves as the exit;
+        // walking through it transitions back to the grove at a
+        // spot just south of the shop building.
+        shop_interior: {
+            id: "shop_interior",
+            name: "The Merchant's Shop",
+            safe: true,
+            cols: 15, rows: 10,        // 480 x 320 px
+            baseTile: TILE_PATH,        // wood-like floor
+            borderTile: TILE_STONE,
+            scatter: [],
+            enemyCount: 0,
+            enemyOpts: {},
+            exits: {
+                south: {
+                    level: "grove",
+                    // Drop the player just below the shop building's door.
+                    arriveAt: { x: 1004, y: 896 },
+                },
+            },
+            npcs: [],  // merchant appended after dialogue is defined
+            buildings: [],
+            isInterior: true,
+        },
     };
 
     // Zone = level.id. The current zone is used for high-level
@@ -245,14 +302,16 @@
     // the outer wall, cuts openings in the wall where exits exist, and
     // scatters decoration through a hash-driven lookup.
     function tileAt(level, c, r) {
+        const cols = level.cols ?? MAX_WORLD_COLS;
+        const rows = level.rows ?? MAX_WORLD_ROWS;
         const onNorth = r === 0;
-        const onSouth = r === WORLD_ROWS - 1;
+        const onSouth = r === rows - 1;
         const onWest = c === 0;
-        const onEast = c === WORLD_COLS - 1;
+        const onEast = c === cols - 1;
 
         if (onNorth || onSouth || onWest || onEast) {
-            const midR = Math.floor(WORLD_ROWS / 2);
-            const midC = Math.floor(WORLD_COLS / 2);
+            const midR = Math.floor(rows / 2);
+            const midC = Math.floor(cols / 2);
             if (onWest && level.exits.west && Math.abs(r - midR) <= EXIT_GAP_TILES) return TILE_PATH;
             if (onEast && level.exits.east && Math.abs(r - midR) <= EXIT_GAP_TILES) return TILE_PATH;
             if (onNorth && level.exits.north && Math.abs(c - midC) <= EXIT_GAP_TILES) return TILE_PATH;
@@ -275,14 +334,29 @@
         width: WORLD_W,
         height: WORLD_H,
         tileSize: TILE,
-        data: new Uint8Array(WORLD_COLS * WORLD_ROWS),
+        // Allocated at max dimensions once so interiors / zones of
+        // any size up to MAX_WORLD_* fit without realloc.
+        data: new Uint8Array(MAX_WORLD_COLS * MAX_WORLD_ROWS),
 
         // Regenerate tile data from a level definition. Used at boot
-        // and on every room-to-room transition.
+        // and on every room-to-room transition. Updates the global
+        // WORLD_* dimensions so camera clamps, player clamps, and
+        // every other client of those values follow the level.
         load(level) {
-            for (let r = 0; r < WORLD_ROWS; r++) {
-                for (let c = 0; c < WORLD_COLS; c++) {
-                    this.data[r * WORLD_COLS + c] = tileAt(level, c, r);
+            const cols = level.cols ?? MAX_WORLD_COLS;
+            const rows = level.rows ?? MAX_WORLD_ROWS;
+            WORLD_COLS = cols;
+            WORLD_ROWS = rows;
+            WORLD_W = cols * TILE;
+            WORLD_H = rows * TILE;
+            this.cols = cols;
+            this.rows = rows;
+            this.width = WORLD_W;
+            this.height = WORLD_H;
+
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    this.data[r * cols + c] = tileAt(level, c, r);
                 }
             }
         },
@@ -458,8 +532,19 @@
         },
 
         clamp() {
-            this.x = Math.max(0, Math.min(WORLD_W - VIEW_W, this.x));
-            this.y = Math.max(0, Math.min(WORLD_H - VIEW_H, this.y));
+            // When a level is smaller than the viewport (e.g. a shop
+            // interior) center the world inside the screen instead of
+            // pinning to the corner.
+            if (WORLD_W <= VIEW_W) {
+                this.x = (WORLD_W - VIEW_W) / 2;
+            } else {
+                this.x = Math.max(0, Math.min(WORLD_W - VIEW_W, this.x));
+            }
+            if (WORLD_H <= VIEW_H) {
+                this.y = (WORLD_H - VIEW_H) / 2;
+            } else {
+                this.y = Math.max(0, Math.min(WORLD_H - VIEW_H, this.y));
+            }
         },
     };
 
@@ -1491,6 +1576,13 @@
         // until playing is active.
         if (gameState === "intro") {
             startGame();
+            e.preventDefault();
+            return;
+        }
+
+        // Shop is modal - taps only hit item rows or the close button.
+        if (shop.isOpen()) {
+            handleShopPointer(x, y);
             e.preventDefault();
             return;
         }
@@ -2840,6 +2932,99 @@
         return best;
     }
 
+    // Simple world-space building sprite. Walls + overhanging roof +
+    // a door with handle, plus a gold "SHOP" / similar label above
+    // the roof. Keeps the city readable without needing real art.
+    function drawBuilding(ctx, b) {
+        const x = b.x;
+        const y = b.y;
+
+        // Walls
+        ctx.fillStyle = b.wall ?? "#8c5a3c";
+        ctx.fillRect(x, y, b.w, b.h);
+        // Faint top highlight
+        ctx.fillStyle = "rgba(255, 255, 255, 0.10)";
+        ctx.fillRect(x, y, b.w, 5);
+        // Vertical plank shading
+        ctx.fillStyle = "rgba(0, 0, 0, 0.14)";
+        for (let i = 20; i < b.w; i += 20) {
+            ctx.fillRect(x + i, y + 6, 1, b.h - 6);
+        }
+
+        // Roof overhang (wraps past the walls)
+        ctx.fillStyle = b.roof ?? "#5a3a22";
+        ctx.fillRect(x - 6, y - 18, b.w + 12, 18);
+        ctx.fillStyle = "#3c2818";
+        ctx.fillRect(x - 6, y - 18, b.w + 12, 3);
+
+        // Window panes flanking the door
+        const windY = y + Math.floor(b.h * 0.35);
+        ctx.fillStyle = "#3c2818";
+        ctx.fillRect(x + 16, windY, 24, 20);
+        ctx.fillRect(x + b.w - 40, windY, 24, 20);
+        ctx.fillStyle = "#8ad9ff";
+        ctx.fillRect(x + 18, windY + 2, 20, 16);
+        ctx.fillRect(x + b.w - 38, windY + 2, 20, 16);
+        ctx.fillStyle = "rgba(255, 255, 255, 0.35)";
+        ctx.fillRect(x + 18, windY + 2, 20, 4);
+        ctx.fillRect(x + b.w - 38, windY + 2, 20, 4);
+
+        // Door frame + door
+        ctx.fillStyle = "#3c2818";
+        ctx.fillRect(b.doorX - 2, b.doorY - 2, b.doorW + 4, b.doorH + 2);
+        ctx.fillStyle = "#d4a574";
+        ctx.fillRect(b.doorX, b.doorY, b.doorW, b.doorH);
+        // Door plank seam
+        ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
+        ctx.fillRect(b.doorX + b.doorW / 2 - 0.5, b.doorY + 2, 1, b.doorH - 4);
+        // Door handle
+        ctx.fillStyle = "#ffd166";
+        ctx.fillRect(b.doorX + b.doorW - 6, b.doorY + b.doorH / 2 - 1, 2, 2);
+
+        // Label above the roof - shadow + gold
+        if (b.label) {
+            ctx.save();
+            ctx.textAlign = "center";
+            ctx.textBaseline = "bottom";
+            ctx.font = "bold 13px system-ui, sans-serif";
+            ctx.fillStyle = "rgba(0, 0, 0, 0.65)";
+            ctx.fillText(b.label, x + b.w / 2 + 1, y - 22 + 1);
+            ctx.fillStyle = "#ffd166";
+            ctx.fillText(b.label, x + b.w / 2, y - 22);
+            ctx.restore();
+        }
+
+        // Small "enter" hint when the player is right on the door.
+        if (gameState === "playing" && buildingDoorOverlap(b, player)) {
+            const bx = b.doorX + b.doorW / 2;
+            const by = b.doorY - 12;
+            ctx.save();
+            ctx.fillStyle = "#1a1a24";
+            ctx.beginPath();
+            ctx.arc(bx, by, 11, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = "#ffd166";
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+            ctx.fillStyle = "#ffd166";
+            ctx.font = "bold 13px system-ui, sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText("E", bx, by + 1);
+            ctx.restore();
+        }
+    }
+
+    // AABB test between a player-sized rect and a building door.
+    function buildingDoorOverlap(b, p) {
+        return (
+            p.x < b.doorX + b.doorW &&
+            p.x + p.width > b.doorX &&
+            p.y < b.doorY + b.doorH &&
+            p.y + p.height > b.doorY
+        );
+    }
+
     function drawNpc(ctx, n) {
         const x = Math.round(n.x);
         const y = Math.round(n.y);
@@ -2947,6 +3132,42 @@
     // power) is gated on `dialogue.isOpen()` so the world pauses
     // while the box is up.
     // ---------------------------------------------------------------
+
+    // ---------------------------------------------------------------
+    // Shop
+    //
+    // Modal storefront UI opened from an NPC dialogue option
+    // (merchant's "Browse wares"). Shows a scrollable list of
+    // placeholder items with name / effect / price. No purchase
+    // flow yet - items render as read-only rows with a note that
+    // the shop is coming soon. Designed so adding a buy-on-tap
+    // handler later is a one-liner inside selectItem().
+    // ---------------------------------------------------------------
+    const SHOP_ITEMS = [
+        { id: "potion",     name: "Health Potion",   effect: "Restores 30 HP",    price: 15 },
+        { id: "iron_sword", name: "Iron Sword",      effect: "+1 sword damage",   price: 60 },
+        { id: "focus_gem",  name: "Focus Gem",       effect: "Faster cooldowns",  price: 80 },
+        { id: "shield",     name: "Wooden Shield",   effect: "Reduces damage",    price: 120 },
+        { id: "elixir",     name: "Ethereon Elixir", effect: "Unknown...",        price: 500 },
+    ];
+
+    const shop = {
+        open_: false,
+        itemRects: [],
+        closeRect: null,
+
+        open()  { this.open_ = true;  this.itemRects = []; this.closeRect = null; },
+        close() { this.open_ = false; this.itemRects = []; this.closeRect = null; },
+        isOpen() { return this.open_; },
+
+        // Placeholder: wallet + inventory integration comes later.
+        selectItem(index) {
+            const item = SHOP_ITEMS[index];
+            if (!item) return;
+            questLog.showToast(`"${item.name}" - coming soon!`, 1.8);
+        },
+    };
+
     const dialogue = {
         active: null,              // { speaker, greeting, options, text, mode }
         optionRects: [],           // screen-space hitboxes for touch
@@ -3041,35 +3262,7 @@
                 ],
             },
         }),
-        new Npc({
-            id: "merchant",
-            name: "Merchant",
-            x: WORLD_W / 2 - 180,
-            y: WORLD_H / 2 - 20,
-            width: 32, height: 32,
-            interactRange: 60,
-            wanderRadius: 28,
-            speed: 28,
-            colors: { robe: "#8c5a3c", trim: "#5f3c26", sash: "#e0b066", hat: "#3d2a18" },
-            dialogue: {
-                greeting: '"Browse if you must - my shelves are bare."',
-                options: [
-                    {
-                        label: "Who are you?",
-                        response: "Hemlen, trader of trinkets. My caravan is overdue.",
-                    },
-                    {
-                        label: "What do you sell?",
-                        response: "Potions, charms, blades - when the next wagon arrives. Come back soon.",
-                    },
-                    {
-                        label: "Heard any news?",
-                        response: "Strange lights from the shrine past the caverns. Locals don't go near.",
-                    },
-                    { label: "Goodbye.", close: true },
-                ],
-            },
-        }),
+        // Merchant moved indoors - see LEVELS.shop_interior.npcs below.
         new Npc({
             id: "villager",
             name: "Villager",
@@ -3123,6 +3316,40 @@
                     {
                         label: "Any advice?",
                         response: "Keep a weapon ready and your health full. Retreat costs nothing.",
+                    },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+    ];
+
+    // Shop interior roster - the Merchant lives inside the building.
+    // Positions use interior coords (15x10 tile room = 480x320 px).
+    LEVELS.shop_interior.npcs = [
+        new Npc({
+            id: "merchant",
+            name: "Merchant",
+            x: 240 - 16,     // room center-x
+            y: 140,           // near the counter, away from the door
+            width: 32, height: 32,
+            interactRange: 60,
+            wanderRadius: 24,  // barely moves - minding the counter
+            speed: 18,
+            colors: { robe: "#8c5a3c", trim: "#5f3c26", sash: "#e0b066", hat: "#3d2a18" },
+            dialogue: {
+                greeting: '"Welcome to my shop, traveler. Browse freely."',
+                options: [
+                    {
+                        label: "Browse wares.",
+                        action() { shop.open(); },
+                    },
+                    {
+                        label: "Who are you?",
+                        response: "Hemlen, trader of trinkets. My caravan is overdue.",
+                    },
+                    {
+                        label: "Heard any news?",
+                        response: "Strange lights from the shrine past the caverns. Locals don't go near.",
                     },
                     { label: "Goodbye.", close: true },
                 ],
@@ -3278,6 +3505,10 @@
         const nextX = player.x + player.vx * dt;
         const nextY = player.y + player.vy * dt;
 
+        // Building entry: stepping onto a door rect transports the
+        // player into the building's interior level.
+        if (maybeEnterBuilding(nextX, nextY)) return;
+
         // Room-to-room transition: if the tentative step would carry
         // the player off the map, and the current level has an exit
         // on that side, and the player is aligned with the gap in
@@ -3288,34 +3519,75 @@
         player.y = Math.max(0, Math.min(WORLD_H - player.height, nextY));
     }
 
+    // Returns true if the tentative step overlaps any building door
+    // in the current level. Uses the tentative (pre-clamp) position
+    // so the player enters cleanly the moment they walk into the
+    // door rect - no need to stop moving first.
+    function maybeEnterBuilding(nextX, nextY) {
+        const buildings = currentLevel.buildings;
+        if (!buildings || buildings.length === 0) return false;
+        for (const b of buildings) {
+            if (!b.interior) continue;
+            if (
+                nextX < b.doorX + b.doorW &&
+                nextX + player.width > b.doorX &&
+                nextY < b.doorY + b.doorH &&
+                nextY + player.height > b.doorY
+            ) {
+                transitionTo(b.interior, null, b.entry);
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Returns true if a level transition was triggered (in which case
     // the caller should early-return - the new level's state is now
     // live). Only triggers when the player's center is within
     // EXIT_TRIGGER_PX of the midpoint of an edge that has an exit.
+    // Exit values can be either a level id string (player arrives
+    // at the default inset on the opposite side) or an object like
+    // { level: "grove", arriveAt: { x, y } } for a specific warp
+    // point - used by interiors that pop the player back to the
+    // spot they entered from.
+    function resolveExit(exit) {
+        if (typeof exit === "string") return { level: exit, arriveAt: null };
+        if (exit && typeof exit === "object") {
+            return { level: exit.level, arriveAt: exit.arriveAt ?? null };
+        }
+        return null;
+    }
+
     function maybeTransitionOnEdge(nextX, nextY) {
         const midX = WORLD_W / 2;
         const midY = WORLD_H / 2;
         const pcx = nextX + player.width / 2;
         const pcy = nextY + player.height / 2;
 
-        if (nextX < 0 && currentLevel.exits.west &&
+        const exits = currentLevel.exits;
+
+        const west = resolveExit(exits.west);
+        if (west && nextX < 0 &&
             Math.abs(pcy - midY) < EXIT_TRIGGER_PX) {
-            transitionTo(currentLevel.exits.west, "east");
+            transitionTo(west.level, "east", west.arriveAt);
             return true;
         }
-        if (nextX + player.width > WORLD_W && currentLevel.exits.east &&
+        const east = resolveExit(exits.east);
+        if (east && nextX + player.width > WORLD_W &&
             Math.abs(pcy - midY) < EXIT_TRIGGER_PX) {
-            transitionTo(currentLevel.exits.east, "west");
+            transitionTo(east.level, "west", east.arriveAt);
             return true;
         }
-        if (nextY < 0 && currentLevel.exits.north &&
+        const north = resolveExit(exits.north);
+        if (north && nextY < 0 &&
             Math.abs(pcx - midX) < EXIT_TRIGGER_PX) {
-            transitionTo(currentLevel.exits.north, "south");
+            transitionTo(north.level, "south", north.arriveAt);
             return true;
         }
-        if (nextY + player.height > WORLD_H && currentLevel.exits.south &&
+        const south = resolveExit(exits.south);
+        if (south && nextY + player.height > WORLD_H &&
             Math.abs(pcx - midX) < EXIT_TRIGGER_PX) {
-            transitionTo(currentLevel.exits.south, "north");
+            transitionTo(south.level, "north", south.arriveAt);
             return true;
         }
         return false;
@@ -3368,6 +3640,20 @@
             if (stats.levelUpToast > 0) {
                 stats.levelUpToast = Math.max(0, stats.levelUpToast - dt);
             }
+            clearJustPressed();
+            return;
+        }
+
+        // Shop is modal, same contract as dialogue: pick a row by
+        // number, E / Escape closes.
+        if (shop.isOpen()) {
+            interactButton.consumeJustPressed();
+            handleShopKeyInput();
+            questLog.update(dt);
+            if (stats.levelUpToast > 0) {
+                stats.levelUpToast = Math.max(0, stats.levelUpToast - dt);
+            }
+            updateNpcs(dt);
             clearJustPressed();
             return;
         }
@@ -3458,6 +3744,45 @@
     // from the update tick (any key) and the pointerdown handler
     // (any tap). Resets the loop clock so the first live frame
     // doesn't get a huge dt from the intro's idle time.
+    // Shop keyboard handling - mirror the dialogue model so the
+    // muscle memory carries across modal panels.
+    function handleShopKeyInput() {
+        if (!shop.isOpen()) return;
+        if (
+            keysJustPressed["Escape"] ||
+            keysJustPressed["e"] || keysJustPressed["E"]
+        ) {
+            shop.close();
+            return;
+        }
+        for (let i = 1; i <= 9; i++) {
+            if (keysJustPressed[String(i)]) {
+                shop.selectItem(i - 1);
+                return;
+            }
+        }
+    }
+
+    function handleShopPointer(x, y) {
+        if (!shop.isOpen()) return;
+        if (shop.closeRect) {
+            const r = shop.closeRect;
+            if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+                shop.close();
+                return;
+            }
+        }
+        const rects = shop.itemRects;
+        for (let i = 0; i < rects.length; i++) {
+            const r = rects[i];
+            if (x >= r.x && x <= r.x + r.w &&
+                y >= r.y && y <= r.y + r.h) {
+                shop.selectItem(i);
+                return;
+            }
+        }
+    }
+
     // Pointer handling for the dialogue overlay. In response mode,
     // any tap advances back to the menu; in menu mode, taps test
     // against the option rects filled in by `drawDialogue`.
@@ -3534,29 +3859,36 @@
     //   fromSide   which edge of the new level the player appears on
     //              ("north" | "south" | "east" | "west")
     // ---------------------------------------------------------------
-    function transitionTo(id, fromSide) {
+    function transitionTo(id, fromSide, arriveAt) {
         const level = LEVELS[id];
         if (!level) return;
 
         currentLevel = level;
         world.load(level);
 
-        // Warp the player to just inside the arrival edge, aligned
-        // with the center of the perpendicular axis so they enter
-        // through the visible door in the border.
-        const inset = 56;
-        if (fromSide === "west") {
-            player.x = inset;
-            player.y = WORLD_H / 2 - player.height / 2;
-        } else if (fromSide === "east") {
-            player.x = WORLD_W - player.width - inset;
-            player.y = WORLD_H / 2 - player.height / 2;
-        } else if (fromSide === "north") {
-            player.x = WORLD_W / 2 - player.width / 2;
-            player.y = inset;
-        } else if (fromSide === "south") {
-            player.x = WORLD_W / 2 - player.width / 2;
-            player.y = WORLD_H - player.height - inset;
+        // Explicit arrival point (used by interiors / building
+        // entries) wins over side-based warp.
+        if (arriveAt && typeof arriveAt.x === "number") {
+            player.x = arriveAt.x;
+            player.y = arriveAt.y;
+        } else {
+            // Warp to just inside the arrival edge, aligned with the
+            // center of the perpendicular axis so the player enters
+            // through the visible gap in the border.
+            const inset = 56;
+            if (fromSide === "west") {
+                player.x = inset;
+                player.y = WORLD_H / 2 - player.height / 2;
+            } else if (fromSide === "east") {
+                player.x = WORLD_W - player.width - inset;
+                player.y = WORLD_H / 2 - player.height / 2;
+            } else if (fromSide === "north") {
+                player.x = WORLD_W / 2 - player.width / 2;
+                player.y = inset;
+            } else if (fromSide === "south") {
+                player.x = WORLD_W / 2 - player.width / 2;
+                player.y = WORLD_H - player.height - inset;
+            }
         }
         player.vx = 0;
         player.vy = 0;
@@ -3646,6 +3978,9 @@
         // Dialogue - close any open box, drop cached option rects.
         dialogue.close();
 
+        // Shop - close any open shop window.
+        shop.close();
+
         // Weapons - back to the starting loadout, clear any in-flight
         // projectiles, and reset each weapon's internal timers.
         player.weaponIndex = 0;
@@ -3706,6 +4041,11 @@
         // by a live enemy standing over the same tile.
         drawDrops(ctx);
 
+        // Buildings - simple world-space boxes with a door, label,
+        // and roof. Drawn beneath NPCs and the player so characters
+        // read on top when standing in front.
+        for (const b of currentLevel.buildings || []) drawBuilding(ctx, b);
+
         // NPCs - one per entry in the current level's roster. Drawn
         // beneath the player so the player always reads on top. Each
         // draws its own "E" bubble when the player is in range.
@@ -3747,6 +4087,7 @@
         if (questLog.toastTimer > 0) drawQuestToast();
         if (inventoryOpen) drawInventory();
         if (dialogue.isOpen()) drawDialogue();
+        if (shop.isOpen()) drawShop();
 
         // Overlays driven by the state machine.
         if (gameState === "gameover") {
@@ -4126,6 +4467,133 @@
     }
 
     // Inventory panel - centered on screen. Aggregates `player.inventory`
+    // Shop storefront panel. A centered list of placeholder items
+    // with name, effect, and price. Each row is tappable (stored in
+    // `shop.itemRects`) and the panel header carries a close button
+    // whose hitbox is stashed in `shop.closeRect`.
+    function drawShop() {
+        const w = Math.min(420, VIEW_W - 40);
+        const h = Math.min(380, VIEW_H - 60);
+        const x = Math.floor((VIEW_W - w) / 2);
+        const y = Math.floor((VIEW_H - h) / 2);
+
+        // Dim world
+        ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+        ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+        // Panel
+        ctx.save();
+        roundRectPath(ctx, x, y, w, h, 12);
+        ctx.fillStyle = "rgba(18, 18, 30, 0.95)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255, 209, 102, 0.55)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Header
+        ctx.textBaseline = "top";
+        ctx.textAlign = "center";
+        drawShadowedText(
+            "MERCHANT'S WARES",
+            x + w / 2, y + 12,
+            "#ffd166",
+            "bold 16px system-ui, sans-serif"
+        );
+
+        // Close button (top-right X)
+        const closeSize = 28;
+        const closeX = x + w - closeSize - 8;
+        const closeY = y + 8;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        roundRectPath(ctx, closeX, closeY, closeSize, closeSize, 6);
+        ctx.fillStyle = "rgba(255, 110, 110, 0.2)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255, 110, 110, 0.5)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.fillStyle = "#e06666";
+        ctx.font = "bold 16px system-ui, sans-serif";
+        ctx.fillText("×", closeX + closeSize / 2, closeY + closeSize / 2);
+        shop.closeRect = { x: closeX, y: closeY, w: closeSize, h: closeSize };
+
+        // Divider
+        ctx.strokeStyle = "rgba(255, 209, 102, 0.3)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x + 16, y + 44);
+        ctx.lineTo(x + w - 16, y + 44);
+        ctx.stroke();
+
+        // Item rows
+        shop.itemRects = [];
+        const rowH = 44;
+        const rowPad = 8;
+        let ry = y + 54;
+        for (let i = 0; i < SHOP_ITEMS.length; i++) {
+            const item = SHOP_ITEMS[i];
+            const rx = x + 16;
+            const rw = w - 32;
+
+            ctx.save();
+            roundRectPath(ctx, rx, ry, rw, rowH, 8);
+            ctx.fillStyle = "rgba(255, 209, 102, 0.08)";
+            ctx.fill();
+            ctx.strokeStyle = "rgba(255, 209, 102, 0.28)";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.restore();
+
+            // Number prefix
+            ctx.textAlign = "left";
+            ctx.textBaseline = "top";
+            drawShadowedText(
+                String(i + 1),
+                rx + 10, ry + 6,
+                "#ffd166",
+                "bold 12px system-ui, sans-serif"
+            );
+            // Name
+            drawShadowedText(
+                item.name,
+                rx + 26, ry + 6,
+                "#e8e8f0",
+                "bold 14px system-ui, sans-serif"
+            );
+            // Effect line
+            drawShadowedText(
+                item.effect,
+                rx + 26, ry + 24,
+                "#a0a0b8",
+                "11px system-ui, sans-serif"
+            );
+            // Price pill (right)
+            ctx.textAlign = "right";
+            drawShadowedText(
+                `${item.price}g`,
+                rx + rw - 10, ry + 14,
+                "#ffd166",
+                "bold 13px system-ui, sans-serif"
+            );
+            ctx.textAlign = "left";
+
+            shop.itemRects.push({ x: rx, y: ry, w: rw, h: rowH });
+            ry += rowH + rowPad;
+        }
+
+        // Footer hint
+        ctx.textAlign = "center";
+        ctx.textBaseline = "bottom";
+        drawShadowedText(
+            "Shop coming soon  ·  press E or tap  ×  to close",
+            x + w / 2, y + h - 12,
+            "#a0a0b8",
+            "11px system-ui, sans-serif"
+        );
+
+        ctx.restore();
+    }
+
     // Modal dialogue box. Sits at the bottom of the screen like a
     // Zelda / JRPG text window. Menu mode draws the greeting + a
     // numbered option list whose hitboxes are cached on
