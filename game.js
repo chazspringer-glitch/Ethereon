@@ -3555,8 +3555,30 @@
             this.speed = config.speed ?? 38;     // slow walk - npc pace
             this.margin = config.margin ?? 72;   // world-edge buffer
 
+            // Per-NPC pause + walk windows. Passing different ranges
+            // gives each NPC their own rhythm - kids bounce quickly,
+            // elders linger, shopkeepers barely move.
+            this.idleMin = config.idleMin ?? 1.2;
+            this.idleMax = config.idleMax ?? 3.6;
+            this.walkMin = config.walkMin ?? 3.0;
+            this.walkMax = config.walkMax ?? 6.0;
+
+            // Routine selector:
+            //   "wander"  (default) - random point within wanderRadius of home
+            //   "patrol"            - cycles through config.waypoints in order
+            //   "gather"            - occasionally heads to config.gatherPoint
+            //                         (with jitter) instead of wandering.
+            // Adding a new routine is one more branch in
+            // `_pickWanderTarget` plus new config fields.
+            this.routine = config.routine ?? "wander";
+            this.waypoints = config.waypoints ?? null;
+            this.waypointIndex = 0;
+            this.gatherPoint = config.gatherPoint ?? null;
+            this.gatherChance = config.gatherChance ?? 0.35;
+            this.gatherJitter = config.gatherJitter ?? 48;
+
             this.state = "idle";
-            this.stateTimer = 0.8 + Math.random() * 1.8;
+            this.stateTimer = 0.3 + Math.random() * this.idleMax;
             this.targetX = this.x;
             this.targetY = this.y;
             this.age = 0;
@@ -3573,7 +3595,8 @@
                     // Walk-state timer is a safety net so an NPC who
                     // gets stuck (e.g. target clamped into them) can
                     // always fall back to idle.
-                    this.stateTimer = 3 + Math.random() * 3;
+                    this.stateTimer = this.walkMin +
+                        Math.random() * (this.walkMax - this.walkMin);
                 }
                 return;
             }
@@ -3583,9 +3606,20 @@
             const dx = this.targetX - this.x;
             const dy = this.targetY - this.y;
             const dist = Math.hypot(dx, dy);
-            if (dist < 2 || this.stateTimer <= 0) {
+            const reached = dist < 2;
+            if (reached || this.stateTimer <= 0) {
+                // Only advance the patrol cursor on clean arrival.
+                // If the walk timer simply expired, the next walk
+                // re-targets the same waypoint so long routes still
+                // complete after a short pause.
+                if (reached && this.routine === "patrol" &&
+                    this.waypoints && this.waypoints.length > 0) {
+                    this.waypointIndex =
+                        (this.waypointIndex + 1) % this.waypoints.length;
+                }
                 this.state = "idle";
-                this.stateTimer = 1.2 + Math.random() * 2.4;
+                this.stateTimer = this.idleMin +
+                    Math.random() * (this.idleMax - this.idleMin);
                 return;
             }
             const step = Math.min(dist, this.speed * dt);
@@ -3595,10 +3629,30 @@
         }
 
         _pickWanderTarget() {
-            const angle = Math.random() * Math.PI * 2;
-            const r = 18 + Math.random() * this.wanderRadius;
-            let tx = this.homeX + Math.cos(angle) * r;
-            let ty = this.homeY + Math.sin(angle) * r;
+            let tx, ty;
+
+            if (this.routine === "patrol" &&
+                this.waypoints && this.waypoints.length > 0) {
+                // Head toward the current waypoint (advanced on
+                // arrival in `update`, not here).
+                const wp = this.waypoints[this.waypointIndex];
+                tx = wp.x;
+                ty = wp.y;
+            } else if (this.routine === "gather" && this.gatherPoint &&
+                       Math.random() < this.gatherChance) {
+                // Occasionally walk to the shared gather spot with a
+                // little jitter so multiple gatherers don't pile on
+                // exactly the same tile.
+                tx = this.gatherPoint.x + (Math.random() - 0.5) * this.gatherJitter * 2;
+                ty = this.gatherPoint.y + (Math.random() - 0.5) * this.gatherJitter * 2;
+            } else {
+                // Default: random polar target within wanderRadius
+                // of the NPC's home spawn.
+                const angle = Math.random() * Math.PI * 2;
+                const r = 18 + Math.random() * this.wanderRadius;
+                tx = this.homeX + Math.cos(angle) * r;
+                ty = this.homeY + Math.sin(angle) * r;
+            }
 
             // Keep NPCs inside the city bounds. Margin mirrors the
             // spawner's world-edge margin so they stay well off the
@@ -4245,6 +4299,13 @@
             y: 1760,
             width: 32, height: 32,
             interactRange: 60,
+            // Sometimes strolls toward the central plaza (errands,
+            // visiting the Elder). Mostly stays near home.
+            routine: "gather",
+            gatherPoint: { x: 1600, y: 1220 },  // plaza south edge
+            gatherChance: 0.15,
+            walkMin: 6, walkMax: 12,
+            idleMin: 2.0, idleMax: 4.0,
             wanderRadius: 140,
             speed: 42,
             colors: { robe: "#4e915c", trim: "#356840", sash: "#a0d0a0", hat: "#2f5a3a" },
@@ -4282,15 +4343,23 @@
         new Npc({
             id: "scout",
             name: "Scout",
-            // Near the east gate (the exit to the caverns). The
-            // gate sits at the east edge of the map on the main
-            // east-west road (row 36 = y 1152).
+            // Patrols the east gate on a three-waypoint loop:
+            // north of the gate, at the gate, south of the gate.
             x: 2900,
             y: 1140,
             width: 32, height: 32,
             interactRange: 60,
             wanderRadius: 110,
             speed: 54,
+            // Patrol route - cycles through these spots in order.
+            routine: "patrol",
+            waypoints: [
+                { x: 2900, y: 1000 },  // north of gate
+                { x: 3040, y: 1140 },  // at the gate
+                { x: 2900, y: 1280 },  // south of gate
+            ],
+            walkMin: 8, walkMax: 14,    // long enough to reach waypoints
+            idleMin: 0.6, idleMax: 1.4, // short pauses between legs
             colors: { robe: "#3c5c8c", trim: "#223a5a", sash: "#8ad9ff", hat: "#1a2c46" },
             dialogue: {
                 greeting: '"Stay alert out there. The watch is thin."',
@@ -4334,6 +4403,15 @@
             id: "herald", name: "Herald",
             x: 1460, y: 1060, width: 32, height: 32,
             interactRange: 58, wanderRadius: 80, speed: 34,
+            // Patrols three corners of the plaza reading news.
+            routine: "patrol",
+            waypoints: [
+                { x: 1460, y: 1060 },  // plaza NW
+                { x: 1760, y: 1080 },  // plaza NE
+                { x: 1600, y: 1260 },  // plaza S
+            ],
+            walkMin: 6, walkMax: 10,
+            idleMin: 2.0, idleMax: 3.8,  // pauses to proclaim
             colors: { robe: "#a83232", trim: "#701818", sash: "#ffd166", hat: "#501010" },
             dialogue: {
                 greeting: '"Hear ye! Good day, traveler!"',
@@ -4356,7 +4434,10 @@
         new Npc({
             id: "priest", name: "Priest",
             x: 1736, y: 1196, width: 32, height: 32,
-            interactRange: 58, wanderRadius: 56, speed: 20,
+            interactRange: 58, wanderRadius: 36, speed: 16,
+            // Tends the fountain - long pauses, tiny steps.
+            idleMin: 3.0, idleMax: 6.0,
+            walkMin: 2.0, walkMax: 4.0,
             colors: { robe: "#dcdce8", trim: "#9898a8", sash: "#8ad9ff", hat: "#a0a0b0" },
             dialogue: {
                 greeting: '"Peace find you, wanderer."',
@@ -4380,6 +4461,9 @@
             id: "child1", name: "Child",
             x: 1520, y: 1288, width: 32, height: 32,
             interactRange: 54, wanderRadius: 100, speed: 60,
+            // Kid energy - barely pauses, bursts between spots.
+            idleMin: 0.3, idleMax: 1.0,
+            walkMin: 2.0, walkMax: 4.5,
             colors: { robe: "#f0d060", trim: "#a08040", sash: "#fff090", hat: "#606030" },
             dialogue: {
                 greeting: '"Tag! You\'re it!"',
@@ -4403,7 +4487,10 @@
         new Npc({
             id: "farmer", name: "Farmer",
             x: 2192, y: 664, width: 32, height: 32,
-            interactRange: 60, wanderRadius: 36, speed: 22,
+            interactRange: 60, wanderRadius: 28, speed: 18,
+            // Tends the produce stall - barely moves.
+            idleMin: 3.0, idleMax: 6.0,
+            walkMin: 1.5, walkMax: 3.0,
             colors: { robe: "#6a5030", trim: "#4a3018", sash: "#d0a060", hat: "#402818" },
             dialogue: {
                 greeting: '"Fresh greens, picked this morning!"',
@@ -4426,7 +4513,10 @@
         new Npc({
             id: "weaver", name: "Weaver",
             x: 2456, y: 660, width: 32, height: 32,
-            interactRange: 60, wanderRadius: 30, speed: 20,
+            interactRange: 60, wanderRadius: 22, speed: 16,
+            // At the loom - long, meditative pauses.
+            idleMin: 4.0, idleMax: 7.0,
+            walkMin: 1.5, walkMax: 3.0,
             colors: { robe: "#68926a", trim: "#3c5c3c", sash: "#e0e080", hat: "#2c4a2c" },
             dialogue: {
                 greeting: '"Silks, wools, and wonders - at fair prices!"',
@@ -4449,6 +4539,14 @@
             id: "apprentice", name: "Apprentice",
             x: 2360, y: 780, width: 32, height: 32,
             interactRange: 58, wanderRadius: 140, speed: 62,
+            // Runs messages - sometimes bolts toward the guild
+            // entrance, otherwise paces the market district.
+            routine: "gather",
+            gatherPoint: { x: 1390, y: 950 },   // guild door area
+            gatherChance: 0.30,
+            gatherJitter: 70,
+            walkMin: 6, walkMax: 12,
+            idleMin: 0.5, idleMax: 1.2,   // barely stops
             colors: { robe: "#3c8a8c", trim: "#204548", sash: "#a0e0d8", hat: "#163034" },
             dialogue: {
                 greeting: '"Sorry - rushing - errands!"',
@@ -4470,7 +4568,10 @@
         new Npc({
             id: "fisher", name: "Fisher",
             x: 2176, y: 520, width: 32, height: 32,
-            interactRange: 60, wanderRadius: 40, speed: 26,
+            interactRange: 60, wanderRadius: 30, speed: 20,
+            // Leans on the stall. Patient.
+            idleMin: 3.5, idleMax: 6.5,
+            walkMin: 1.5, walkMax: 3.0,
             colors: { robe: "#3a6a9a", trim: "#1a3858", sash: "#a0c0e0", hat: "#14263c" },
             dialogue: {
                 greeting: '"Catch of the day - if you like eels."',
@@ -4494,7 +4595,10 @@
         new Npc({
             id: "grandmother", name: "Grandmother",
             x: 560, y: 1730, width: 32, height: 32,
-            interactRange: 60, wanderRadius: 28, speed: 14,
+            interactRange: 60, wanderRadius: 22, speed: 10,
+            // Rocks on the porch. Long pauses, tiny excursions.
+            idleMin: 4.0, idleMax: 8.0,
+            walkMin: 1.5, walkMax: 3.5,
             colors: { robe: "#8860a8", trim: "#4a2a60", sash: "#f0d8ff", hat: "#301a44" },
             dialogue: {
                 greeting: '"Settle in, dear. I\'ve seen worse than you."',
@@ -4518,6 +4622,8 @@
             id: "child2", name: "Child",
             x: 940, y: 1700, width: 32, height: 32,
             interactRange: 54, wanderRadius: 80, speed: 56,
+            idleMin: 0.3, idleMax: 1.0,
+            walkMin: 2.0, walkMax: 4.5,
             colors: { robe: "#d070a0", trim: "#8a4670", sash: "#f8b0d0", hat: "#5a2a48" },
             dialogue: {
                 greeting: '"Have you seen my cat?"',
