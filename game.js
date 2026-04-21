@@ -162,15 +162,15 @@
             );
 
             // Grass covers the vast majority of tiles. Fill the whole
-            // visible block with grass base color in one fillRect, then
-            // only iterate and draw the *non-grass* tiles on top. This
-            // collapses ~450 per-tile fillStyle writes into a single
-            // state change and is the single biggest mobile win.
+            // visible block with a tiling grass pattern in one call,
+            // then only iterate and draw the *non-grass* tiles on top.
+            // This collapses ~450 per-tile fillStyle writes into a
+            // single state change and is the single biggest mobile win.
             const baseX = startCol * TILE;
             const baseY = startRow * TILE;
             const baseW = (endCol - startCol + 1) * TILE;
             const baseH = (endRow - startRow + 1) * TILE;
-            ctx.fillStyle = "#3a5a3a";
+            ctx.fillStyle = grassPattern;
             ctx.fillRect(baseX, baseY, baseW, baseH);
 
             const cols = WORLD_COLS;
@@ -228,6 +228,38 @@
     }
 
     world.init();
+
+    // Grass background pattern. Built once onto a 2x2-tile offscreen
+    // canvas and used as a repeating fillStyle in `world.draw`. One
+    // GPU-tiled fill replaces a solid color fill with effectively the
+    // same cost but gives the terrain subtle variation.
+    const grassPattern = (() => {
+        const p = document.createElement("canvas");
+        p.width = TILE * 2;
+        p.height = TILE * 2;
+        const g = p.getContext("2d");
+
+        g.fillStyle = "#3a5a3a";
+        g.fillRect(0, 0, TILE * 2, TILE * 2);
+
+        // Checker - slightly lighter on diagonal tiles.
+        g.fillStyle = "#3f6340";
+        g.fillRect(TILE, 0, TILE, TILE);
+        g.fillRect(0, TILE, TILE, TILE);
+
+        // Scattered blade flecks across the 2x2 block.
+        g.fillStyle = "#4a7350";
+        g.fillRect(6,  18, 2, 2);
+        g.fillRect(22, 9,  2, 2);
+        g.fillRect(TILE + 20, 26, 2, 2);
+        g.fillRect(TILE + 7,  14, 2, 2);
+        g.fillRect(14, TILE + 10, 2, 2);
+        g.fillRect(28, TILE + 24, 2, 2);
+        g.fillRect(TILE + 8,  TILE + 22, 2, 2);
+        g.fillRect(TILE + 24, TILE + 6,  2, 2);
+
+        return ctx.createPattern(p, "repeat");
+    })();
 
     // ---------------------------------------------------------------
     // Camera - viewport into the world.
@@ -806,7 +838,10 @@
         y: WORLD_H / 2 - 16,
         width: 32,
         height: 32,
-        speed: 220, // pixels per second
+        speed: 220,  // max velocity in pixels per second
+        accel: 2200, // px/s^2 toward target velocity; ~0.1s to full speed
+        vx: 0,
+        vy: 0,
         color: "#ffd166", // kept as a fallback / tint hook for future use
         facing: { x: 0, y: 1 }, // unit vector used by the attack
         facingDir: DIR_DOWN,    // cardinal used by the animator
@@ -1050,10 +1085,18 @@
             // their walk cycles aren't locked in lockstep).
             this.sheet = opts.sheet ?? enemySheet;
             this.animator = opts.animator ?? makeEnemyAnimator();
+
+            // Hit flash - lit white for a brief window after being
+            // struck. `hitFlashDuration` controls how long the flash
+            // lasts; `hitFlash` counts down and drives opacity.
+            this.hitFlashDuration = 0.14;
+            this.hitFlash = 0;
         }
 
         update(dt, target) {
             if (!this.alive) return;
+
+            if (this.hitFlash > 0) this.hitFlash = Math.max(0, this.hitFlash - dt);
 
             // Steer toward the target's center using a unit vector,
             // so diagonal approach isn't faster than cardinal approach.
@@ -1083,13 +1126,22 @@
 
         draw(ctx) {
             if (!this.alive) return;
-            this.sheet.draw(
-                ctx,
-                this.animator.col,
-                this.animator.row,
-                Math.round(this.x),
-                Math.round(this.y)
-            );
+            const x = Math.round(this.x);
+            const y = Math.round(this.y);
+            this.sheet.draw(ctx, this.animator.col, this.animator.row, x, y);
+
+            // Hit flash - white tint composited only over the sprite's
+            // opaque pixels via "source-atop". Cheap: one extra fillRect
+            // per flashing enemy, and the window is ~0.14s so the total
+            // active-flash overhead is negligible.
+            if (this.hitFlash > 0) {
+                const a = Math.min(1, this.hitFlash / this.hitFlashDuration);
+                ctx.save();
+                ctx.globalCompositeOperation = "source-atop";
+                ctx.fillStyle = `rgba(255, 255, 255, ${a.toFixed(3)})`;
+                ctx.fillRect(x, y, this.width, this.height);
+                ctx.restore();
+            }
 
             // Tiny HP pip so future multi-hit enemies are readable.
             if (this.maxHp > 1) {
@@ -1103,6 +1155,7 @@
 
         takeHit(damage = 1) {
             this.hp -= damage;
+            this.hitFlash = this.hitFlashDuration;
             if (this.hp <= 0) this.alive = false;
         }
 
@@ -1360,9 +1413,11 @@
             dy /= mag;
         }
 
-        // Update facing (vector for attack, cardinal for animation).
-        const moving = dx !== 0 || dy !== 0;
-        if (moving) {
+        // Update facing whenever there's fresh input (from key or
+        // stick). Uses input rather than velocity so the character's
+        // facing doesn't wobble while gliding to a stop.
+        const inputActive = dx !== 0 || dy !== 0;
+        if (inputActive) {
             player.facing.x = dx;
             player.facing.y = dy;
 
@@ -1373,11 +1428,35 @@
             }
         }
 
+        // Smooth movement: input selects a *target* velocity, actual
+        // velocity accelerates toward it. This gives the character a
+        // touch of inertia - ~0.1s ramp in and ramp out - without
+        // making it feel floaty. Frame-rate independent because we
+        // cap the step by `accel * dt`.
+        const targetVX = dx * player.speed;
+        const targetVY = dy * player.speed;
+
+        const dvx = targetVX - player.vx;
+        const dvy = targetVY - player.vy;
+        const step = player.accel * dt;
+        const dvMag = Math.hypot(dvx, dvy);
+        if (dvMag <= step || dvMag === 0) {
+            player.vx = targetVX;
+            player.vy = targetVY;
+        } else {
+            const k = step / dvMag;
+            player.vx += dvx * k;
+            player.vy += dvy * k;
+        }
+
+        // "Moving" for the animator is velocity-based so the walk
+        // cycle keeps playing during the glide-to-stop deceleration.
+        const moving = Math.abs(player.vx) + Math.abs(player.vy) > 5;
         player.animator.setState(moving ? "walk" : "idle");
         player.animator.update(dt);
 
-        player.x += dx * player.speed * dt;
-        player.y += dy * player.speed * dt;
+        player.x += player.vx * dt;
+        player.y += player.vy * dt;
 
         // Clamp the player inside the world, not the viewport.
         player.x = Math.max(0, Math.min(WORLD_W - player.width, player.x));
@@ -1441,6 +1520,8 @@
         player.hp = player.maxHp;
         player.alive = true;
         player.iframes = 0;
+        player.vx = 0;
+        player.vy = 0;
         player.facing.x = 0;
         player.facing.y = 1;
         player.facingDir = DIR_DOWN;
@@ -1510,6 +1591,7 @@
         ctx.restore();
 
         // --- Screen space (HUD) ---
+        drawStatsPanel();
         drawScore();
         drawHealthBar();
         drawCooldownBar();
@@ -1520,26 +1602,64 @@
         if (!player.alive) drawGameOver();
     }
 
-    // Top-left stat panel. Score anchors the block at y=14 and the
-    // health bar sits beneath it - keeps the reading order "what
-    // you've earned -> what you have left."
+    // --- HUD helpers ---
+
+    // Traces a rounded-rect path on the current context. Uses the
+    // built-in Path2D method when available; falls back to arcTo.
+    function roundRectPath(ctx, x, y, w, h, r) {
+        if (ctx.roundRect) {
+            ctx.beginPath();
+            ctx.roundRect(x, y, w, h, r);
+            return;
+        }
+        const rr = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.arcTo(x + w, y, x + w, y + h, rr);
+        ctx.arcTo(x + w, y + h, x, y + h, rr);
+        ctx.arcTo(x, y + h, x, y, rr);
+        ctx.arcTo(x, y, x + w, y, rr);
+        ctx.closePath();
+    }
+
+    // One-pixel dark offset + main color. Much cheaper than using
+    // ctx.shadowBlur and reads cleanly over any terrain.
+    function drawShadowedText(text, x, y, color, font) {
+        ctx.font = font;
+        ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
+        ctx.fillText(text, x + 1, y + 1);
+        ctx.fillStyle = color;
+        ctx.fillText(text, x, y);
+    }
+
+    // A subtle dark-glass panel behind the score + health stack so
+    // the readouts don't compete with the terrain behind them.
+    function drawStatsPanel() {
+        ctx.save();
+        roundRectPath(ctx, 8, 8, 280, 56, 8);
+        ctx.fillStyle = "rgba(12, 12, 22, 0.62)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255, 209, 102, 0.28)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    // Score: small grey label + bold gold value, both with a subtle
+    // drop shadow so they read over the panel at any terrain.
     function drawScore() {
         const x = 16;
         const y = 14;
 
         ctx.save();
         ctx.textBaseline = "top";
-
-        // Label
-        ctx.fillStyle = "#a0a0b8";
-        ctx.font = "11px system-ui, sans-serif";
-        ctx.fillText("SCORE", x, y);
-
-        // Value - padded to a fixed width so the HUD doesn't jitter.
-        ctx.fillStyle = "#ffd166";
-        ctx.font = "bold 20px system-ui, sans-serif";
-        ctx.fillText(String(stats.score).padStart(5, "0"), x + 46, y - 2);
-
+        drawShadowedText("SCORE", x, y, "#a0a0b8", "11px system-ui, sans-serif");
+        drawShadowedText(
+            String(stats.score).padStart(5, "0"),
+            x + 46, y - 2,
+            "#ffd166",
+            "bold 20px system-ui, sans-serif"
+        );
         ctx.restore();
     }
 
@@ -1562,26 +1682,49 @@
         const barH = 14;
         const x = 16;
         const y = 40;  // sits beneath the score readout
+        const r = 5;
 
         const frac = Math.max(0, player.hp / player.maxHp);
 
-        // Background
-        ctx.fillStyle = "#1a1a24";
-        ctx.fillRect(x, y, barW, barH);
-        // Fill (green -> orange -> red as it drops)
-        ctx.fillStyle = frac > 0.5 ? "#7ad17a" : frac > 0.25 ? "#e0b066" : "#e06666";
-        ctx.fillRect(x, y, barW * frac, barH);
-        // Border
-        ctx.strokeStyle = "#444458";
-        ctx.lineWidth = 1;
-        ctx.strokeRect(x + 0.5, y + 0.5, barW - 1, barH - 1);
+        ctx.save();
 
-        // Numeric readout
-        ctx.fillStyle = "#e8e8f0";
-        ctx.font = "12px system-ui, sans-serif";
+        // Track (rounded dark background)
+        roundRectPath(ctx, x, y, barW, barH, r);
+        ctx.fillStyle = "#13131c";
+        ctx.fill();
+
+        // Fill - clip to the rounded track so the fill follows the
+        // corner radius. Green -> orange -> red as it drops.
+        if (frac > 0) {
+            ctx.save();
+            ctx.clip();
+            ctx.fillStyle =
+                frac > 0.5 ? "#7ad17a" :
+                frac > 0.25 ? "#e0b066" : "#e06666";
+            ctx.fillRect(x, y, barW * frac, barH);
+
+            // Thin specular highlight across the top of the fill.
+            ctx.fillStyle = "rgba(255, 255, 255, 0.18)";
+            ctx.fillRect(x, y + 2, barW * frac, 2);
+            ctx.restore();
+        }
+
+        // Rim
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
+        ctx.lineWidth = 1;
+        roundRectPath(ctx, x + 0.5, y + 0.5, barW - 1, barH - 1, r);
+        ctx.stroke();
+
+        // Numeric readout with drop shadow.
         ctx.textBaseline = "middle";
-        ctx.fillText(`HP  ${Math.ceil(player.hp)} / ${player.maxHp}`, x + barW + 10, y + barH / 2);
-        ctx.textBaseline = "alphabetic"; // restore default for other text
+        drawShadowedText(
+            `HP  ${Math.ceil(player.hp)} / ${player.maxHp}`,
+            x + barW + 10, y + barH / 2,
+            "#e8e8f0",
+            "12px system-ui, sans-serif"
+        );
+
+        ctx.restore();
     }
 
     function drawGameOver() {
