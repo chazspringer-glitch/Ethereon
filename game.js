@@ -881,6 +881,11 @@
     const keysJustPressed = Object.create(null);
 
     window.addEventListener("keydown", (e) => {
+        // When the question input (or any future text field) has
+        // focus, let the native element own the key event - no
+        // game-input capture, no preventDefault.
+        if (e.target && e.target.tagName === "INPUT") return;
+
         if (!keys[e.key]) keysJustPressed[e.key] = true;
         keys[e.key] = true;
         // Stop the page from scrolling with arrow keys or space.
@@ -890,6 +895,7 @@
     });
 
     window.addEventListener("keyup", (e) => {
+        if (e.target && e.target.tagName === "INPUT") return;
         keys[e.key] = false;
     });
 
@@ -3226,6 +3232,162 @@
         },
     };
 
+    // ---------------------------------------------------------------
+    // Ask-a-question: open-ended NPC responses
+    //
+    // Each NPC's `dialogue` config may carry a `knowledge` array of
+    //   { keywords: [...], response: "..." }
+    // entries plus a `fallback` string. `askNpc(npc, question)` walks
+    // the knowledge list and returns the first matching response, or
+    // the fallback if nothing matches.
+    //
+    // The function is async. Today it resolves synchronously with a
+    // keyword hit, but shaping it as async means a future AI backend
+    // can drop in via one of two seams:
+    //
+    //   1. Set `window.aiResponder = async (npc, q) => string` to
+    //      override *every* NPC globally (e.g. OpenAI / a local
+    //      model).
+    //   2. Per-NPC: set `npc.dialogue.respond = async (q) => string`
+    //      to override one character's answers.
+    //
+    // The keyword matcher stays as a zero-cost local fallback.
+    // ---------------------------------------------------------------
+    async function askNpc(npc, question) {
+        // Global override (future AI backend drops in here).
+        if (typeof window.aiResponder === "function") {
+            try { return await window.aiResponder(npc, question); } catch { /* fall through */ }
+        }
+
+        const d = npc.dialogue;
+        if (!d) return "...";
+
+        // Per-NPC override.
+        if (typeof d.respond === "function") {
+            try { return await d.respond(question); } catch { /* fall through */ }
+        }
+
+        // Built-in keyword matcher.
+        const q = (question || "").toLowerCase();
+        for (const entry of d.knowledge || []) {
+            for (const kw of entry.keywords) {
+                if (q.includes(kw.toLowerCase())) return entry.response;
+            }
+        }
+        return d.fallback ?? "Hmm - I don't know much about that, traveler.";
+    }
+
+    // ---------------------------------------------------------------
+    // Question input (HTML overlay)
+    //
+    // A real `<input>` element floated over the canvas so the user
+    // gets the native keyboard on mobile. Created on demand,
+    // re-used across NPCs, hidden whenever dialogue closes or
+    // switches modes.
+    // ---------------------------------------------------------------
+    let questionInputEl = null;
+
+    function ensureQuestionInput() {
+        if (questionInputEl) return questionInputEl;
+        const el = document.createElement("input");
+        el.id = "question-input";
+        el.type = "text";
+        el.maxLength = 140;
+        el.autocomplete = "off";
+        el.spellcheck = false;
+        el.placeholder = "Type your question...";
+        Object.assign(el.style, {
+            position: "fixed",
+            left: "50%",
+            bottom: "30%",
+            transform: "translateX(-50%)",
+            width: "min(420px, 82vw)",
+            padding: "14px 18px",
+            fontSize: "16px",
+            fontFamily: "system-ui, sans-serif",
+            color: "#e8e8f0",
+            background: "rgba(18, 18, 30, 0.97)",
+            border: "2px solid #ffd166",
+            borderRadius: "10px",
+            outline: "none",
+            zIndex: "1000",
+            display: "none",
+            boxShadow: "0 10px 28px rgba(0, 0, 0, 0.5)",
+        });
+
+        // Stop keys from leaking into the game loop.
+        el.addEventListener("keydown", (e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") {
+                e.preventDefault();
+                submitQuestion();
+            } else if (e.key === "Escape") {
+                e.preventDefault();
+                hideQuestionInput();
+                // Back to the option menu, dialogue still open.
+                if (dialogue.isOpen()) {
+                    dialogue.active.mode = "menu";
+                    dialogue.active.text = dialogue.active.greeting;
+                }
+            }
+        });
+        el.addEventListener("keyup", (e) => e.stopPropagation());
+
+        document.body.appendChild(el);
+        questionInputEl = el;
+        return el;
+    }
+
+    function showQuestionInput() {
+        const el = ensureQuestionInput();
+        el.value = "";
+        el.style.display = "block";
+        // Focus must happen inside the user gesture (tap / keydown
+        // that triggered this) for iOS to show the virtual keyboard.
+        el.focus();
+    }
+
+    function hideQuestionInput() {
+        if (!questionInputEl) return;
+        questionInputEl.blur();
+        questionInputEl.style.display = "none";
+    }
+
+    async function submitQuestion() {
+        if (!questionInputEl) return;
+        const raw = questionInputEl.value.trim();
+        hideQuestionInput();
+        if (!raw) {
+            // Empty submit: go back to the menu.
+            if (dialogue.isOpen()) {
+                dialogue.active.mode = "menu";
+                dialogue.active.text = dialogue.active.greeting;
+            }
+            return;
+        }
+        if (!dialogue.isOpen()) return;
+        const npc = dialogue.active.npc;
+
+        // Show a brief "thinking" state while the (async) responder
+        // resolves - cheap placeholder today, meaningful once the
+        // AI backend is wired.
+        dialogue.active.mode = "response";
+        dialogue.active.text = '...';
+
+        try {
+            const response = await askNpc(npc, raw);
+            if (dialogue.isOpen()) {
+                dialogue.active.text = `"${response}"`;
+                dialogue.active.mode = "response";
+            }
+        } catch (err) {
+            if (dialogue.isOpen()) {
+                dialogue.active.text = "(They seem unsure how to answer.)";
+                dialogue.active.mode = "response";
+            }
+        }
+    }
+
     const dialogue = {
         active: null,              // { speaker, greeting, options, text, mode }
         optionRects: [],           // screen-space hitboxes for touch
@@ -3240,6 +3402,7 @@
             const d = npc.dialogue;
             this.active = {
                 speaker: npc.name,
+                npc,                   // kept so submitQuestion can call askNpc
                 greeting: d.greeting,
                 options: d.options,
                 text: d.greeting,
@@ -3251,6 +3414,7 @@
         close() {
             this.active = null;
             this.optionRects = [];
+            hideQuestionInput();
         },
 
         isOpen() {
@@ -3269,6 +3433,15 @@
                 this.close();
                 return;
             }
+            // Open-ended question: pop the input overlay. The
+            // submit handler flips back to response mode with the
+            // NPC's answer.
+            if (opt.input) {
+                this.active.mode = "input";
+                this.active.text = "Ask your question below.";
+                showQuestionInput();
+                return;
+            }
             if (typeof opt.response === "string") {
                 this.active.text = opt.response;
                 this.active.mode = "response";
@@ -3277,11 +3450,16 @@
         },
 
         // In response mode, return to the menu. In menu mode, close.
+        // Input mode is driven by the HTML field so this is a no-op
+        // there (the field's own listeners handle Enter / Escape).
         advance() {
             if (!this.active) return;
             if (this.active.mode === "response") {
                 this.active.text = this.active.greeting;
                 this.active.mode = "menu";
+            } else if (this.active.mode === "input") {
+                // Fall through - input element owns the flow.
+                return;
             } else {
                 this.close();
             }
@@ -3320,8 +3498,22 @@
                         label: "Any work for me?",
                         action: elderInteract,  // jumps into the quest chain
                     },
+                    { label: "Ask a question...", input: true },
                     { label: "Goodbye.", close: true },
                 ],
+                knowledge: [
+                    { keywords: ["name", "who are", "elder"], response: "I am the Elder - keeper of the grove." },
+                    { keywords: ["grove", "place", "town", "city"], response: "The Sunlit Grove. The star-fall spared it for a reason." },
+                    { keywords: ["shop", "merchant", "buy"], response: "Hemlen's shop lies west of the plaza. Tell them the Elder sent you." },
+                    { keywords: ["quest", "work", "job", "help"], response: "Hunts, mostly. Select 'Any work?' and I'll set you a task." },
+                    { keywords: ["east", "cavern", "dungeon", "danger"], response: "East lies the Echo Caverns, and beyond, the Shrine. Tread carefully." },
+                    { keywords: ["shrine"], response: "The Shrine is old - older than the star-fall. Relics still stir there." },
+                    { keywords: ["star", "fall", "sky"], response: "When the star fell, the world broke. We rebuilt here." },
+                    { keywords: ["weapon", "sword", "energy"], response: "Begin with the sword. The energy blast is for those who prefer distance." },
+                    { keywords: ["power", "ability"], response: "Your power move clears crowds - use it sparingly; it needs time to recharge." },
+                    { keywords: ["potion", "heal", "health"], response: "Health potions sometimes drop from foes. The Merchant will sell proper ones soon." },
+                ],
+                fallback: "Hmm. I'm a keeper of grounds, not an oracle - try a simpler question.",
             },
         }),
         // Merchant moved indoors - see LEVELS.shop_interior.npcs below.
@@ -3352,8 +3544,20 @@
                         label: "Any work for me?",
                         response: "You'll want the Elder for that. I'm just a gardener.",
                     },
+                    { label: "Ask a question...", input: true },
                     { label: "Goodbye.", close: true },
                 ],
+                knowledge: [
+                    { keywords: ["name", "who are"], response: "I'm no one special - just a gardener." },
+                    { keywords: ["garden", "flower", "plant"], response: "The gardens by the west fence - they're my quiet corner." },
+                    { keywords: ["grove", "place", "town"], response: "Lovely place, isn't it? Quiet, mostly." },
+                    { keywords: ["elder"], response: "The Elder's on the plaza. Kind soul, but gruff about quests." },
+                    { keywords: ["merchant", "shop"], response: "Hemlen keeps the shop - look for the building with the brown roof." },
+                    { keywords: ["scout"], response: "Our Scout watches the east gate. Nothing gets past them." },
+                    { keywords: ["weather", "day"], response: "Sunny today. But then, it's always sunny in the Grove." },
+                    { keywords: ["danger", "enemy", "cavern"], response: "I don't go east myself. Too loud beyond the gate." },
+                ],
+                fallback: "I wouldn't know, honestly. You should ask the Elder.",
             },
         }),
         new Npc({
@@ -3383,8 +3587,22 @@
                         label: "Any advice?",
                         response: "Keep a weapon ready and your health full. Retreat costs nothing.",
                     },
+                    { label: "Ask a question...", input: true },
                     { label: "Goodbye.", close: true },
                 ],
+                knowledge: [
+                    { keywords: ["name", "who"], response: "A scout. I watch the east gate." },
+                    { keywords: ["east", "gate"], response: "East is the Echo Caverns. Don't go unprepared." },
+                    { keywords: ["cavern"], response: "Enemies there hit harder than grove critters. Three blows each, at least." },
+                    { keywords: ["shrine"], response: "Past the caverns. Deep trouble - relic-bearing beasts." },
+                    { keywords: ["weapon", "sword", "energy"], response: "Sword for quick work, energy for range. Switch with 1 / 2 or the swap button." },
+                    { keywords: ["power", "ability"], response: "The power burst hits everyone around you. Save it for crowds." },
+                    { keywords: ["heal", "health", "potion"], response: "Potions drop sometimes. Don't waste them on scratches." },
+                    { keywords: ["quest"], response: "The Elder assigns work. Finish theirs and we'll trust you with harder runs." },
+                    { keywords: ["danger", "die", "death"], response: "Fall in combat and you'll respawn in the grove. Try not to make a habit of it." },
+                    { keywords: ["tip", "advice", "help"], response: "Strafe around enemies. Let their AI chase while you hit and back off." },
+                ],
+                fallback: "Out of my depth. Try the Elder.",
             },
         }),
     ];
@@ -3417,8 +3635,20 @@
                         label: "Heard any news?",
                         response: "Strange lights from the shrine past the caverns. Locals don't go near.",
                     },
+                    { label: "Ask a question...", input: true },
                     { label: "Goodbye.", close: true },
                 ],
+                knowledge: [
+                    { keywords: ["name", "who", "hemlen"], response: "Hemlen - trader, at your service." },
+                    { keywords: ["sell", "buy", "wares", "item", "shop"], response: "Browse the wares. No refunds... once the shelves are stocked, anyway." },
+                    { keywords: ["potion", "heal", "health"], response: "Health potions will be first in stock when the caravan finally arrives." },
+                    { keywords: ["sword", "weapon"], response: "I'll carry iron swords soon. For now, your starting blade serves." },
+                    { keywords: ["caravan", "late", "overdue"], response: "Roads are rough east of here. I half suspect bandits - or worse." },
+                    { keywords: ["shrine"], response: "Lights. Humming. Nobody comes back happy from the shrine." },
+                    { keywords: ["elder", "village"], response: "The Elder keeps order. A good sort, even if they drive a hard bargain." },
+                    { keywords: ["gold", "money", "coin", "price"], response: "Coins open doors, traveler. Slay beasts, gather coin, prosper." },
+                ],
+                fallback: "Trade's my business - I can't say I know much beyond it.",
             },
         }),
     ];
@@ -4768,6 +4998,24 @@
 
                 dialogue.optionRects.push({ x: ox, y: oy, w: ow, h: oh });
             }
+        } else if (d.mode === "input") {
+            // Input mode: the HTML field sits outside the canvas, so
+            // the panel just shows the prompt + a submit hint. Using
+            // a muted accent so it doesn't fight the input field.
+            ctx.textAlign = "center";
+            drawShadowedText(
+                "Type your question in the field above.",
+                x + boxW / 2, y + boxH - 44,
+                "#a0a0b8",
+                "12px system-ui, sans-serif"
+            );
+            drawShadowedText(
+                "Press Enter to ask  ·  Esc to cancel",
+                x + boxW / 2, y + boxH - 24,
+                "#ffd166",
+                "bold 11px system-ui, sans-serif"
+            );
+            ctx.textAlign = "left";
         } else {
             // Response mode: continue hint at the bottom.
             const pulse = 0.55 + 0.45 * Math.abs(Math.sin(performance.now() * 0.004));
