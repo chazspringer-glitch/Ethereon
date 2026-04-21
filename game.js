@@ -153,6 +153,111 @@
         return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
     }
 
+    // ---------------------------------------------------------------
+    // LEVELS catalog
+    //
+    // Each level is a data-only description of a zone: how its tiles
+    // are laid out, what enemies spawn in it, which sides have exits
+    // to other levels, and whether the NPC shows up. Adding a zone is
+    // one object in this catalog plus an `exits` link from a neighbor.
+    //
+    //   id           unique key
+    //   name         display name (shown as a toast on entry)
+    //   baseTile     dominant floor tile
+    //   borderTile   tile used for the outer wall
+    //   scatter      array of { tile, prob } for procedural decoration;
+    //                evaluated in order, first match wins
+    //   enemyCount   gameplay-tuned population target for this zone
+    //   enemyOpts    passed through to each Enemy constructor
+    //   exits        { north|south|east|west: "<levelId>" }
+    //   hasNpc       whether the Village Elder stands here
+    // ---------------------------------------------------------------
+    const LEVELS = {
+        grove: {
+            id: "grove",
+            name: "Sunlit Grove",
+            baseTile: TILE_GRASS,
+            borderTile: TILE_STONE,
+            scatter: [
+                { tile: TILE_TREE, prob: 0.045 },
+                { tile: TILE_STONE, prob: 0.02 },
+                { tile: TILE_PATH, prob: 0.02 },
+            ],
+            enemyCount: 5,
+            enemyOpts: { hp: 3, speed: 90 },
+            exits: { east: "caverns" },
+            hasNpc: true,
+        },
+        caverns: {
+            id: "caverns",
+            name: "Echo Caverns",
+            baseTile: TILE_STONE,
+            borderTile: TILE_STONE,
+            scatter: [
+                { tile: TILE_WATER, prob: 0.05 },
+                { tile: TILE_PATH, prob: 0.04 },
+            ],
+            enemyCount: 7,
+            enemyOpts: { hp: 4, speed: 100 },
+            exits: { west: "grove", east: "shrine" },
+            hasNpc: false,
+        },
+        shrine: {
+            id: "shrine",
+            name: "Ethereon Shrine",
+            baseTile: TILE_PATH,
+            borderTile: TILE_STONE,
+            scatter: [
+                { tile: TILE_WATER, prob: 0.09 },
+                { tile: TILE_STONE, prob: 0.03 },
+            ],
+            enemyCount: 6,
+            enemyOpts: { hp: 5, speed: 110, reward: 25, xpReward: 18 },
+            exits: { west: "caverns" },
+            hasNpc: false,
+        },
+    };
+
+    // Active level. Swapped by `transitionTo(id, fromSide)` whenever
+    // the player walks into an exit; referenced by world.draw, the
+    // spawner, the NPC, and the transition logic.
+    let currentLevel = LEVELS.grove;
+
+    // Width of the opening cut into the border at each exit (in
+    // tiles). Kept generous so transitions feel generous on touch.
+    const EXIT_GAP_TILES = 3;
+    // Pixel radius around the exit-midpoint within which walking off
+    // the edge triggers a transition.
+    const EXIT_TRIGGER_PX = 96;
+
+    // Computes the tile id for (col, row) in the given level. Handles
+    // the outer wall, cuts openings in the wall where exits exist, and
+    // scatters decoration through a hash-driven lookup.
+    function tileAt(level, c, r) {
+        const onNorth = r === 0;
+        const onSouth = r === WORLD_ROWS - 1;
+        const onWest = c === 0;
+        const onEast = c === WORLD_COLS - 1;
+
+        if (onNorth || onSouth || onWest || onEast) {
+            const midR = Math.floor(WORLD_ROWS / 2);
+            const midC = Math.floor(WORLD_COLS / 2);
+            if (onWest && level.exits.west && Math.abs(r - midR) <= EXIT_GAP_TILES) return TILE_PATH;
+            if (onEast && level.exits.east && Math.abs(r - midR) <= EXIT_GAP_TILES) return TILE_PATH;
+            if (onNorth && level.exits.north && Math.abs(c - midC) <= EXIT_GAP_TILES) return TILE_PATH;
+            if (onSouth && level.exits.south && Math.abs(c - midC) <= EXIT_GAP_TILES) return TILE_PATH;
+            return level.borderTile;
+        }
+
+        const h = hash2(c, r);
+        let acc = 0;
+        for (const s of level.scatter) {
+            acc += s.prob;
+            if (h < acc) return s.tile;
+        }
+        return level.baseTile;
+    }
+
     const world = {
         cols: WORLD_COLS,
         rows: WORLD_ROWS,
@@ -161,23 +266,12 @@
         tileSize: TILE,
         data: new Uint8Array(WORLD_COLS * WORLD_ROWS),
 
-        init() {
+        // Regenerate tile data from a level definition. Used at boot
+        // and on every room-to-room transition.
+        load(level) {
             for (let r = 0; r < WORLD_ROWS; r++) {
                 for (let c = 0; c < WORLD_COLS; c++) {
-                    const onBorder =
-                        c === 0 || r === 0 ||
-                        c === WORLD_COLS - 1 || r === WORLD_ROWS - 1;
-
-                    let t = TILE_GRASS;
-                    if (onBorder) {
-                        t = TILE_STONE;
-                    } else {
-                        const h = hash2(c, r);
-                        if (h < 0.035) t = TILE_TREE;
-                        else if (h < 0.055) t = TILE_STONE;
-                        else if (h > 0.975) t = TILE_PATH;
-                    }
-                    this.data[r * WORLD_COLS + c] = t;
+                    this.data[r * WORLD_COLS + c] = tileAt(level, c, r);
                 }
             }
         },
@@ -208,16 +302,17 @@
                 Math.floor((camera.y + VIEW_H) / TILE)
             );
 
-            // Grass covers the vast majority of tiles. Fill the whole
-            // visible block with a tiling grass pattern in one call,
-            // then only iterate and draw the *non-grass* tiles on top.
-            // This collapses ~450 per-tile fillStyle writes into a
-            // single state change and is the single biggest mobile win.
+            // Fill the whole visible block with the current level's
+            // base tile in one call, then iterate and draw only the
+            // *non-base* tiles on top. Collapses hundreds of per-tile
+            // fillStyle writes into one state change and works
+            // regardless of which level is active (grass, stone, path).
             const baseX = startCol * TILE;
             const baseY = startRow * TILE;
             const baseW = (endCol - startCol + 1) * TILE;
             const baseH = (endRow - startRow + 1) * TILE;
-            ctx.fillStyle = grassPattern;
+            const baseTile = currentLevel.baseTile;
+            ctx.fillStyle = baseFillFor(baseTile);
             ctx.fillRect(baseX, baseY, baseW, baseH);
 
             const cols = WORLD_COLS;
@@ -226,13 +321,27 @@
                 const rowBase = r * cols;
                 for (let c = startCol; c <= endCol; c++) {
                     const t = data[rowBase + c];
-                    if (t !== TILE_GRASS) {
+                    if (t !== baseTile) {
                         drawTile(ctx, t, c * TILE, r * TILE);
                     }
                 }
             }
         },
     };
+
+    // Picks the fillStyle used for the big viewport-wide base fill
+    // in world.draw, keyed by the level's baseTile. `grassPattern` is
+    // built later in the file - reading at draw-time means we don't
+    // need to worry about module ordering.
+    function baseFillFor(tileId) {
+        switch (tileId) {
+            case TILE_GRASS: return grassPattern;
+            case TILE_STONE: return "#5c5c6e";
+            case TILE_PATH:  return "#8c7a55";
+            case TILE_WATER: return "#3560a0";
+            default:         return "#3a5a3a";
+        }
+    }
 
     // The one place that turns tile IDs into pixels. Replace the
     // fillRects here with drawImage(spriteSheet, ...) once art arrives.
@@ -274,7 +383,7 @@
         }
     }
 
-    world.init();
+    world.load(currentLevel);
 
     // Grass background pattern. Built once onto a 2x2-tile offscreen
     // canvas and used as a repeating fillStyle in `world.draw`. One
@@ -2465,6 +2574,11 @@
         timer: 0,
         elapsed: 0,
 
+        // Per-level Enemy opts. Populated by `configure(level)` and
+        // passed to every spawnEnemy call so each zone can ship its
+        // own hp / speed / reward.
+        enemyOpts: {},
+
         // Recompute maxActive / interval from the current `elapsed`.
         // Cheap (a few arithmetic ops), and once the ramp peaks we
         // pin the values and skip the math entirely each tick.
@@ -2509,14 +2623,23 @@
             return null;
         },
 
-        // Populate the world at boot. Seeds to the *starting* cap so
-        // the opening reads as calm; the ramp grows it from there.
+        // Populate the world at boot / on level entry. Seeds to the
+        // *starting* cap so the opening reads as calm; the ramp grows
+        // it from there. Each spawn uses the current level's
+        // enemyOpts so caverns get tougher enemies than the grove.
         seed() {
             const n = this.maxActive;
             for (let i = 0; i < n; i++) {
                 const spot = this.findSpot();
-                if (spot) spawnEnemy(spot.x, spot.y);
+                if (spot) spawnEnemy(spot.x, spot.y, this.enemyOpts);
             }
+        },
+
+        // Point the spawner at a new level. Caller follows with
+        // reset() + seed() when loading the room fresh.
+        configure(level) {
+            this.startMaxActive = level.enemyCount;
+            this.enemyOpts = level.enemyOpts;
         },
 
         // Called each tick. Advances the difficulty clock, then
@@ -2534,7 +2657,7 @@
             this.timer = this.interval;
 
             const spot = this.findSpot();
-            if (spot) spawnEnemy(spot.x, spot.y);
+            if (spot) spawnEnemy(spot.x, spot.y, this.enemyOpts);
         },
 
         // Rewind to the opening difficulty. Called by restartGame.
@@ -2546,8 +2669,8 @@
     };
 
     // Initialize runtime values from the opening config before seeding.
+    spawner.configure(currentLevel);
     spawner.reset();
-
     spawner.seed();
 
     // ---------------------------------------------------------------
@@ -2567,7 +2690,12 @@
         name: "Village Elder",
         interactRange: 60,
 
+        // The NPC only exists in levels that opt in (LEVELS.*.hasNpc).
+        // Returning false from isNearPlayer when the Elder isn't in
+        // this room transparently turns off the E prompt, the TALK
+        // button, and the interact keypress all at once.
         isNearPlayer() {
+            if (!currentLevel.hasNpc) return false;
             const cx = this.x + this.width / 2;
             const cy = this.y + this.height / 2;
             const px = player.x + player.width / 2;
@@ -2797,12 +2925,50 @@
         player.animator.setState(moving ? "walk" : "idle");
         player.animator.update(dt);
 
-        player.x += player.vx * dt;
-        player.y += player.vy * dt;
+        const nextX = player.x + player.vx * dt;
+        const nextY = player.y + player.vy * dt;
 
-        // Clamp the player inside the world, not the viewport.
-        player.x = Math.max(0, Math.min(WORLD_W - player.width, player.x));
-        player.y = Math.max(0, Math.min(WORLD_H - player.height, player.y));
+        // Room-to-room transition: if the tentative step would carry
+        // the player off the map, and the current level has an exit
+        // on that side, and the player is aligned with the gap in
+        // the border - hand off to the next level. Otherwise clamp.
+        if (maybeTransitionOnEdge(nextX, nextY)) return;
+
+        player.x = Math.max(0, Math.min(WORLD_W - player.width, nextX));
+        player.y = Math.max(0, Math.min(WORLD_H - player.height, nextY));
+    }
+
+    // Returns true if a level transition was triggered (in which case
+    // the caller should early-return - the new level's state is now
+    // live). Only triggers when the player's center is within
+    // EXIT_TRIGGER_PX of the midpoint of an edge that has an exit.
+    function maybeTransitionOnEdge(nextX, nextY) {
+        const midX = WORLD_W / 2;
+        const midY = WORLD_H / 2;
+        const pcx = nextX + player.width / 2;
+        const pcy = nextY + player.height / 2;
+
+        if (nextX < 0 && currentLevel.exits.west &&
+            Math.abs(pcy - midY) < EXIT_TRIGGER_PX) {
+            transitionTo(currentLevel.exits.west, "east");
+            return true;
+        }
+        if (nextX + player.width > WORLD_W && currentLevel.exits.east &&
+            Math.abs(pcy - midY) < EXIT_TRIGGER_PX) {
+            transitionTo(currentLevel.exits.east, "west");
+            return true;
+        }
+        if (nextY < 0 && currentLevel.exits.north &&
+            Math.abs(pcx - midX) < EXIT_TRIGGER_PX) {
+            transitionTo(currentLevel.exits.north, "south");
+            return true;
+        }
+        if (nextY + player.height > WORLD_H && currentLevel.exits.south &&
+            Math.abs(pcx - midX) < EXIT_TRIGGER_PX) {
+            transitionTo(currentLevel.exits.south, "north");
+            return true;
+        }
+        return false;
     }
 
     // ---------------------------------------------------------------
@@ -2923,6 +3089,71 @@
         for (const k in keys) keys[k] = false;
     }
 
+    // ---------------------------------------------------------------
+    // Level transitions
+    //
+    // Swaps the active LEVEL, regenerates world tiles, resets
+    // transient combat state (enemies, projectiles, drops, attack),
+    // warps the player to the arrival side, and reseeds the spawner.
+    // Persistent player state (hp, xp, level, inventory, weapons,
+    // quest progress, score) is preserved - only what belongs to
+    // the room resets.
+    //
+    //   id         target level id from LEVELS catalog
+    //   fromSide   which edge of the new level the player appears on
+    //              ("north" | "south" | "east" | "west")
+    // ---------------------------------------------------------------
+    function transitionTo(id, fromSide) {
+        const level = LEVELS[id];
+        if (!level) return;
+
+        currentLevel = level;
+        world.load(level);
+
+        // Warp the player to just inside the arrival edge, aligned
+        // with the center of the perpendicular axis so they enter
+        // through the visible door in the border.
+        const inset = 56;
+        if (fromSide === "west") {
+            player.x = inset;
+            player.y = WORLD_H / 2 - player.height / 2;
+        } else if (fromSide === "east") {
+            player.x = WORLD_W - player.width - inset;
+            player.y = WORLD_H / 2 - player.height / 2;
+        } else if (fromSide === "north") {
+            player.x = WORLD_W / 2 - player.width / 2;
+            player.y = inset;
+        } else if (fromSide === "south") {
+            player.x = WORLD_W / 2 - player.width / 2;
+            player.y = WORLD_H - player.height - inset;
+        }
+        player.vx = 0;
+        player.vy = 0;
+
+        // Transient combat state - belongs to the previous room.
+        enemies.length = 0;
+        projectiles.length = 0;
+        drops.length = 0;
+        attack.active = false;
+        attack.timer = 0;
+        attack.cooldownTimer = 0;
+        attack.progress = 0;
+        attack.hitEnemies.clear();
+        powerMove.reset();
+
+        // Reseed with the new level's enemy config.
+        spawner.configure(level);
+        spawner.reset();
+        spawner.seed();
+
+        // Snap the camera to prevent a visible pan from the old spot.
+        camera.snap(player);
+
+        // Level-name toast. Reuses the existing quest toast slot
+        // since they're never active at the same moment in practice.
+        questLog.showToast(`Entering: ${level.name}`, 2.0);
+    }
+
     // Restart - resets every piece of run-scoped state back to its
     // boot values, including any level-up upgrades. New systems that
     // hold run state (pickups, xp, map seed) reset themselves here
@@ -2964,8 +3195,12 @@
         attack.hitEnemies.clear();
 
         // Enemies - wipe the array in place (preserves other refs),
-        // rewind the difficulty ramp, and reseed from the spawner.
+        // rewind the difficulty ramp, and reseed from the spawner
+        // using whatever level we're about to load (grove on restart).
         enemies.length = 0;
+        currentLevel = LEVELS.grove;
+        world.load(currentLevel);
+        spawner.configure(currentLevel);
         spawner.reset();
         spawner.seed();
 
@@ -3037,9 +3272,10 @@
         // by a live enemy standing over the same tile.
         drawDrops(ctx);
 
-        // NPC - static, beneath enemies/player so they can pass in
-        // front. Their interact bubble draws as part of the NPC.
-        npc.draw(ctx);
+        // NPC - only rendered in levels that opt in; they pass in
+        // front because the player draws afterwards. The interact
+        // bubble is drawn by the NPC itself.
+        if (currentLevel.hasNpc) npc.draw(ctx);
 
         // Enemies beneath the player so the player always reads on top.
         for (const e of enemies) e.draw(ctx);
