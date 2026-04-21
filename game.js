@@ -2705,7 +2705,99 @@
     // A single `drawNpc(ctx, n)` helper renders any NPC using the
     // template + colors, so adding roles (Elder, Merchant, Villager,
     // Scout, Blacksmith...) is one more object in a level's list.
+    //
+    // Wander behavior
+    //   Each Npc has a tiny state machine: `idle` (stand still for
+    //   a random pause) → `walk` (move slowly toward a target point
+    //   within `wanderRadius` of their home spawn) → `idle` when
+    //   they arrive or the walk timer expires. Targets are re-rolled
+    //   each walk, clamped to the world margin, and derived from
+    //   the NPC's *home* position so they orbit their plaza instead
+    //   of drifting across the map. Frame cost per NPC is a handful
+    //   of arithmetic ops.
     // ---------------------------------------------------------------
+    class Npc {
+        constructor(config) {
+            // Display + interaction fields from the caller's config.
+            // `interact` is a function, preserved verbatim.
+            Object.assign(this, config);
+
+            // Lock "home" to the spawn position so wander always
+            // orbits this spot regardless of current position.
+            this.homeX = this.x;
+            this.homeY = this.y;
+
+            this.wanderRadius = config.wanderRadius ?? 90;
+            this.speed = config.speed ?? 38;     // slow walk - npc pace
+            this.margin = config.margin ?? 72;   // world-edge buffer
+
+            this.state = "idle";
+            this.stateTimer = 0.8 + Math.random() * 1.8;
+            this.targetX = this.x;
+            this.targetY = this.y;
+            this.age = 0;
+        }
+
+        update(dt) {
+            this.age += dt;
+            this.stateTimer -= dt;
+
+            if (this.state === "idle") {
+                if (this.stateTimer <= 0) {
+                    this._pickWanderTarget();
+                    this.state = "walk";
+                    // Walk-state timer is a safety net so an NPC who
+                    // gets stuck (e.g. target clamped into them) can
+                    // always fall back to idle.
+                    this.stateTimer = 3 + Math.random() * 3;
+                }
+                return;
+            }
+
+            // Walking - step toward target, stop when close or when
+            // the safety timer runs out.
+            const dx = this.targetX - this.x;
+            const dy = this.targetY - this.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist < 2 || this.stateTimer <= 0) {
+                this.state = "idle";
+                this.stateTimer = 1.2 + Math.random() * 2.4;
+                return;
+            }
+            const step = Math.min(dist, this.speed * dt);
+            const inv = 1 / dist;
+            this.x += dx * inv * step;
+            this.y += dy * inv * step;
+        }
+
+        _pickWanderTarget() {
+            const angle = Math.random() * Math.PI * 2;
+            const r = 18 + Math.random() * this.wanderRadius;
+            let tx = this.homeX + Math.cos(angle) * r;
+            let ty = this.homeY + Math.sin(angle) * r;
+
+            // Keep NPCs inside the city bounds. Margin mirrors the
+            // spawner's world-edge margin so they stay well off the
+            // outer stone wall.
+            tx = Math.max(this.margin, Math.min(WORLD_W - this.margin - this.width, tx));
+            ty = Math.max(this.margin, Math.min(WORLD_H - this.margin - this.height, ty));
+
+            this.targetX = tx;
+            this.targetY = ty;
+        }
+
+        // Small vertical bob only while walking. Called from drawNpc.
+        bobOffset() {
+            return this.state === "walk" ? Math.sin(this.age * 6) * 1 : 0;
+        }
+    }
+
+    // Advances every NPC in the current level. Cheap: one state-
+    // machine tick + a bounded-distance move per NPC. Safe to call
+    // in both combat and safe zones; NPCs only live in the grove.
+    function updateNpcs(dt) {
+        for (const n of activeNpcs()) n.update(dt);
+    }
 
     function activeNpcs() {
         return currentLevel.npcs || [];
@@ -2744,9 +2836,13 @@
     function drawNpc(ctx, n) {
         const x = Math.round(n.x);
         const y = Math.round(n.y);
+        // Walk bob rides on top of everything but the shadow, so
+        // NPCs visibly "step" without their shadow moving off the
+        // ground.
+        const bob = n.bobOffset ? Math.round(n.bobOffset()) : 0;
         const c = n.colors;
 
-        // Shadow
+        // Shadow (stays anchored to the ground)
         ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
         ctx.beginPath();
         ctx.ellipse(x + 16, y + 29, 9, 3, 0, 0, Math.PI * 2);
@@ -2754,24 +2850,24 @@
 
         // Robe
         ctx.fillStyle = c.robe;
-        ctx.fillRect(x + 8, y + 12, 16, 16);
+        ctx.fillRect(x + 8, y + 12 + bob, 16, 16);
         ctx.fillStyle = c.trim;
-        ctx.fillRect(x + 8, y + 25, 16, 3);
+        ctx.fillRect(x + 8, y + 25 + bob, 16, 3);
         // Sash
         ctx.fillStyle = c.sash;
-        ctx.fillRect(x + 8, y + 19, 16, 2);
+        ctx.fillRect(x + 8, y + 19 + bob, 16, 2);
 
         // Head
         ctx.fillStyle = "#e8c096";
-        ctx.fillRect(x + 10, y + 6, 12, 8);
+        ctx.fillRect(x + 10, y + 6 + bob, 12, 8);
         // Hat
         ctx.fillStyle = c.hat;
-        ctx.fillRect(x + 9, y + 3, 14, 4);
+        ctx.fillRect(x + 9, y + 3 + bob, 14, 4);
 
         // Eyes
         ctx.fillStyle = "#1a1a24";
-        ctx.fillRect(x + 13, y + 10, 2, 2);
-        ctx.fillRect(x + 17, y + 10, 2, 2);
+        ctx.fillRect(x + 13, y + 10 + bob, 2, 2);
+        ctx.fillRect(x + 17, y + 10 + bob, 2, 2);
 
         // Interact hint when in range (world-space bubble with "E").
         if (gameState === "playing" && npcIsNear(n)) {
@@ -2818,41 +2914,48 @@
     // Populate the grove with four NPCs: Elder (quest), Merchant
     // (placeholder shop), Villager (flavor), Scout (lore hint).
     LEVELS.grove.npcs = [
-        {
+        new Npc({
             id: "elder",
             name: "Village Elder",
             x: WORLD_W / 2 + 140,
             y: WORLD_H / 2 - 12,
             width: 32, height: 32,
             interactRange: 60,
+            // Elder stays near their seat - smaller roam radius.
+            wanderRadius: 40,
+            speed: 22,
             colors: { robe: "#6b4e91", trim: "#503872", sash: "#ffd166", hat: "#4a2f70" },
             interact: elderInteract,
-        },
-        {
+        }),
+        new Npc({
             id: "merchant",
             name: "Merchant",
             x: WORLD_W / 2 - 180,
             y: WORLD_H / 2 - 20,
             width: 32, height: 32,
             interactRange: 60,
+            // Merchant tends their stall - very small radius.
+            wanderRadius: 28,
+            speed: 28,
             colors: { robe: "#8c5a3c", trim: "#5f3c26", sash: "#e0b066", hat: "#3d2a18" },
             interact() {
-                // Shop placeholder. A future pass can flip `inventoryOpen`
-                // into a shop-mode variant.
                 const lines = [
                     'Merchant: "My wares arrive with the next caravan!"',
                     'Merchant: "Gold coins will open doors, friend."',
                 ];
                 questLog.showToast(lines[Math.floor(Math.random() * lines.length)], 2.4);
             },
-        },
-        {
+        }),
+        new Npc({
             id: "villager",
             name: "Villager",
             x: WORLD_W / 2 + 40,
             y: WORLD_H / 2 + 160,
             width: 32, height: 32,
             interactRange: 60,
+            // Villager strolls the widest - free spirit.
+            wanderRadius: 140,
+            speed: 42,
             colors: { robe: "#4e915c", trim: "#356840", sash: "#a0d0a0", hat: "#2f5a3a" },
             interact() {
                 const lines = [
@@ -2862,14 +2965,17 @@
                 ];
                 questLog.showToast(lines[Math.floor(Math.random() * lines.length)], 2.4);
             },
-        },
-        {
+        }),
+        new Npc({
             id: "scout",
             name: "Scout",
             x: WORLD_W / 2 - 60,
             y: WORLD_H / 2 - 180,
             width: 32, height: 32,
             interactRange: 60,
+            // Scout paces on watch.
+            wanderRadius: 90,
+            speed: 50,
             colors: { robe: "#3c5c8c", trim: "#223a5a", sash: "#8ad9ff", hat: "#1a2c46" },
             interact() {
                 questLog.showToast(
@@ -2877,7 +2983,7 @@
                     2.8
                 );
             },
-        },
+        }),
     ];
 
     // Place the camera on the player before the first frame so we
@@ -3167,6 +3273,7 @@
         updateProjectiles(dt);
         updatePlayerStatus(dt);
         updateDrops(dt);
+        updateNpcs(dt);
         camera.follow(player, dt);
         clearJustPressed();
     }
