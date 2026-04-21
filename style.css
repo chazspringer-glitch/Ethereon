@@ -21,62 +21,28 @@ body {
     -webkit-tap-highlight-color: transparent;
 }
 
-/* ---------- Centered game area ---------- */
+/* The game owns the full viewport. No letterboxing, no chrome. */
 .game-wrapper {
     position: fixed;
     inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-/* Title / hint sit as small overlays so they never steal room from
-   the canvas on short screens. They're hidden on very small viewports
-   where every pixel counts. */
-.title {
-    position: fixed;
-    top: max(8px, env(safe-area-inset-top));
-    left: 50%;
-    transform: translateX(-50%);
-    font-size: 1rem;
-    letter-spacing: 3px;
-    text-transform: uppercase;
-    color: #ffd166;
-    pointer-events: none;
-    z-index: 2;
-}
-
-.hint {
-    position: fixed;
-    bottom: max(8px, env(safe-area-inset-bottom));
-    left: 50%;
-    transform: translateX(-50%);
-    font-size: 0.8rem;
-    color: #a0a0b8;
-    pointer-events: none;
-    z-index: 2;
-}
-
-@media (max-height: 420px) {
-    .title,
-    .hint {
-        display: none;
-    }
 }
 
 /* ---------- Canvas ----------
-   The canvas's internal resolution stays at 960x540 (16:9) so all game
-   math is unchanged; its *display* size is set by JS on resize to
-   preserve aspect ratio and letterbox when the window isn't 16:9.
-   The CSS fallback below covers the first paint before the JS runs. */
+   Fills the full viewport on any device. The canvas's *internal*
+   resolution is sized by JS on resize to match the viewport's aspect
+   ratio, so drawing at 1:1 with the CSS size produces no distortion
+   and no letterbox bars even in portrait. All game math (world size,
+   HUD positions) reads VIEW_W/VIEW_H which are updated on every
+   resize, so the HUD reflows automatically. */
 #game {
     display: block;
     background: #2a2a38;
-    border-radius: 4px;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
     image-rendering: pixelated;
     image-rendering: crisp-edges;
-    width: min(100vw, calc(100vh * 16 / 9));
-    height: min(100vh, calc(100vw * 9 / 16));
+    width: 100vw;
+    height: 100vh;
+    /* Respect iPhone notch / home indicator */
+    width: 100dvw;
+    height: 100dvh;
     touch-action: none;
 }

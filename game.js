@@ -36,39 +36,73 @@
     const canvas = document.getElementById("game");
     const ctx = canvas.getContext("2d");
 
-    const VIEW_W = canvas.width;    // 960
-    const VIEW_H = canvas.height;   // 540
+    // Live viewport dimensions. Updated by `resizeDisplay()` whenever
+    // the window changes size or rotates. HUD positions, button
+    // layouts, camera clamping, and input coordinate math all read
+    // these at access time, so they reflow automatically.
+    let VIEW_W = canvas.width;    // overwritten on first resize
+    let VIEW_H = canvas.height;
 
     // ---------------------------------------------------------------
     // Responsive display sizing
     //
-    // The canvas's internal buffer (VIEW_W x VIEW_H) is the game's
-    // coordinate system and never changes - all world math, HUD
-    // positions, and camera clamping stay stable regardless of the
-    // player's screen. We only resize the *display* (CSS) size,
-    // preserving the 16:9 aspect ratio with letterboxing so nothing
-    // stretches or distorts.
+    // The canvas's *internal* resolution now matches the viewport's
+    // aspect ratio (anchored to a ~960px long side) so CSS can fill
+    // the entire screen at 1:1 scale - no distortion, no letterbox
+    // bars. Every piece of UI reads VIEW_W / VIEW_H so the HUD
+    // reflows naturally across landscape desktop and portrait mobile.
+    //
+    // Things that care about layout register via `onLayout(fn)` and
+    // get called on every resize (and once at boot). Buttons use
+    // this to reposition against the new viewport edges.
     // ---------------------------------------------------------------
-    const ASPECT = VIEW_W / VIEW_H;
+    const LONG_SIDE = 960;       // reference long-axis resolution
+    const MIN_SHORT_SIDE = 480;  // don't render so thin that HUD overlaps
+
+    const layoutCallbacks = [];
+    function onLayout(fn) {
+        layoutCallbacks.push(fn);
+    }
 
     function resizeDisplay() {
-        const ww = window.innerWidth;
-        const wh = window.innerHeight;
+        const ww = Math.max(1, window.innerWidth);
+        const wh = Math.max(1, window.innerHeight);
 
         let w, h;
-        if (ww / wh > ASPECT) {
-            // Window is wider than the game - pillarbox (bars on sides).
-            h = wh;
-            w = Math.floor(h * ASPECT);
+        if (ww >= wh) {
+            // Landscape: long axis is width.
+            w = LONG_SIDE;
+            h = Math.round(LONG_SIDE * wh / ww);
         } else {
-            // Window is taller than the game - letterbox (bars top/bottom).
-            w = ww;
-            h = Math.floor(w / ASPECT);
+            // Portrait: long axis is height.
+            h = LONG_SIDE;
+            w = Math.round(LONG_SIDE * ww / wh);
         }
 
-        canvas.style.width = w + "px";
-        canvas.style.height = h + "px";
+        // Clamp the short axis so extremely narrow viewports don't
+        // crush the HUD beyond usability.
+        if (w < MIN_SHORT_SIDE && h >= w) w = MIN_SHORT_SIDE;
+        if (h < MIN_SHORT_SIDE && w >= h) h = MIN_SHORT_SIDE;
+
+        // Assigning canvas.width/height resets the 2D context - that's
+        // fine because we redraw every frame, but the next paint will
+        // pick up whatever fillStyle etc. we set then.
+        canvas.width = w;
+        canvas.height = h;
+        VIEW_W = w;
+        VIEW_H = h;
+
+        // Invalidate the cached bounding rect used by pointer events,
+        // and re-run every layout-dependent module's callback.
+        invalidateCanvasRect();
+        for (const fn of layoutCallbacks) fn();
     }
+
+    // Cached canvas bounding rect used by `pointerToCanvas`. Declared
+    // up here so `resizeDisplay` can invalidate it; the pointer-math
+    // block further down uses the same reference.
+    let _canvasRect = null;
+    function invalidateCanvasRect() { _canvasRect = null; }
 
     window.addEventListener("resize", resizeDisplay);
     window.addEventListener("orientationchange", resizeDisplay);
@@ -866,9 +900,14 @@
     // - one tap = one attack attempt.
     // ---------------------------------------------------------------
     const attackButton = {
-        x: VIEW_W - 80,
-        y: VIEW_H - 80,
+        x: 0, y: 0,
         radius: 54,
+
+        // Pulled anchored to the bottom-right corner on every resize.
+        layout() {
+            this.x = VIEW_W - 80;
+            this.y = VIEW_H - 80;
+        },
 
         pressed: false,        // pointer still held on button - drives visual feedback
         pointerId: null,
@@ -957,9 +996,13 @@
     // half) can never steal its touches.
     // ---------------------------------------------------------------
     const weaponSwapButton = {
-        x: VIEW_W - 166,
-        y: VIEW_H - 78,
+        x: 0, y: 0,
         radius: 36,
+
+        layout() {
+            this.x = VIEW_W - 178;
+            this.y = VIEW_H - 80;
+        },
 
         pressed: false,
         pointerId: null,
@@ -1038,9 +1081,13 @@
     // button idiom that reads even without any text.
     // ---------------------------------------------------------------
     const powerButton = {
-        x: VIEW_W - 78,
-        y: VIEW_H - 170,
+        x: 0, y: 0,
         radius: 38,
+
+        layout() {
+            this.x = VIEW_W - 80;
+            this.y = VIEW_H - 170;
+        },
 
         pressed: false,
         pointerId: null,
@@ -1134,9 +1181,13 @@
     // path the E key uses, so keyboard and touch converge.
     // ---------------------------------------------------------------
     const interactButton = {
-        x: VIEW_W / 2,
-        y: VIEW_H - 84,
+        x: 0, y: 0,
         radius: 34,
+
+        layout() {
+            this.x = VIEW_W / 2;
+            this.y = VIEW_H - 84;
+        },
 
         pressed: false,
         pointerId: null,
@@ -1199,6 +1250,23 @@
             ctx.restore();
         },
     };
+
+    // Register every button that pins itself to a viewport edge.
+    // Called once at boot (the resize listener installed later is
+    // what triggers the first run) and on every subsequent resize.
+    onLayout(() => {
+        attackButton.layout();
+        weaponSwapButton.layout();
+        powerButton.layout();
+        interactButton.layout();
+    });
+    // Button layouts need to be valid before the first frame, but
+    // resizeDisplay() runs before any of these objects exist. Kick
+    // layouts once now that every button is defined.
+    attackButton.layout();
+    weaponSwapButton.layout();
+    powerButton.layout();
+    interactButton.layout();
 
     // ---------------------------------------------------------------
     // Restart button (game-over only)
@@ -1278,12 +1346,10 @@
     // stall rendering. Cache the rect and invalidate only when
     // layout-affecting things change. A shared scratch object avoids
     // per-event allocation in the hot drag path.
-    let _canvasRect = null;
-    function invalidateCanvasRect() {
-        _canvasRect = null;
-    }
-    window.addEventListener("resize", invalidateCanvasRect);
-    window.addEventListener("orientationchange", invalidateCanvasRect);
+    //
+    // `_canvasRect` and `invalidateCanvasRect()` are declared earlier
+    // in the file so `resizeDisplay()` can trigger the invalidation.
+    // This block just wires additional invalidation triggers.
     window.addEventListener("scroll", invalidateCanvasRect, { passive: true });
 
     const _pointerOut = { x: 0, y: 0 };
@@ -1890,6 +1956,7 @@
         id: "sword",
         name: "Sword",
         shortName: "SWORD",   // compact label for the mobile swap button
+        glyph: "⚔",      // crossed swords, used by the HUD icon
         color: "#ffd166",
         damage: 1,            // per-hit damage; bump for heavier melee variants
         get ready() {
@@ -1918,6 +1985,7 @@
         id: "energy",
         name: "Energy Blast",
         shortName: "ENERGY",
+        glyph: "✦",
         color: "#8ad9ff",
         cooldownMax: 0.5,
         cooldownTimer: 0,
@@ -3135,14 +3203,19 @@
         ctx.restore();
     }
 
-    // Quest HUD - a compact panel in the top-right showing the
-    // active quest or a "(no active quest)" stub. Uses the same
-    // dark-glass + shadowed-text style as the rest of the HUD.
+    // Quest HUD - a compact panel that sits top-right on wide
+    // viewports and drops below the stats panel on narrow (portrait)
+    // viewports so the two never overlap. Uses the same dark-glass +
+    // shadowed-text style as the rest of the HUD.
     function drawQuestPanel() {
         const w = 240;
         const h = 48;
-        const x = VIEW_W - w - 8;
-        const y = 8;
+
+        // Stats panel occupies x 8..288 at top. Give it 8px of gap
+        // before placing the quest panel alongside.
+        const canFitRight = VIEW_W >= 288 + w + 16;
+        const x = canFitRight ? VIEW_W - w - 8 : 8;
+        const y = canFitRight ? 8 : 98;
 
         ctx.save();
         roundRectPath(ctx, x, y, w, h, 8);
@@ -3515,47 +3588,108 @@
 
     function drawCooldownBar() {
         const w = currentWeapon();
-        const barW = 140;
+        const barW = 156;
         const barH = 8;
-        const x = 16;
 
-        // Two stacked bars: weapon above, power below. Power sits
-        // directly beneath the weapon bar so the whole combat-ready
-        // readout is one compact block.
-        const powerY = VIEW_H - 20;
-        const weaponY = powerY - 22;
+        const panelX = 12;
+        const panelBottom = VIEW_H - 12;
+        const iconSize = 34;
+        // Each stat row = one icon on the left, bar+label on the right.
+        const rowH = iconSize;
+        const gap = 6;
 
-        // --- Weapon bar ---
-        drawMiniBar(x, weaponY, barW, barH, w.cooldownFrac(), w.ready ? w.color : "#d17a7a");
+        const powerRowY = panelBottom - rowH;
+        const weaponRowY = powerRowY - rowH - gap;
+
+        // --- Weapon row ---
+        drawWeaponIcon(panelX, weaponRowY, iconSize, w);
+        const barX = panelX + iconSize + 8;
         drawShadowedText(
-            `WEAPON  ${w.name}`,
-            x, weaponY - 6,
+            w.name.toUpperCase(),
+            barX, weaponRowY + 3,
             "#e8e8f0",
             "bold 11px system-ui, sans-serif"
         );
-
-        // --- Power bar ---
-        const powerReady = powerMove.ready;
         drawMiniBar(
-            x, powerY, barW, barH,
+            barX, weaponRowY + iconSize - barH - 4,
+            barW, barH,
+            w.cooldownFrac(),
+            w.ready ? w.color : "#d17a7a"
+        );
+
+        // --- Power row ---
+        const powerReady = powerMove.ready;
+        drawPowerIcon(panelX, powerRowY, iconSize, powerReady);
+        drawShadowedText(
+            powerReady ? "POWER  READY" : "POWER  charging...",
+            barX, powerRowY + 3,
+            "#e8e8f0",
+            "bold 11px system-ui, sans-serif"
+        );
+        drawMiniBar(
+            barX, powerRowY + iconSize - barH - 4,
+            barW, barH,
             powerMove.cooldownFrac(),
             powerReady ? "#ff8e3a" : "#7a4030"
         );
-        drawShadowedText(
-            `POWER  ${powerReady ? "READY" : "charging..."}`,
-            x, powerY - 6,
-            "#e8e8f0",
-            "bold 11px system-ui, sans-serif"
-        );
+    }
+
+    // Small rounded square showing the current weapon's glyph. Tint
+    // shifts when the weapon is ready so the indicator doubles as a
+    // "can-fire" light.
+    function drawWeaponIcon(x, y, size, weapon) {
+        ctx.save();
+        roundRectPath(ctx, x, y, size, size, 6);
+        ctx.fillStyle = weapon.ready ? "rgba(18, 18, 30, 0.85)" : "rgba(18, 18, 30, 0.7)";
+        ctx.fill();
+        ctx.strokeStyle = weapon.ready ? weapon.color : "rgba(255, 255, 255, 0.25)";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.fillStyle = weapon.ready ? weapon.color : "rgba(255, 255, 255, 0.45)";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.font = "bold 18px system-ui, sans-serif";
+        ctx.fillText(weapon.glyph, x + size / 2, y + size / 2 + 1);
+        ctx.restore();
+    }
+
+    function drawPowerIcon(x, y, size, ready) {
+        ctx.save();
+        roundRectPath(ctx, x, y, size, size, 6);
+        ctx.fillStyle = ready ? "rgba(30, 18, 18, 0.85)" : "rgba(18, 18, 30, 0.7)";
+        ctx.fill();
+        ctx.strokeStyle = ready ? "#ff8e3a" : "rgba(255, 255, 255, 0.25)";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.fillStyle = ready ? "#ff8e3a" : "rgba(255, 255, 255, 0.45)";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.font = "bold 18px system-ui, sans-serif";
+        ctx.fillText("★", x + size / 2, y + size / 2 + 1);
+        ctx.restore();
     }
 
     function drawMiniBar(x, y, w, h, frac, color) {
+        ctx.save();
+        roundRectPath(ctx, x, y, w, h, h / 2);
         ctx.fillStyle = "#1a1a24";
-        ctx.fillRect(x, y, w, h);
-        ctx.fillStyle = color;
-        ctx.fillRect(x, y, w * frac, h);
-        ctx.strokeStyle = "#444458";
-        ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+        ctx.fill();
+        if (frac > 0) {
+            ctx.save();
+            ctx.clip();
+            ctx.fillStyle = color;
+            ctx.fillRect(x, y, w * frac, h);
+            ctx.fillStyle = "rgba(255, 255, 255, 0.22)";
+            ctx.fillRect(x, y + 1, w * frac, 2);
+            ctx.restore();
+        }
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.18)";
+        ctx.lineWidth = 1;
+        roundRectPath(ctx, x + 0.5, y + 0.5, w - 1, h - 1, h / 2);
+        ctx.stroke();
+        ctx.restore();
     }
 
     // ---------------------------------------------------------------
