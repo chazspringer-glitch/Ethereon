@@ -7,43 +7,76 @@
 
 html,
 body {
-    height: 100%;
     width: 100%;
+    height: 100%;
     background: #1a1a24;
     color: #e8e8f0;
     font-family: "Segoe UI", Roboto, system-ui, sans-serif;
+    /* Lock the page down on mobile so the game can own the viewport. */
+    overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
 }
 
 /* ---------- Centered game area ---------- */
 .game-wrapper {
-    min-height: 100vh;
+    position: fixed;
+    inset: 0;
     display: flex;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 14px;
-    padding: 20px;
 }
 
+/* Title / hint sit as small overlays so they never steal room from
+   the canvas on short screens. They're hidden on very small viewports
+   where every pixel counts. */
 .title {
-    font-size: 2rem;
+    position: fixed;
+    top: max(8px, env(safe-area-inset-top));
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 1rem;
     letter-spacing: 3px;
     text-transform: uppercase;
     color: #ffd166;
+    pointer-events: none;
+    z-index: 2;
 }
 
 .hint {
-    font-size: 0.95rem;
+    position: fixed;
+    bottom: max(8px, env(safe-area-inset-bottom));
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 0.8rem;
     color: #a0a0b8;
+    pointer-events: none;
+    z-index: 2;
 }
 
-/* ---------- Canvas ---------- */
+@media (max-height: 420px) {
+    .title,
+    .hint {
+        display: none;
+    }
+}
+
+/* ---------- Canvas ----------
+   The canvas's internal resolution stays at 960x540 (16:9) so all game
+   math is unchanged; its *display* size is set by JS on resize to
+   preserve aspect ratio and letterbox when the window isn't 16:9.
+   The CSS fallback below covers the first paint before the JS runs. */
 #game {
     display: block;
     background: #2a2a38;
-    border: 2px solid #444458;
-    border-radius: 6px;
+    border-radius: 4px;
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
-    /* Keep the canvas at its intrinsic 800x600 resolution */
     image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    width: min(100vw, calc(100vh * 16 / 9));
+    height: min(100vh, calc(100vw * 9 / 16));
+    touch-action: none;
 }

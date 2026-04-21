@@ -36,8 +36,43 @@
     const canvas = document.getElementById("game");
     const ctx = canvas.getContext("2d");
 
-    const VIEW_W = canvas.width;    // 800
-    const VIEW_H = canvas.height;   // 600
+    const VIEW_W = canvas.width;    // 960
+    const VIEW_H = canvas.height;   // 540
+
+    // ---------------------------------------------------------------
+    // Responsive display sizing
+    //
+    // The canvas's internal buffer (VIEW_W x VIEW_H) is the game's
+    // coordinate system and never changes - all world math, HUD
+    // positions, and camera clamping stay stable regardless of the
+    // player's screen. We only resize the *display* (CSS) size,
+    // preserving the 16:9 aspect ratio with letterboxing so nothing
+    // stretches or distorts.
+    // ---------------------------------------------------------------
+    const ASPECT = VIEW_W / VIEW_H;
+
+    function resizeDisplay() {
+        const ww = window.innerWidth;
+        const wh = window.innerHeight;
+
+        let w, h;
+        if (ww / wh > ASPECT) {
+            // Window is wider than the game - pillarbox (bars on sides).
+            h = wh;
+            w = Math.floor(h * ASPECT);
+        } else {
+            // Window is taller than the game - letterbox (bars top/bottom).
+            w = ww;
+            h = Math.floor(w / ASPECT);
+        }
+
+        canvas.style.width = w + "px";
+        canvas.style.height = h + "px";
+    }
+
+    window.addEventListener("resize", resizeDisplay);
+    window.addEventListener("orientationchange", resizeDisplay);
+    resizeDisplay();
 
     const TILE = 32;
     const WORLD_COLS = 75;          // 75 * 32 = 2400
