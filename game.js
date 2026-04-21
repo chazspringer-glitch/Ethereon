@@ -4185,13 +4185,86 @@
     // the shop is coming soon. Designed so adding a buy-on-tap
     // handler later is a one-liner inside selectItem().
     // ---------------------------------------------------------------
+    // Each shop item owns its own buy-effect via `onBuy()`. `price`
+    // may mutate after a purchase (upgrades get more expensive each
+    // time); `basePrice` is preserved so `resetShopPrices` can roll
+    // the table back on restart. Adding a new ware is one more
+    // object here.
     const SHOP_ITEMS = [
-        { id: "potion",     name: "Health Potion",   effect: "Restores 30 HP",    price: 15 },
-        { id: "iron_sword", name: "Iron Sword",      effect: "+1 sword damage",   price: 60 },
-        { id: "focus_gem",  name: "Focus Gem",       effect: "Faster cooldowns",  price: 80 },
-        { id: "shield",     name: "Wooden Shield",   effect: "Reduces damage",    price: 120 },
-        { id: "elixir",     name: "Ethereon Elixir", effect: "Unknown...",        price: 500 },
+        {
+            id: "potion",
+            name: "Health Potion",
+            effect: "Restores 30 HP",
+            basePrice: 15,
+            price: 15,
+            onBuy() {
+                healPlayer(30);
+                questLog.showToast(
+                    `Potion quaffed - HP ${Math.ceil(player.hp)}/${player.maxHp}.`,
+                    1.8
+                );
+            },
+        },
+        {
+            id: "sword_upgrade",
+            name: "Sword Upgrade",
+            effect: "+1 sword damage",
+            basePrice: 50,
+            price: 50,
+            onBuy() {
+                swordWeapon.damage += 1;
+                // Each upgrade raises the next price so late-game
+                // bosses actually feel like a sink.
+                this.price = Math.floor(this.price * 1.8);
+                questLog.showToast(
+                    `Sword sharpened!  (${swordWeapon.damage} dmg)`,
+                    2.0
+                );
+            },
+        },
+        {
+            id: "energy_upgrade",
+            name: "Energy Upgrade",
+            effect: "+1 energy damage",
+            basePrice: 70,
+            price: 70,
+            onBuy() {
+                energyWeapon.damage += 1;
+                this.price = Math.floor(this.price * 1.8);
+                questLog.showToast(
+                    `Energy focus tuned!  (${energyWeapon.damage} dmg)`,
+                    2.0
+                );
+            },
+        },
+        {
+            id: "vitality",
+            name: "Vitality Rune",
+            effect: "+10 max HP",
+            basePrice: 100,
+            price: 100,
+            onBuy() {
+                player.maxHp += 10;
+                // Also top up by the same amount so the purchase
+                // reads as an instant power bump, not a hidden bar
+                // extension.
+                healPlayer(10);
+                this.price = Math.floor(this.price * 1.8);
+                questLog.showToast(
+                    `Vitality surges - max HP ${player.maxHp}.`,
+                    2.0
+                );
+            },
+        },
     ];
+
+    // Called by restartGame to wipe upgrade inflation so a new run
+    // sees original prices.
+    function resetShopPrices() {
+        for (const item of SHOP_ITEMS) {
+            if (item.basePrice != null) item.price = item.basePrice;
+        }
+    }
 
     const shop = {
         open_: false,
@@ -4202,25 +4275,28 @@
         close() { this.open_ = false; this.itemRects = []; this.closeRect = null; },
         isOpen() { return this.open_; },
 
-        // Checks the purse, deducts on success, toasts either way.
-        // Actual item effects / inventory tie-in are out of scope
-        // here - the point is that coins now *buy* something.
+        // Checks the purse and routes to the item's own onBuy
+        // callback so the shop module stays dumb about effects.
+        // Insufficient coins is a loud-toast rejection; any future
+        // "locked" or "sold out" state can gate here by returning
+        // early before deducting.
         selectItem(index) {
             const item = SHOP_ITEMS[index];
             if (!item) return;
             if (player.coins < item.price) {
                 questLog.showToast(
-                    `Not enough coins (${player.coins}/${item.price}g).`,
+                    `Not enough coins  (${player.coins}/${item.price}g)`,
                     1.8
                 );
                 return;
             }
             player.coins -= item.price;
             sound.play("coin");
-            questLog.showToast(
-                `Purchased: ${item.name}  (-${item.price}g)`,
-                2.0
-            );
+            if (typeof item.onBuy === "function") {
+                item.onBuy();
+            } else {
+                questLog.showToast(`Purchased: ${item.name}`, 2.0);
+            }
         },
     };
 
@@ -5849,8 +5925,11 @@
         // Dialogue - close any open box, drop cached option rects.
         dialogue.close();
 
-        // Shop - close any open shop window.
+        // Shop - close any open shop window and roll upgrade
+        // prices back to their opening values so a fresh run
+        // sees fresh prices.
         shop.close();
+        resetShopPrices();
 
         // Doors - a fresh run means fresh locks.
         unlockedDoors.clear();
