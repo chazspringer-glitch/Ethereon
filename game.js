@@ -3,7 +3,9 @@
  *
  * Architecture:
  *   - Input:   tracks which keys are held and which were pressed this frame.
- *   - Player:  entity state (position, size, facing direction).
+ *   - Player:  entity state (position, size, facing, stats).
+ *   - Stats:   damagePlayer/healPlayer route through one place so future
+ *              items and upgrades can apply modifiers in a single spot.
  *   - Attack:  self-contained combat module (state, timers, hitbox, draw).
  *   - Enemies: Enemy class + a flat array of instances.
  *   - Update:  advances game state based on time elapsed.
@@ -62,7 +64,45 @@
         speed: 220, // pixels per second
         color: "#ffd166",
         facing: { x: 1, y: 0 }, // default: facing right
+
+        // --- Stats (extend here for future items / upgrades) ---
+        hp: 100,
+        maxHp: 100,
+        alive: true,
+
+        // Invincibility frames after taking a hit.
+        iframes: 0,
+        iframeDuration: 0.8,
+
+        // Hook point for future modifiers. Items or upgrades can push
+        // functions here that take (amount) and return a modified amount
+        // (e.g. armor reduction, damage resistance).
+        damageModifiers: [],
     };
+
+    // ---------------------------------------------------------------
+    // Stats helpers - the single place damage / healing flows through.
+    // Future items ("Leather Vest: -2 damage taken") plug in here
+    // rather than scattering HP math around the codebase.
+    // ---------------------------------------------------------------
+    function damagePlayer(amount) {
+        if (!player.alive || player.iframes > 0) return;
+
+        let final = amount;
+        for (const mod of player.damageModifiers) final = mod(final);
+        final = Math.max(0, final);
+        if (final === 0) return;
+
+        player.hp = Math.max(0, player.hp - final);
+        player.iframes = player.iframeDuration;
+
+        if (player.hp <= 0) player.alive = false;
+    }
+
+    function healPlayer(amount) {
+        if (!player.alive) return;
+        player.hp = Math.min(player.maxHp, player.hp + amount);
+    }
 
     // ---------------------------------------------------------------
     // Attack module
@@ -297,10 +337,39 @@
         }
     }
 
+    // Enemy bodies touching the player deal contact damage. `damagePlayer`
+    // is a no-op while iframes are active, so one collision won't drain
+    // the whole bar.
+    function updateEnemyContact() {
+        if (!player.alive) return;
+        const playerBox = {
+            x: player.x,
+            y: player.y,
+            w: player.width,
+            h: player.height,
+        };
+        for (const e of enemies) {
+            if (!e.alive) continue;
+            if (rectsOverlap(playerBox, e.bounds())) {
+                damagePlayer(10);
+                break; // one damage event per frame is enough
+            }
+        }
+    }
+
+    // Ticks down the player's invincibility timer each frame.
+    function updatePlayerStatus(dt) {
+        if (player.iframes > 0) {
+            player.iframes = Math.max(0, player.iframes - dt);
+        }
+    }
+
     // ---------------------------------------------------------------
     // Movement - reads input, moves the player, updates facing.
     // ---------------------------------------------------------------
     function updateMovement(dt) {
+        if (!player.alive) return;
+
         let dx = 0;
         let dy = 0;
 
@@ -334,6 +403,7 @@
     // Combat input - trigger attacks on SPACE, once per press.
     // ---------------------------------------------------------------
     function updateCombatInput() {
+        if (!player.alive) return;
         if (keysJustPressed[" "] || keysJustPressed["Spacebar"]) {
             attack.tryStart(player);
         }
@@ -348,6 +418,8 @@
         attack.update(dt);
         updateEnemies(dt);
         updateAttackCollision();
+        updateEnemyContact();
+        updatePlayerStatus(dt);
         clearJustPressed();
     }
 
@@ -365,16 +437,71 @@
         // Enemies beneath the player so the player always reads on top.
         for (const e of enemies) e.draw(ctx);
 
-        // Player
-        ctx.fillStyle = player.color;
-        ctx.fillRect(player.x, player.y, player.width, player.height);
+        // Player - skipped on alternating "blinks" while in iframes
+        // to give a classic invulnerability flash.
+        drawPlayer();
 
         // Attack hitbox on top of the player.
         attack.draw(ctx, player);
 
         // HUD
+        drawHealthBar();
         drawCooldownBar();
         drawEnemyCounter();
+
+        if (!player.alive) drawGameOver();
+    }
+
+    function drawPlayer() {
+        // Blink at ~10Hz while invulnerable. The mod-by-0.1 window
+        // alternates visible / hidden without any extra state.
+        if (player.iframes > 0 && Math.floor(player.iframes * 20) % 2 === 0) {
+            return;
+        }
+        ctx.fillStyle = player.color;
+        ctx.fillRect(player.x, player.y, player.width, player.height);
+    }
+
+    function drawHealthBar() {
+        const barW = 180;
+        const barH = 14;
+        const x = 16;
+        const y = 16;
+
+        const frac = Math.max(0, player.hp / player.maxHp);
+
+        // Background
+        ctx.fillStyle = "#1a1a24";
+        ctx.fillRect(x, y, barW, barH);
+        // Fill (green -> orange -> red as it drops)
+        ctx.fillStyle = frac > 0.5 ? "#7ad17a" : frac > 0.25 ? "#e0b066" : "#e06666";
+        ctx.fillRect(x, y, barW * frac, barH);
+        // Border
+        ctx.strokeStyle = "#444458";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 0.5, y + 0.5, barW - 1, barH - 1);
+
+        // Numeric readout
+        ctx.fillStyle = "#e8e8f0";
+        ctx.font = "12px system-ui, sans-serif";
+        ctx.textBaseline = "middle";
+        ctx.fillText(`HP  ${Math.ceil(player.hp)} / ${player.maxHp}`, x + barW + 10, y + barH / 2);
+        ctx.textBaseline = "alphabetic"; // restore default for other text
+    }
+
+    function drawGameOver() {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+        ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+        ctx.fillStyle = "#ffd166";
+        ctx.font = "bold 48px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("GAME OVER", WIDTH / 2, HEIGHT / 2);
+
+        ctx.fillStyle = "#a0a0b8";
+        ctx.font = "14px system-ui, sans-serif";
+        ctx.fillText("Refresh the page to try again", WIDTH / 2, HEIGHT / 2 + 32);
+        ctx.textAlign = "start"; // restore default
     }
 
     function drawEnemyCounter() {
