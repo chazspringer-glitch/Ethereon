@@ -4064,6 +4064,259 @@
                 fallback: "Out of my depth. Try the Elder.",
             },
         }),
+
+        // --- Central hub residents -----------------------------------
+
+        new Npc({
+            id: "herald", name: "Herald",
+            x: 1460, y: 1060, width: 32, height: 32,
+            interactRange: 58, wanderRadius: 80, speed: 34,
+            colors: { robe: "#a83232", trim: "#701818", sash: "#ffd166", hat: "#501010" },
+            dialogue: {
+                greeting: '"Hear ye! Good day, traveler!"',
+                options: [
+                    { label: "Any news?", response: "Crier by trade - I announce what the Captain and Elder decide." },
+                    { label: "Who are you?", response: "Town Herald. I carry the grove's voice." },
+                    { label: "Ask a question...", input: true },
+                    { label: "Goodbye.", close: true },
+                ],
+                knowledge: [
+                    { keywords: ["name", "who"], response: "I'm the Herald - I cry news across the grove." },
+                    { keywords: ["news", "announce", "proclaim"], response: "Today: caravan still missing, shrine still sealed, Elder still ornery." },
+                    { keywords: ["elder", "captain"], response: "The Elder governs; the Captain enforces. I just repeat them louder." },
+                    { keywords: ["shrine", "cavern"], response: "Bad news east. I stopped calling it out - no one went anyway." },
+                ],
+                fallback: "A proclamation for another day, friend.",
+            },
+        }),
+
+        new Npc({
+            id: "priest", name: "Priest",
+            x: 1736, y: 1196, width: 32, height: 32,
+            interactRange: 58, wanderRadius: 56, speed: 20,
+            colors: { robe: "#dcdce8", trim: "#9898a8", sash: "#8ad9ff", hat: "#a0a0b0" },
+            dialogue: {
+                greeting: '"Peace find you, wanderer."',
+                options: [
+                    { label: "Who are you?", response: "I tend the fountain, and the small prayers that go with it." },
+                    { label: "What is this place?", response: "The grove's heart. Water rose here the night the star fell." },
+                    { label: "Ask a question...", input: true },
+                    { label: "Goodbye.", close: true },
+                ],
+                knowledge: [
+                    { keywords: ["name", "who", "priest"], response: "A keeper of the water. I tend the fountain." },
+                    { keywords: ["fountain", "water", "plaza"], response: "The fountain predates the grove. Older waters, stranger powers." },
+                    { keywords: ["star", "fall"], response: "The star-fall left scars. Water remembers what stone forgets." },
+                    { keywords: ["shrine"], response: "The shrine is water's twin - elder, darker. Tread gently there." },
+                ],
+                fallback: "The water offers no clear answer to that.",
+            },
+        }),
+
+        new Npc({
+            id: "child1", name: "Child",
+            x: 1520, y: 1288, width: 32, height: 32,
+            interactRange: 54, wanderRadius: 100, speed: 60,
+            colors: { robe: "#f0d060", trim: "#a08040", sash: "#fff090", hat: "#606030" },
+            dialogue: {
+                greeting: '"Tag! You\'re it!"',
+                options: [
+                    { label: "Who are you?", response: "I live over there. Wanna play?" },
+                    { label: "Seen anything strange?", response: "The Scout said the caverns SHOUT at night. I believe them." },
+                    { label: "Ask a question...", input: true },
+                    { label: "Goodbye.", close: true },
+                ],
+                knowledge: [
+                    { keywords: ["name", "who"], response: "I'm just a kid! I run fast, I think." },
+                    { keywords: ["play", "game", "tag"], response: "Bet you can't catch me. ... bet you CAN'T." },
+                    { keywords: ["cavern", "shrine", "danger"], response: "Momma says never go east. But you went east, right? What's it like?" },
+                ],
+                fallback: "Grownups are weird. Ask about tag!",
+            },
+        }),
+
+        // --- Market district residents ------------------------------
+
+        new Npc({
+            id: "farmer", name: "Farmer",
+            x: 2192, y: 664, width: 32, height: 32,
+            interactRange: 60, wanderRadius: 36, speed: 22,
+            colors: { robe: "#6a5030", trim: "#4a3018", sash: "#d0a060", hat: "#402818" },
+            dialogue: {
+                greeting: '"Fresh greens, picked this morning!"',
+                options: [
+                    { label: "What do you sell?", response: "Greens and roots, until Hemlen restocks. Keepers stew needs SOMETHING." },
+                    { label: "Who are you?", response: "Just a farmer. The west fields are mine." },
+                    { label: "Ask a question...", input: true },
+                    { label: "Goodbye.", close: true },
+                ],
+                knowledge: [
+                    { keywords: ["name", "who"], response: "A farmer. I work the west fields." },
+                    { keywords: ["sell", "food", "greens", "produce"], response: "Carrots, turnips, chard. Simple fare - good fare." },
+                    { keywords: ["caravan"], response: "Hemlen's my best customer. If his caravan returned, I'd double production overnight." },
+                    { keywords: ["field", "farm", "crop"], response: "Fields drink from the fountain water. Best crops this side of the star-fall." },
+                ],
+                fallback: "I know grain better than gossip.",
+            },
+        }),
+
+        new Npc({
+            id: "weaver", name: "Weaver",
+            x: 2456, y: 660, width: 32, height: 32,
+            interactRange: 60, wanderRadius: 30, speed: 20,
+            colors: { robe: "#68926a", trim: "#3c5c3c", sash: "#e0e080", hat: "#2c4a2c" },
+            dialogue: {
+                greeting: '"Silks, wools, and wonders - at fair prices!"',
+                options: [
+                    { label: "What do you weave?", response: "Travelling cloaks mostly. Got one dyed grove-green, just your size." },
+                    { label: "Who are you?", response: "A weaver. My looms clack in time with the market bells." },
+                    { label: "Ask a question...", input: true },
+                    { label: "Goodbye.", close: true },
+                ],
+                knowledge: [
+                    { keywords: ["name", "who", "weaver"], response: "A weaver. I dye threads in the old colors." },
+                    { keywords: ["cloth", "cloak", "wool", "sell"], response: "Cloaks, scarves, carpets. Quiet work, loud looms." },
+                    { keywords: ["grove", "color"], response: "The green here changes with the season. I try to catch it in dye." },
+                ],
+                fallback: "Threads, traveler - threads are what I know.",
+            },
+        }),
+
+        new Npc({
+            id: "apprentice", name: "Apprentice",
+            x: 2360, y: 780, width: 32, height: 32,
+            interactRange: 58, wanderRadius: 140, speed: 62,
+            colors: { robe: "#3c8a8c", trim: "#204548", sash: "#a0e0d8", hat: "#163034" },
+            dialogue: {
+                greeting: '"Sorry - rushing - errands!"',
+                options: [
+                    { label: "What are you doing?", response: "Running between the guild and the market. Messages!" },
+                    { label: "Who are you?", response: "The Captain's apprentice. I fetch more than I fight, lately." },
+                    { label: "Ask a question...", input: true },
+                    { label: "Goodbye.", close: true },
+                ],
+                knowledge: [
+                    { keywords: ["name", "who", "apprentice"], response: "Apprentice of the guild. One day I'll fight; today I fetch." },
+                    { keywords: ["captain", "guild"], response: "Captain keeps me running. Paperwork, rumors, market prices." },
+                    { keywords: ["train", "sword", "fight"], response: "I train at dawn in the guild hall. Come watch me flail someday." },
+                ],
+                fallback: "Late already - gotta run!",
+            },
+        }),
+
+        new Npc({
+            id: "fisher", name: "Fisher",
+            x: 2176, y: 520, width: 32, height: 32,
+            interactRange: 60, wanderRadius: 40, speed: 26,
+            colors: { robe: "#3a6a9a", trim: "#1a3858", sash: "#a0c0e0", hat: "#14263c" },
+            dialogue: {
+                greeting: '"Catch of the day - if you like eels."',
+                options: [
+                    { label: "What do you sell?", response: "Eels and lampreys from the north streams. Not everyone's favorite." },
+                    { label: "Who are you?", response: "A fisher. I work the cold streams beyond the NW grove." },
+                    { label: "Ask a question...", input: true },
+                    { label: "Goodbye.", close: true },
+                ],
+                knowledge: [
+                    { keywords: ["name", "who", "fisher"], response: "A fisher. I work the north streams." },
+                    { keywords: ["fish", "eel", "catch", "sell"], response: "Eels today, lamprey yesterday. The streams go cold east of the caverns." },
+                    { keywords: ["water", "stream"], response: "Waters flow strange since the star-fall. Fish follow stranger currents." },
+                ],
+                fallback: "Ask me about streams, not stars.",
+            },
+        }),
+
+        // --- Residential district residents -------------------------
+
+        new Npc({
+            id: "grandmother", name: "Grandmother",
+            x: 560, y: 1730, width: 32, height: 32,
+            interactRange: 60, wanderRadius: 28, speed: 14,
+            colors: { robe: "#8860a8", trim: "#4a2a60", sash: "#f0d8ff", hat: "#301a44" },
+            dialogue: {
+                greeting: '"Settle in, dear. I\'ve seen worse than you."',
+                options: [
+                    { label: "Who are you?", response: "Nana to most. I remember the star-fall, if you can believe it." },
+                    { label: "Any stories?", response: "The shrine was a temple once. Beautiful. Now - well. Now it isn't." },
+                    { label: "Ask a question...", input: true },
+                    { label: "Goodbye.", close: true },
+                ],
+                knowledge: [
+                    { keywords: ["name", "who", "nana", "grandmother"], response: "Folks call me Nana. Older than the grove's stone." },
+                    { keywords: ["star", "fall"], response: "I remember the night it fell. The world bent and snapped back wrong." },
+                    { keywords: ["shrine", "temple"], response: "It was a temple, once. Before. Go gently past its door." },
+                    { keywords: ["story", "history"], response: "Bring me tea someday and I'll talk your ear off." },
+                ],
+                fallback: "These old ears miss half of what they hear, child.",
+            },
+        }),
+
+        new Npc({
+            id: "child2", name: "Child",
+            x: 940, y: 1700, width: 32, height: 32,
+            interactRange: 54, wanderRadius: 80, speed: 56,
+            colors: { robe: "#d070a0", trim: "#8a4670", sash: "#f8b0d0", hat: "#5a2a48" },
+            dialogue: {
+                greeting: '"Have you seen my cat?"',
+                options: [
+                    { label: "A cat?", response: "Black, three white socks. If you spot him, tell him supper is cold." },
+                    { label: "Who are you?", response: "Just me. I live in the pink house, kinda." },
+                    { label: "Ask a question...", input: true },
+                    { label: "Goodbye.", close: true },
+                ],
+                knowledge: [
+                    { keywords: ["name", "who"], response: "Me! And my cat. Mostly my cat." },
+                    { keywords: ["cat", "pet"], response: "He hunts mice by the SE trees. If you find him, please PLEASE tell me." },
+                    { keywords: ["house", "home"], response: "We live past the path. I'll show you - after I find my cat." },
+                ],
+                fallback: "My cat would know. Probably.",
+            },
+        }),
+
+        new Npc({
+            id: "gardener", name: "Gardener",
+            x: 660, y: 1820, width: 32, height: 32,
+            interactRange: 60, wanderRadius: 60, speed: 26,
+            colors: { robe: "#7a8c3c", trim: "#4a5820", sash: "#c8d880", hat: "#2a3810" },
+            dialogue: {
+                greeting: '"Mind the seedlings, traveler."',
+                options: [
+                    { label: "What are you growing?", response: "Ethereon roses. Pale blue, won't bloom till the star rises again." },
+                    { label: "Who are you?", response: "Town gardener. The flowers here are old - older than the houses." },
+                    { label: "Ask a question...", input: true },
+                    { label: "Goodbye.", close: true },
+                ],
+                knowledge: [
+                    { keywords: ["name", "who", "gardener"], response: "A gardener. I tend the grove's slow-blooming things." },
+                    { keywords: ["flower", "rose", "plant", "grow"], response: "Ethereon roses, blue as a winter sky. They wait centuries to bloom." },
+                    { keywords: ["villager"], response: "The Villager and I swap cuttings every moon. Good neighbor." },
+                ],
+                fallback: "Ask the roses. They're older than us both.",
+            },
+        }),
+
+        new Npc({
+            id: "farmwife", name: "Farmer's Wife",
+            x: 900, y: 1560, width: 32, height: 32,
+            interactRange: 60, wanderRadius: 46, speed: 24,
+            colors: { robe: "#d0b86a", trim: "#8a7440", sash: "#fff0a0", hat: "#503c1c" },
+            dialogue: {
+                greeting: '"Mind the laundry line!"',
+                options: [
+                    { label: "Who are you?", response: "The Farmer's better half. I keep the house while they mind the fields." },
+                    { label: "Busy morning?", response: "Washing, mending, baking, worrying. The usual four." },
+                    { label: "Ask a question...", input: true },
+                    { label: "Goodbye.", close: true },
+                ],
+                knowledge: [
+                    { keywords: ["name", "who", "farm", "wife"], response: "I keep house for the Farmer. Busy work, honest work." },
+                    { keywords: ["farm", "farmer", "field"], response: "My partner works the west fields. Good soil, patient rows." },
+                    { keywords: ["bread", "bake", "food"], response: "Bread's in the oven. Come back later - the house smells of honey." },
+                ],
+                fallback: "Not my field, dear. Try the Captain.",
+            },
+        }),
+
     ];
 
     // Shop interior roster - the Merchant lives inside the building.
@@ -4162,6 +4415,51 @@
                 fallback: "Folks come here to not think so hard. Have a pint and try again.",
             },
         }),
+
+        new Npc({
+            id: "bard", name: "Bard",
+            x: 120, y: 210, width: 32, height: 32,
+            interactRange: 58, wanderRadius: 18, speed: 14,
+            colors: { robe: "#7440c0", trim: "#4a1c80", sash: "#c0a0ff", hat: "#2c0c50" },
+            dialogue: {
+                greeting: '"La la - another song, friend?"',
+                options: [
+                    { label: "Play a tune.", response: "*strums* ...a quiet one, for travelers bound east." },
+                    { label: "Who are you?", response: "A wandering bard. My strings keep better time than my feet." },
+                    { label: "Ask a question...", input: true },
+                    { label: "Goodbye.", close: true },
+                ],
+                knowledge: [
+                    { keywords: ["name", "who", "bard"], response: "A bard. Songs for copper, stories for free." },
+                    { keywords: ["song", "music", "play", "tune"], response: "I know sea-shanties, funeral dirges, and one very good limerick." },
+                    { keywords: ["shrine", "star"], response: "There's a ballad older than the grove about the star-fall. I only know two verses." },
+                    { keywords: ["keeper", "captain", "elder"], response: "Keepers a soft mark. Captains a hard one. Elder pays if the tune is sad enough." },
+                ],
+                fallback: "*hums* ... no words for that one yet.",
+            },
+        }),
+
+        new Npc({
+            id: "drunk", name: "Patron",
+            x: 400, y: 250, width: 32, height: 32,
+            interactRange: 58, wanderRadius: 24, speed: 16,
+            colors: { robe: "#b09060", trim: "#705030", sash: "#f0d8a0", hat: "#402818" },
+            dialogue: {
+                greeting: '"\'nother round... *hic*... for our friend!"',
+                options: [
+                    { label: "What have you heard?", response: "Shh - the caverns whisper. I heard \'em. Or I heard the stew. Same thing." },
+                    { label: "Who are you?", response: "Just a patron. Patron saint of patrons, some say. Nobody says that." },
+                    { label: "Ask a question...", input: true },
+                    { label: "Goodbye.", close: true },
+                ],
+                knowledge: [
+                    { keywords: ["name", "who"], response: "Me? I\'m \'imself. Or \'erself. Depends on the hour." },
+                    { keywords: ["drink", "beer", "ale", "stew"], response: "Stew\'s the best in three counties. The ale\'s WORSE in seven." },
+                    { keywords: ["cavern", "shrine", "boss"], response: "Past the gate... big. Red. Eats noise. Trust me on that one." },
+                ],
+                fallback: "*hic* ...never heard of it.",
+            },
+        }),
     ];
 
     // Guild hall interior roster - Captain at the quest board.
@@ -4207,6 +4505,51 @@
                     { keywords: ["star", "fall"], response: "Since the star fell, the map's been rewriting itself. We catalog what remains." },
                 ],
                 fallback: "Stick to contracts, traveler. The guild survives on clear purpose.",
+            },
+        }),
+
+        new Npc({
+            id: "scribe", name: "Scribe",
+            x: 120, y: 210, width: 32, height: 32,
+            interactRange: 58, wanderRadius: 12, speed: 12,
+            colors: { robe: "#555560", trim: "#2c2c34", sash: "#a0a0a8", hat: "#1a1a22" },
+            dialogue: {
+                greeting: '"One moment - ink is drying."',
+                options: [
+                    { label: "What do you record?", response: "Contracts, killcounts, roster changes. The Captain signs; I log." },
+                    { label: "Who are you?", response: "Guild scribe. My ink outlasts swords." },
+                    { label: "Ask a question...", input: true },
+                    { label: "Goodbye.", close: true },
+                ],
+                knowledge: [
+                    { keywords: ["name", "who", "scribe"], response: "Scribe of the guild. Letters, ledgers, losses." },
+                    { keywords: ["record", "log", "ledger", "contract"], response: "Every contract gets two copies. One goes to the Captain, one goes east with you." },
+                    { keywords: ["history", "star", "fall"], response: "The ledger only goes back a hundred years. Anything older lives in song." },
+                ],
+                fallback: "I record answers; I don't usually give them.",
+            },
+        }),
+
+        new Npc({
+            id: "recruit", name: "Recruit",
+            x: 400, y: 250, width: 32, height: 32,
+            interactRange: 58, wanderRadius: 36, speed: 40,
+            colors: { robe: "#687488", trim: "#343c48", sash: "#b8c0d0", hat: "#202a38" },
+            dialogue: {
+                greeting: '"Hah! ...*pant*... drill time!"',
+                options: [
+                    { label: "What are you training?", response: "Footwork, mostly. The Captain says footwork wins fights." },
+                    { label: "Who are you?", response: "Fresh recruit. Haven't earned the watch cloak yet." },
+                    { label: "Ask a question...", input: true },
+                    { label: "Goodbye.", close: true },
+                ],
+                knowledge: [
+                    { keywords: ["name", "who", "recruit"], response: "Recruit of the grove watch. Swords today, cloak tomorrow." },
+                    { keywords: ["train", "drill", "sword", "fight"], response: "Footwork drills at dawn. The Captain says if you can't walk, you can't swing." },
+                    { keywords: ["captain"], response: "The Captain's tough but fair. Mostly tough." },
+                    { keywords: ["shrine", "boss"], response: "My first contract'll be the shrine, I bet. I hope my footwork's ready." },
+                ],
+                fallback: "Ask the Captain - I'm still learning.",
             },
         }),
     ];
