@@ -287,6 +287,32 @@
                     interior: "shop_interior",
                     entry: { x: 224, y: 250 },
                 },
+                // Guild hall: west flank of the central hub, just
+                // north of the plaza. Weathered blue-grey stones.
+                {
+                    id: "guild",
+                    label: "GUILD",
+                    x: 1280, y: 800, w: 170, h: 130,
+                    doorX: 1334, doorY: 908, doorW: 32, doorH: 22,
+                    wall: "#5a6e88",
+                    roof: "#2c3a52",
+                    interior: "guild_interior",
+                    // Slightly south of center-bottom so the player
+                    // arrives facing the Captain at the counter.
+                    entry: { x: 256, y: 288 },
+                },
+                // Tavern: east flank of the central hub, mirrored
+                // across the main road from the guild. Amber walls.
+                {
+                    id: "tavern",
+                    label: "TAVERN",
+                    x: 1680, y: 800, w: 170, h: 130,
+                    doorX: 1734, doorY: 908, doorW: 32, doorH: 22,
+                    wall: "#b08038",
+                    roof: "#6a4a1a",
+                    interior: "tavern_interior",
+                    entry: { x: 256, y: 288 },
+                },
                 // Residential district (SW). Three houses flank the
                 // path courtyard. All visual-only for now.
                 {
@@ -393,6 +419,53 @@
                 },
             },
             npcs: [],  // merchant appended after dialogue is defined
+            buildings: [],
+            isInterior: true,
+        },
+
+        // Tavern interior - social hub. Keeper stands at the counter;
+        // resting heals the player to full HP.
+        tavern_interior: {
+            id: "tavern_interior",
+            name: "The Travellers' Rest",
+            safe: true,
+            cols: 17, rows: 11,        // 544 x 352 px
+            baseTile: TILE_PATH,
+            borderTile: TILE_STONE,
+            scatter: [],
+            enemyCount: 0,
+            enemyOpts: {},
+            exits: {
+                south: {
+                    level: "grove",
+                    // Below the tavern building's door.
+                    arriveAt: { x: 1750, y: 950 },
+                },
+            },
+            npcs: [],
+            buildings: [],
+            isInterior: true,
+        },
+
+        // Guild hall interior - quest board + Captain. Future side
+        // quests plug in here via dialogue options.
+        guild_interior: {
+            id: "guild_interior",
+            name: "Adventurers' Guild",
+            safe: true,
+            cols: 17, rows: 11,
+            baseTile: TILE_PATH,
+            borderTile: TILE_STONE,
+            scatter: [],
+            enemyCount: 0,
+            enemyOpts: {},
+            exits: {
+                south: {
+                    level: "grove",
+                    arriveAt: { x: 1350, y: 950 },
+                },
+            },
+            npcs: [],
             buildings: [],
             isInterior: true,
         },
@@ -4036,6 +4109,104 @@
                     { keywords: ["gold", "money", "coin", "price"], response: "Coins open doors, traveler. Slay beasts, gather coin, prosper." },
                 ],
                 fallback: "Trade's my business - I can't say I know much beyond it.",
+            },
+        }),
+    ];
+
+    // Tavern interior roster - Keeper behind the bar. Offers a
+    // "Rest" option that heals the player back to full HP, plus
+    // gossip. Positions use tavern_interior coords (17x11 tile
+    // room = 544x352 px).
+    LEVELS.tavern_interior.npcs = [
+        new Npc({
+            id: "keeper",
+            name: "Keeper",
+            // Behind the counter, north-center.
+            x: 272 - 16,
+            y: 120,
+            width: 32, height: 32,
+            interactRange: 66,
+            wanderRadius: 22,
+            speed: 18,
+            colors: { robe: "#a54824", trim: "#6e2e18", sash: "#f0c270", hat: "#4a1e0c" },
+            dialogue: {
+                greeting: '"Sit a spell, traveler. Tales flow free here."',
+                options: [
+                    {
+                        label: "Rest by the fire.",
+                        action() {
+                            healPlayer(player.maxHp);
+                            questLog.showToast("You feel fully restored.", 2.0);
+                        },
+                    },
+                    {
+                        label: "Who are you?",
+                        response: "Folk call me Keeper. I keep the stew warm and the stories warmer.",
+                    },
+                    {
+                        label: "Hear any rumors?",
+                        response: "The caverns have grown louder. Shadows where there shouldn't be any.",
+                    },
+                    { label: "Ask a question...", input: true },
+                    { label: "Goodbye.", close: true },
+                ],
+                knowledge: [
+                    { keywords: ["name", "who", "keeper"], response: "Keeper, they call me. I run the Travellers' Rest." },
+                    { keywords: ["rest", "heal", "sleep"], response: "A seat by the fire restores you completely. Pick 'Rest by the fire.'" },
+                    { keywords: ["food", "stew", "drink", "menu"], response: "Stew. Always stew. Today's is a miracle." },
+                    { keywords: ["rumor", "gossip", "news"], response: "The Scout's been jumpier than usual. And Hemlen's caravan? Still nowhere." },
+                    { keywords: ["shrine", "boss", "keeper of"], response: "They say something rose beyond the shrine gate. If you hear its roar, you're too close." },
+                    { keywords: ["elder"], response: "A stern sort, our Elder. But fair. Do their work and they'll see you right." },
+                    { keywords: ["town", "grove", "city"], response: "The Sunlit Grove's quiet, but every road to the east starts here." },
+                ],
+                fallback: "Folks come here to not think so hard. Have a pint and try again.",
+            },
+        }),
+    ];
+
+    // Guild hall interior roster - Captain at the quest board.
+    // Dialogue is placeholder for future side contracts; the "Post
+    // a contract" option is the extension seam.
+    LEVELS.guild_interior.npcs = [
+        new Npc({
+            id: "captain",
+            name: "Captain",
+            x: 272 - 16,
+            y: 120,
+            width: 32, height: 32,
+            interactRange: 66,
+            wanderRadius: 28,
+            speed: 22,
+            colors: { robe: "#3c5c8c", trim: "#223a5a", sash: "#8ad9ff", hat: "#1a2c46" },
+            dialogue: {
+                greeting: '"Adventurer. The guild logs every blade that passes through."',
+                options: [
+                    {
+                        label: "What does the guild do?",
+                        response: "We track sightings, post contracts, and keep the roads walkable. Mostly.",
+                    },
+                    {
+                        label: "Got any work?",
+                        response: "Finish the Elder's chain first. When the shrine falls, we'll have contracts worth posting.",
+                    },
+                    {
+                        label: "Who are you?",
+                        response: "Captain of the watch - what little of it remains since the star-fall.",
+                    },
+                    { label: "Ask a question...", input: true },
+                    { label: "Goodbye.", close: true },
+                ],
+                knowledge: [
+                    { keywords: ["name", "who", "captain"], response: "Captain of the grove watch. Once commanded a hundred swords; now, a handful." },
+                    { keywords: ["guild", "contract", "work", "job", "quest"], response: "Contracts come and go. The Elder's chain is today's only active posting." },
+                    { keywords: ["shrine", "boss", "keeper of"], response: "Slay the Shrine Keeper and the Guild will mark you a Blade of Ethereon." },
+                    { keywords: ["elder"], response: "The Elder is the true authority here. We log; they decide." },
+                    { keywords: ["scout"], response: "Our Scout reports to me. Good eye, that one - listen when they speak." },
+                    { keywords: ["weapon", "sword", "energy"], response: "Keep your edge sharp. The caverns don't forgive a dull blade." },
+                    { keywords: ["caverns", "east"], response: "East of here, past the gate - that's guild territory. Or was, before the caverns soured." },
+                    { keywords: ["star", "fall"], response: "Since the star fell, the map's been rewriting itself. We catalog what remains." },
+                ],
+                fallback: "Stick to contracts, traveler. The guild survives on clear purpose.",
             },
         }),
     ];
