@@ -172,10 +172,14 @@
     //   exits        { north|south|east|west: "<levelId>" }
     //   hasNpc       whether the Village Elder stands here
     // ---------------------------------------------------------------
+    // Populated after NPC_TEMPLATES below so grove can reference
+    // concrete NPC instances. Exits, safety, and enemy config are
+    // spelled out in one place per zone.
     const LEVELS = {
         grove: {
             id: "grove",
             name: "Sunlit Grove",
+            safe: true,               // combat disabled; NPC city
             baseTile: TILE_GRASS,
             borderTile: TILE_STONE,
             scatter: [
@@ -183,14 +187,15 @@
                 { tile: TILE_STONE, prob: 0.02 },
                 { tile: TILE_PATH, prob: 0.02 },
             ],
-            enemyCount: 5,
-            enemyOpts: { hp: 3, speed: 90 },
+            enemyCount: 0,
+            enemyOpts: {},
             exits: { east: "caverns" },
-            hasNpc: true,
+            npcs: [],  // filled in after NPC_TEMPLATES
         },
         caverns: {
             id: "caverns",
             name: "Echo Caverns",
+            safe: false,
             baseTile: TILE_STONE,
             borderTile: TILE_STONE,
             scatter: [
@@ -200,11 +205,12 @@
             enemyCount: 7,
             enemyOpts: { hp: 4, speed: 100 },
             exits: { west: "grove", east: "shrine" },
-            hasNpc: false,
+            npcs: [],
         },
         shrine: {
             id: "shrine",
             name: "Ethereon Shrine",
+            safe: false,
             baseTile: TILE_PATH,
             borderTile: TILE_STONE,
             scatter: [
@@ -214,9 +220,14 @@
             enemyCount: 6,
             enemyOpts: { hp: 5, speed: 110, reward: 25, xpReward: 18 },
             exits: { west: "caverns" },
-            hasNpc: false,
+            npcs: [],
         },
     };
+
+    // Zone = level.id. The current zone is used for high-level
+    // "what rules apply?" decisions (combat on/off, NPC roster).
+    function currentZone() { return currentLevel.id; }
+    function isSafeZone() { return currentLevel.safe === true; }
 
     // Active level. Swapped by `transitionTo(id, fromSide)` whenever
     // the player walks into an exit; referenced by world.draw, the
@@ -1303,7 +1314,7 @@
         justPressed: false,
 
         visible() {
-            return gameState === "playing" && npc.isNearPlayer();
+            return gameState === "playing" && nearestNpc() !== null;
         },
 
         contains(x, y) {
@@ -2644,7 +2655,11 @@
 
         // Called each tick. Advances the difficulty clock, then
         // trickles new enemies in when the world drops below target.
+        // Short-circuits in safe zones so the clock doesn't advance
+        // while the player is wandering an NPC city.
         update(dt) {
+            if (isSafeZone()) return;
+
             this.elapsed += dt;
             this.refresh();
 
@@ -2674,117 +2689,196 @@
     spawner.seed();
 
     // ---------------------------------------------------------------
-    // NPC - a single friendly character who hands out quests.
+    // NPCs - per-zone friendly characters.
     //
-    // Stationary, one fixed position, square hitbox. Interaction is
-    // proximity-gated (`isNearPlayer`) so the world never fires
-    // dialogue at arm's length. Adding more NPCs later is a matter
-    // of pushing into an npcs array - the one-off `npc` singleton
-    // keeps this iteration simple.
+    // Each NPC is a data-only object spelled out in its home level's
+    // `npcs` array. The fields are:
+    //
+    //   id             unique within the zone
+    //   name           display name (used in dialogue)
+    //   x, y           world-space position
+    //   width, height  hitbox (32x32 by default)
+    //   interactRange  px radius for the "E" prompt + interact
+    //   colors         { robe, trim, sash, hat } for the sprite
+    //   interact()     called when the player engages. No arg.
+    //
+    // A single `drawNpc(ctx, n)` helper renders any NPC using the
+    // template + colors, so adding roles (Elder, Merchant, Villager,
+    // Scout, Blacksmith...) is one more object in a level's list.
     // ---------------------------------------------------------------
-    const npc = {
-        x: WORLD_W / 2 + 140,     // just off to the right of player spawn
-        y: WORLD_H / 2 - 12,
-        width: 32,
-        height: 32,
-        name: "Village Elder",
-        interactRange: 60,
 
-        // The NPC only exists in levels that opt in (LEVELS.*.hasNpc).
-        // Returning false from isNearPlayer when the Elder isn't in
-        // this room transparently turns off the E prompt, the TALK
-        // button, and the interact keypress all at once.
-        isNearPlayer() {
-            if (!currentLevel.hasNpc) return false;
-            const cx = this.x + this.width / 2;
-            const cy = this.y + this.height / 2;
+    function activeNpcs() {
+        return currentLevel.npcs || [];
+    }
+
+    function npcIsNear(n) {
+        const cx = n.x + n.width / 2;
+        const cy = n.y + n.height / 2;
+        const px = player.x + player.width / 2;
+        const py = player.y + player.height / 2;
+        const dx = px - cx;
+        const dy = py - cy;
+        return dx * dx + dy * dy <= n.interactRange * n.interactRange;
+    }
+
+    // Closest NPC within their interactRange, or null.
+    function nearestNpc() {
+        let best = null;
+        let bestD = Infinity;
+        for (const n of activeNpcs()) {
+            const cx = n.x + n.width / 2;
+            const cy = n.y + n.height / 2;
             const px = player.x + player.width / 2;
             const py = player.y + player.height / 2;
             const dx = px - cx;
             const dy = py - cy;
-            return dx * dx + dy * dy <=
-                this.interactRange * this.interactRange;
-        },
-
-        // Advances the quest chain. If nothing is active and an
-        // unfinished template exists, start it; otherwise give a
-        // status update or a farewell.
-        interact() {
-            if (questLog.active) {
-                const tmpl = QUESTS[questLog.active.id];
-                questLog.showToast(
-                    `${tmpl.description}  (${questLog.active.progress}/${tmpl.target})`
-                );
-                return;
+            const d = dx * dx + dy * dy;
+            if (d <= n.interactRange * n.interactRange && d < bestD) {
+                best = n;
+                bestD = d;
             }
+        }
+        return best;
+    }
 
-            // Find the first quest in the chain that isn't completed.
-            // `slay3` is the chain head; `next` walks forward.
-            let id = "slay3";
-            while (id && questLog.hasCompleted(id)) {
-                id = QUESTS[id].next;
-            }
-            if (!id) {
-                questLog.showToast("Safe travels, hero.");
-                return;
-            }
-            questLog.accept(id);
-        },
+    function drawNpc(ctx, n) {
+        const x = Math.round(n.x);
+        const y = Math.round(n.y);
+        const c = n.colors;
 
-        draw(ctx) {
-            const x = Math.round(this.x);
-            const y = Math.round(this.y);
+        // Shadow
+        ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
+        ctx.beginPath();
+        ctx.ellipse(x + 16, y + 29, 9, 3, 0, 0, Math.PI * 2);
+        ctx.fill();
 
-            // Shadow
-            ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
-            ctx.beginPath();
-            ctx.ellipse(x + 16, y + 29, 9, 3, 0, 0, Math.PI * 2);
-            ctx.fill();
+        // Robe
+        ctx.fillStyle = c.robe;
+        ctx.fillRect(x + 8, y + 12, 16, 16);
+        ctx.fillStyle = c.trim;
+        ctx.fillRect(x + 8, y + 25, 16, 3);
+        // Sash
+        ctx.fillStyle = c.sash;
+        ctx.fillRect(x + 8, y + 19, 16, 2);
 
-            // Robe
-            ctx.fillStyle = "#6b4e91";
-            ctx.fillRect(x + 8, y + 12, 16, 16);
-            ctx.fillStyle = "#503872";
-            ctx.fillRect(x + 8, y + 25, 16, 3);
-            // Sash
-            ctx.fillStyle = "#ffd166";
-            ctx.fillRect(x + 8, y + 19, 16, 2);
+        // Head
+        ctx.fillStyle = "#e8c096";
+        ctx.fillRect(x + 10, y + 6, 12, 8);
+        // Hat
+        ctx.fillStyle = c.hat;
+        ctx.fillRect(x + 9, y + 3, 14, 4);
 
-            // Head
-            ctx.fillStyle = "#e8c096";
-            ctx.fillRect(x + 10, y + 6, 12, 8);
-            // Hat
-            ctx.fillStyle = "#4a2f70";
-            ctx.fillRect(x + 9, y + 3, 14, 4);
+        // Eyes
+        ctx.fillStyle = "#1a1a24";
+        ctx.fillRect(x + 13, y + 10, 2, 2);
+        ctx.fillRect(x + 17, y + 10, 2, 2);
 
-            // Eyes
+        // Interact hint when in range (world-space bubble with "E").
+        if (gameState === "playing" && npcIsNear(n)) {
+            const bx = x + 16;
+            const by = y - 14;
+            ctx.save();
             ctx.fillStyle = "#1a1a24";
-            ctx.fillRect(x + 13, y + 10, 2, 2);
-            ctx.fillRect(x + 17, y + 10, 2, 2);
+            ctx.beginPath();
+            ctx.arc(bx, by, 11, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = c.sash;
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+            ctx.fillStyle = c.sash;
+            ctx.font = "bold 13px system-ui, sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText("E", bx, by + 1);
+            ctx.restore();
+        }
+    }
 
-            // Interact hint when in range (world-space bubble with "E").
-            if (gameState === "playing" && this.isNearPlayer()) {
-                const bx = x + 16;
-                const by = y - 14;
-                ctx.save();
-                // Bubble background
-                ctx.fillStyle = "#1a1a24";
-                ctx.beginPath();
-                ctx.arc(bx, by, 11, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.strokeStyle = "#ffd166";
-                ctx.lineWidth = 1.5;
-                ctx.stroke();
-                // Letter
-                ctx.fillStyle = "#ffd166";
-                ctx.font = "bold 13px system-ui, sans-serif";
-                ctx.textAlign = "center";
-                ctx.textBaseline = "middle";
-                ctx.fillText("E", bx, by + 1);
-                ctx.restore();
-            }
+    // --- Interact behaviors (shared so multiple NPCs can reference) ---
+
+    // The Elder's familiar quest-chain dialogue.
+    function elderInteract() {
+        if (questLog.active) {
+            const tmpl = QUESTS[questLog.active.id];
+            questLog.showToast(
+                `Elder: "${tmpl.description}"  (${questLog.active.progress}/${tmpl.target})`
+            );
+            return;
+        }
+
+        let id = "slay3";
+        while (id && questLog.hasCompleted(id)) id = QUESTS[id].next;
+        if (!id) {
+            questLog.showToast('Elder: "Safe travels, hero."');
+            return;
+        }
+        questLog.accept(id);
+    }
+
+    // Populate the grove with four NPCs: Elder (quest), Merchant
+    // (placeholder shop), Villager (flavor), Scout (lore hint).
+    LEVELS.grove.npcs = [
+        {
+            id: "elder",
+            name: "Village Elder",
+            x: WORLD_W / 2 + 140,
+            y: WORLD_H / 2 - 12,
+            width: 32, height: 32,
+            interactRange: 60,
+            colors: { robe: "#6b4e91", trim: "#503872", sash: "#ffd166", hat: "#4a2f70" },
+            interact: elderInteract,
         },
-    };
+        {
+            id: "merchant",
+            name: "Merchant",
+            x: WORLD_W / 2 - 180,
+            y: WORLD_H / 2 - 20,
+            width: 32, height: 32,
+            interactRange: 60,
+            colors: { robe: "#8c5a3c", trim: "#5f3c26", sash: "#e0b066", hat: "#3d2a18" },
+            interact() {
+                // Shop placeholder. A future pass can flip `inventoryOpen`
+                // into a shop-mode variant.
+                const lines = [
+                    'Merchant: "My wares arrive with the next caravan!"',
+                    'Merchant: "Gold coins will open doors, friend."',
+                ];
+                questLog.showToast(lines[Math.floor(Math.random() * lines.length)], 2.4);
+            },
+        },
+        {
+            id: "villager",
+            name: "Villager",
+            x: WORLD_W / 2 + 40,
+            y: WORLD_H / 2 + 160,
+            width: 32, height: 32,
+            interactRange: 60,
+            colors: { robe: "#4e915c", trim: "#356840", sash: "#a0d0a0", hat: "#2f5a3a" },
+            interact() {
+                const lines = [
+                    'Villager: "The Elder has work for brave souls."',
+                    'Villager: "It\'s peaceful here - but stay sharp beyond the gates."',
+                    'Villager: "Lovely day in the grove, isn\'t it?"',
+                ];
+                questLog.showToast(lines[Math.floor(Math.random() * lines.length)], 2.4);
+            },
+        },
+        {
+            id: "scout",
+            name: "Scout",
+            x: WORLD_W / 2 - 60,
+            y: WORLD_H / 2 - 180,
+            width: 32, height: 32,
+            interactRange: 60,
+            colors: { robe: "#3c5c8c", trim: "#223a5a", sash: "#8ad9ff", hat: "#1a2c46" },
+            interact() {
+                questLog.showToast(
+                    'Scout: "The caverns to the east hold treasures - and danger. Tread well."',
+                    2.8
+                );
+            },
+        },
+    ];
 
     // Place the camera on the player before the first frame so we
     // don't see it lerp in from (0, 0).
@@ -2794,6 +2888,12 @@
     // Enemy update + collision with the player's attack
     // ---------------------------------------------------------------
     function updateEnemies(dt) {
+        // Defense in depth: the main tick already gates this on
+        // !isSafeZone, but leaving the check here means any future
+        // caller (cutscene, debug tool) can't accidentally tick
+        // enemy AI inside a safe zone.
+        if (isSafeZone()) return;
+
         // Reverse iteration lets us splice dead enemies cheaply.
         for (let i = enemies.length - 1; i >= 0; i--) {
             const e = enemies[i];
@@ -2830,7 +2930,7 @@
     // is a no-op while iframes are active, so one collision won't drain
     // the whole bar.
     function updateEnemyContact() {
-        if (!player.alive) return;
+        if (!player.alive || isSafeZone()) return;
         _playerBox.x = player.x;
         _playerBox.y = player.y;
         _playerBox.w = player.width;
@@ -3036,8 +3136,9 @@
         // NPC in range is a no-op.
         const keyboardInteract = keysJustPressed["e"] || keysJustPressed["E"];
         const touchInteract = interactButton.consumeJustPressed();
-        if ((keyboardInteract || touchInteract) && npc.isNearPlayer()) {
-            npc.interact();
+        if (keyboardInteract || touchInteract) {
+            const target = nearestNpc();
+            if (target) target.interact();
         }
 
         // Tick transient UI state (quest + level toasts).
@@ -3051,14 +3152,21 @@
         attack.update(dt);
         for (const w of weapons) w.update(dt);
         powerMove.update(dt);
-        updateEnemies(dt);
+
+        // Combat systems only tick in hostile zones. In safe zones
+        // (NPC cities) enemy AI, spawning, and contact damage are all
+        // disabled. Projectiles still tick so any in-flight shots
+        // expire instead of freezing mid-air on a zone transition.
+        if (!isSafeZone()) {
+            updateEnemies(dt);
+            updateAttackCollision();
+            updatePowerMoveCollision();
+            updateEnemyContact();
+            spawner.update(dt);
+        }
         updateProjectiles(dt);
-        updateAttackCollision();
-        updatePowerMoveCollision();
-        updateEnemyContact();
         updatePlayerStatus(dt);
         updateDrops(dt);
-        spawner.update(dt);
         camera.follow(player, dt);
         clearJustPressed();
     }
@@ -3272,10 +3380,10 @@
         // by a live enemy standing over the same tile.
         drawDrops(ctx);
 
-        // NPC - only rendered in levels that opt in; they pass in
-        // front because the player draws afterwards. The interact
-        // bubble is drawn by the NPC itself.
-        if (currentLevel.hasNpc) npc.draw(ctx);
+        // NPCs - one per entry in the current level's roster. Drawn
+        // beneath the player so the player always reads on top. Each
+        // draws its own "E" bubble when the player is in range.
+        for (const n of activeNpcs()) drawNpc(ctx, n);
 
         // Enemies beneath the player so the player always reads on top.
         for (const e of enemies) e.draw(ctx);
