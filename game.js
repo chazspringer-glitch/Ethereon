@@ -217,6 +217,272 @@
     };
 
     // ---------------------------------------------------------------
+    // Sprite system
+    //
+    // Mirrors the shape of a real 2D engine without the framework:
+    //
+    //   SpriteSheet  - an image (real or offscreen canvas) sliced into
+    //                  (col, row) frames of a fixed size.
+    //   Animation    - an ordered list of column indices, a per-frame
+    //                  duration, and a loop flag.
+    //   Animator     - per-entity state: a dict of named Animations,
+    //                  a current state ("idle" | "walk" | ...), and a
+    //                  direction (row). Each entity owns its Animator
+    //                  so frame timers don't collide.
+    //
+    // To add real art later, construct a SpriteSheet from an <img>
+    // loaded via Image() - every other system keeps working.
+    // ---------------------------------------------------------------
+    const DIR_DOWN = 0;
+    const DIR_UP = 1;
+    const DIR_LEFT = 2;
+    const DIR_RIGHT = 3;
+
+    class SpriteSheet {
+        constructor(image, frameW, frameH) {
+            this.image = image;
+            this.frameW = frameW;
+            this.frameH = frameH;
+        }
+
+        draw(ctx, col, row, dx, dy) {
+            ctx.drawImage(
+                this.image,
+                col * this.frameW, row * this.frameH,
+                this.frameW, this.frameH,
+                dx, dy,
+                this.frameW, this.frameH
+            );
+        }
+    }
+
+    class Animation {
+        constructor(frames, frameDuration = 0.12, loop = true) {
+            this.frames = frames;           // column indices into a sheet row
+            this.frameDuration = frameDuration;
+            this.loop = loop;
+            this.elapsed = 0;
+            this.index = 0;
+        }
+
+        reset() {
+            this.elapsed = 0;
+            this.index = 0;
+        }
+
+        update(dt) {
+            this.elapsed += dt;
+            while (this.elapsed >= this.frameDuration) {
+                this.elapsed -= this.frameDuration;
+                this.index++;
+                if (this.index >= this.frames.length) {
+                    this.index = this.loop ? 0 : this.frames.length - 1;
+                }
+            }
+        }
+
+        currentFrame() {
+            return this.frames[this.index];
+        }
+    }
+
+    class Animator {
+        constructor(clips, initialState = "idle") {
+            this.clips = clips;         // { idle: Animation, walk: Animation, ... }
+            this.state = initialState;
+            this.dir = DIR_DOWN;
+        }
+
+        setState(state) {
+            if (state === this.state) return;
+            this.state = state;
+            this.clips[state].reset();
+        }
+
+        setDir(dir) {
+            this.dir = dir;
+        }
+
+        update(dt) {
+            this.clips[this.state].update(dt);
+        }
+
+        get col() {
+            return this.clips[this.state].currentFrame();
+        }
+
+        get row() {
+            return this.dir;
+        }
+    }
+
+    // Helper: pick a cardinal direction from a motion vector. Returns
+    // null for (0, 0) so callers can keep the previous facing.
+    function dirFromVector(dx, dy) {
+        if (dx === 0 && dy === 0) return null;
+        if (Math.abs(dx) > Math.abs(dy)) {
+            return dx > 0 ? DIR_RIGHT : DIR_LEFT;
+        }
+        return dy > 0 ? DIR_DOWN : DIR_UP;
+    }
+
+    // ---------------------------------------------------------------
+    // Sprite sheet generation (placeholder art)
+    //
+    // Real art would be loaded with `new Image()` and pointed at a
+    // PNG. Until then, we draw a tiny "sprite sheet" onto an offscreen
+    // canvas at boot. Layout is 4 columns x 4 rows:
+    //
+    //   row = direction  (down, up, left, right)
+    //   col = frame      (0 = idle, 1..3 = walk cycle)
+    // ---------------------------------------------------------------
+    const FRAME_W = 32;
+    const FRAME_H = 32;
+
+    function makeSheetCanvas() {
+        const c = document.createElement("canvas");
+        c.width = FRAME_W * 4;
+        c.height = FRAME_H * 4;
+        return c;
+    }
+
+    function drawPlayerFrame(ctx, dir, frame, ox, oy) {
+        // Shadow
+        ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
+        ctx.beginPath();
+        ctx.ellipse(ox + 16, oy + 29, 8, 3, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Vertical bob on the "up" steps of the walk cycle.
+        const bob = frame === 1 ? -1 : frame === 3 ? -1 : 0;
+
+        // Tunic / body
+        ctx.fillStyle = "#3a7d3a";
+        ctx.fillRect(ox + 10, oy + 14 + bob, 12, 10);
+        ctx.fillStyle = "#2f5f2f";
+        ctx.fillRect(ox + 10, oy + 22 + bob, 12, 2);
+
+        // Head
+        ctx.fillStyle = "#e8c096";
+        ctx.fillRect(ox + 11, oy + 7 + bob, 10, 8);
+
+        // Hair (direction-aware)
+        ctx.fillStyle = "#ffd166";
+        if (dir === DIR_DOWN) {
+            ctx.fillRect(ox + 11, oy + 6 + bob, 10, 3);
+            ctx.fillRect(ox + 10, oy + 8 + bob, 2, 3);
+            ctx.fillRect(ox + 20, oy + 8 + bob, 2, 3);
+        } else if (dir === DIR_UP) {
+            ctx.fillRect(ox + 11, oy + 6 + bob, 10, 5);
+        } else if (dir === DIR_LEFT) {
+            ctx.fillRect(ox + 10, oy + 6 + bob, 9, 4);
+            ctx.fillRect(ox + 10, oy + 9 + bob, 3, 3);
+        } else { // DIR_RIGHT
+            ctx.fillRect(ox + 13, oy + 6 + bob, 9, 4);
+            ctx.fillRect(ox + 19, oy + 9 + bob, 3, 3);
+        }
+
+        // Eyes (hidden when facing away)
+        if (dir !== DIR_UP) {
+            ctx.fillStyle = "#1a1a24";
+            const eyeY = oy + 11 + bob;
+            if (dir === DIR_DOWN) {
+                ctx.fillRect(ox + 13, eyeY, 2, 2);
+                ctx.fillRect(ox + 17, eyeY, 2, 2);
+            } else if (dir === DIR_LEFT) {
+                ctx.fillRect(ox + 12, eyeY, 2, 2);
+            } else {
+                ctx.fillRect(ox + 18, eyeY, 2, 2);
+            }
+        }
+
+        // Legs - swap which foot leads on each walk step
+        ctx.fillStyle = "#2f5f2f";
+        const legY = oy + 24;
+        if (frame === 1) {
+            ctx.fillRect(ox + 11, legY, 3, 4);
+            ctx.fillRect(ox + 18, legY - 1, 3, 5);
+        } else if (frame === 2) {
+            ctx.fillRect(ox + 11, legY - 1, 3, 5);
+            ctx.fillRect(ox + 18, legY, 3, 4);
+        } else {
+            ctx.fillRect(ox + 11, legY, 3, 4);
+            ctx.fillRect(ox + 18, legY, 3, 4);
+        }
+    }
+
+    function drawEnemyFrame(ctx, dir, frame, ox, oy) {
+        // Shadow
+        ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
+        ctx.beginPath();
+        ctx.ellipse(ox + 16, oy + 29, 10, 3, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Gentle squash/stretch for a hopping slime feel.
+        const squash = frame === 1 || frame === 3 ? 1 : 0;
+
+        // Body
+        ctx.fillStyle = "#c84a4a";
+        ctx.fillRect(ox + 7, oy + 12 + squash, 18, 14 - squash);
+        ctx.fillStyle = "#a03030";
+        ctx.fillRect(ox + 7, oy + 24, 18, 2);
+
+        // Highlights
+        ctx.fillStyle = "#e06666";
+        ctx.fillRect(ox + 10, oy + 14 + squash, 3, 2);
+
+        // Eyes (direction-aware)
+        ctx.fillStyle = "#ffffff";
+        if (dir === DIR_DOWN) {
+            ctx.fillRect(ox + 11, oy + 17 + squash, 3, 3);
+            ctx.fillRect(ox + 18, oy + 17 + squash, 3, 3);
+            ctx.fillStyle = "#1a1a24";
+            ctx.fillRect(ox + 12, oy + 18 + squash, 1, 1);
+            ctx.fillRect(ox + 19, oy + 18 + squash, 1, 1);
+        } else if (dir === DIR_UP) {
+            // facing away - no eyes
+        } else if (dir === DIR_LEFT) {
+            ctx.fillRect(ox + 9, oy + 17 + squash, 3, 3);
+            ctx.fillStyle = "#1a1a24";
+            ctx.fillRect(ox + 9, oy + 18 + squash, 1, 1);
+        } else {
+            ctx.fillRect(ox + 20, oy + 17 + squash, 3, 3);
+            ctx.fillStyle = "#1a1a24";
+            ctx.fillRect(ox + 22, oy + 18 + squash, 1, 1);
+        }
+    }
+
+    function buildSheet(drawFrame) {
+        const sheetCanvas = makeSheetCanvas();
+        const sctx = sheetCanvas.getContext("2d");
+        for (let dir = 0; dir < 4; dir++) {
+            for (let frame = 0; frame < 4; frame++) {
+                drawFrame(sctx, dir, frame, frame * FRAME_W, dir * FRAME_H);
+            }
+        }
+        return new SpriteSheet(sheetCanvas, FRAME_W, FRAME_H);
+    }
+
+    const playerSheet = buildSheet(drawPlayerFrame);
+    const enemySheet = buildSheet(drawEnemyFrame);
+
+    // Convenience factories - each call returns a fresh Animator so
+    // every entity has its own frame timer.
+    function makePlayerAnimator() {
+        return new Animator({
+            idle: new Animation([0], 1.0, true),
+            walk: new Animation([1, 0, 2, 0], 0.12, true),
+        }, "idle");
+    }
+
+    function makeEnemyAnimator() {
+        return new Animator({
+            idle: new Animation([0], 1.0, true),
+            walk: new Animation([1, 0, 2, 0], 0.18, true),
+        }, "walk");
+    }
+
+    // ---------------------------------------------------------------
     // Input - tracks keys held down AND keys pressed this frame
     // (edge-triggered). `keysJustPressed` is cleared at the end of
     // each update so actions like "attack" only fire once per press.
@@ -250,8 +516,13 @@
         width: 32,
         height: 32,
         speed: 220, // pixels per second
-        color: "#ffd166",
-        facing: { x: 1, y: 0 }, // default: facing right
+        color: "#ffd166", // kept as a fallback / tint hook for future use
+        facing: { x: 0, y: 1 }, // unit vector used by the attack
+        facingDir: DIR_DOWN,    // cardinal used by the animator
+
+        // Sprite + animation
+        sheet: playerSheet,
+        animator: makePlayerAnimator(),
 
         // --- Stats (extend here for future items / upgrades) ---
         hp: 100,
@@ -428,13 +699,17 @@
         constructor(x, y, opts = {}) {
             this.x = x;
             this.y = y;
-            this.width = opts.width ?? 28;
-            this.height = opts.height ?? 28;
+            this.width = opts.width ?? 32;
+            this.height = opts.height ?? 32;
             this.speed = opts.speed ?? 90;
-            this.color = opts.color ?? "#e06666";
             this.hp = opts.hp ?? 1;
             this.maxHp = this.hp;
             this.alive = true;
+
+            // Sprite + animation (each enemy owns its own animator so
+            // their walk cycles aren't locked in lockstep).
+            this.sheet = opts.sheet ?? enemySheet;
+            this.animator = opts.animator ?? makeEnemyAnimator();
         }
 
         update(dt, target) {
@@ -451,17 +726,30 @@
             const dy = ty - cy;
             const dist = Math.hypot(dx, dy);
 
+            let moving = false;
             if (dist > 0.5) {
                 const inv = 1 / dist;
                 this.x += dx * inv * this.speed * dt;
                 this.y += dy * inv * this.speed * dt;
+                moving = true;
+
+                const d = dirFromVector(dx, dy);
+                if (d !== null) this.animator.setDir(d);
             }
+
+            this.animator.setState(moving ? "walk" : "idle");
+            this.animator.update(dt);
         }
 
         draw(ctx) {
             if (!this.alive) return;
-            ctx.fillStyle = this.color;
-            ctx.fillRect(this.x, this.y, this.width, this.height);
+            this.sheet.draw(
+                ctx,
+                this.animator.col,
+                this.animator.row,
+                Math.round(this.x),
+                Math.round(this.y)
+            );
 
             // Tiny HP pip so future multi-hit enemies are readable.
             if (this.maxHp > 1) {
@@ -584,11 +872,21 @@
             dy *= inv;
         }
 
-        // Update facing to the most recent movement direction.
-        if (dx !== 0 || dy !== 0) {
+        // Update facing (vector for attack, cardinal for animation).
+        const moving = dx !== 0 || dy !== 0;
+        if (moving) {
             player.facing.x = dx;
             player.facing.y = dy;
+
+            const d = dirFromVector(dx, dy);
+            if (d !== null) {
+                player.facingDir = d;
+                player.animator.setDir(d);
+            }
         }
+
+        player.animator.setState(moving ? "walk" : "idle");
+        player.animator.update(dt);
 
         player.x += dx * player.speed * dt;
         player.y += dy * player.speed * dt;
@@ -661,13 +959,17 @@
     }
 
     function drawPlayer() {
-        // Blink at ~10Hz while invulnerable. The mod-by-0.1 window
-        // alternates visible / hidden without any extra state.
+        // Blink at ~10Hz while invulnerable.
         if (player.iframes > 0 && Math.floor(player.iframes * 20) % 2 === 0) {
             return;
         }
-        ctx.fillStyle = player.color;
-        ctx.fillRect(player.x, player.y, player.width, player.height);
+        player.sheet.draw(
+            ctx,
+            player.animator.col,
+            player.animator.row,
+            Math.round(player.x),
+            Math.round(player.y)
+        );
     }
 
     function drawHealthBar() {
