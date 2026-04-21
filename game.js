@@ -1081,11 +1081,17 @@
     // ---------------------------------------------------------------
     const enemies = [];
 
-    // Soft cap on active enemies. Keeps per-frame cost bounded on
-    // low-end devices even if future spawners get aggressive; can be
-    // raised once a broadphase (spatial grid, quadtree) is in place.
-    const MAX_ENEMIES = 24;
+    // Hard safety cap on simultaneously-active enemies. The `spawner`
+    // below owns the gameplay-tuned population target; MAX_ENEMIES is
+    // the ceiling any future system (bosses, events, scripted waves)
+    // must respect. Raise once a broadphase (spatial grid, quadtree)
+    // is in place.
+    const MAX_ENEMIES = 5;
 
+    // `spawnEnemy` is the low-level primitive: add an enemy at the
+    // given coords, or refuse if we're at the hard cap. Every higher-
+    // level spawner in the game funnels through here so the cap is
+    // the single source of truth.
     function spawnEnemy(x, y, opts) {
         if (enemies.length >= MAX_ENEMIES) return null;
         const e = new Enemy(x, y, opts);
@@ -1093,18 +1099,74 @@
         return e;
     }
 
-    // Spawn a starting group in a ring around the player's spawn so
-    // the player always has something on screen at the start.
-    {
-        const cx = WORLD_W / 2;
-        const cy = WORLD_H / 2;
-        spawnEnemy(cx - 220, cy - 160);
-        spawnEnemy(cx + 200, cy - 160);
-        spawnEnemy(cx - 220, cy + 140);
-        spawnEnemy(cx + 200, cy + 140);
-        spawnEnemy(cx + 360, cy);
-        spawnEnemy(cx - 380, cy);
-    }
+    // ---------------------------------------------------------------
+    // Spawner
+    //
+    // Keeps the world populated up to `maxActive` by picking random
+    // positions on the map that satisfy simple constraints (inside
+    // bounds with a margin, far enough from the player, not on a
+    // solid tile). Dropping `maxActive` or changing the constraints
+    // is the extension point for future difficulty tuning, zones, or
+    // scripted waves.
+    // ---------------------------------------------------------------
+    const spawner = {
+        maxActive: MAX_ENEMIES,      // gameplay-tuned population target
+        interval: 2.5,               // seconds between respawn attempts
+        timer: 0,                    // counts down between attempts
+        minDistFromPlayer: 200,      // don't spawn right on top of the player
+        margin: 64,                  // keep clear of the stone border
+
+        // Try random candidate positions until one meets our rules.
+        // Caps attempts so a bad config (e.g. margins that leave no
+        // valid area) can't freeze the frame.
+        findSpot() {
+            const minDistSq = this.minDistFromPlayer * this.minDistFromPlayer;
+            const px = player.x + player.width / 2;
+            const py = player.y + player.height / 2;
+
+            for (let i = 0; i < 24; i++) {
+                const x = this.margin + Math.random() * (WORLD_W - 2 * this.margin);
+                const y = this.margin + Math.random() * (WORLD_H - 2 * this.margin);
+
+                const dx = x - px;
+                const dy = y - py;
+                if (dx * dx + dy * dy < minDistSq) continue;
+
+                // Reserved for when world.isSolid does something.
+                const col = Math.floor(x / TILE);
+                const row = Math.floor(y / TILE);
+                if (world.isSolid(col, row)) continue;
+
+                return { x, y };
+            }
+            return null;
+        },
+
+        // Populate the world at boot.
+        seed() {
+            for (let i = 0; i < this.maxActive; i++) {
+                const spot = this.findSpot();
+                if (spot) spawnEnemy(spot.x, spot.y);
+            }
+        },
+
+        // Called each tick. Trickles new enemies in when the world
+        // drops below its target population.
+        update(dt) {
+            if (enemies.length >= this.maxActive) {
+                this.timer = 0;
+                return;
+            }
+            this.timer -= dt;
+            if (this.timer > 0) return;
+            this.timer = this.interval;
+
+            const spot = this.findSpot();
+            if (spot) spawnEnemy(spot.x, spot.y);
+        },
+    };
+
+    spawner.seed();
 
     // Place the camera on the player before the first frame so we
     // don't see it lerp in from (0, 0).
@@ -1243,6 +1305,7 @@
         updateAttackCollision();
         updateEnemyContact();
         updatePlayerStatus(dt);
+        spawner.update(dt);
         camera.follow(player, dt);
         clearJustPressed();
     }
