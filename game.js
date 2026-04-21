@@ -189,11 +189,60 @@
             safe: true,               // combat disabled; NPC city
             baseTile: TILE_GRASS,
             borderTile: TILE_STONE,
-            scatter: [
-                { tile: TILE_TREE, prob: 0.045 },
-                { tile: TILE_STONE, prob: 0.02 },
-                { tile: TILE_PATH, prob: 0.02 },
-            ],
+            // Scatter table is the fallback for any tile the tileFn
+            // below doesn't handle - kept near-empty so the designed
+            // layout reads clearly.
+            scatter: [],
+            // Designed town layout:
+            //   main east-west stone path across the middle
+            //   short path north to the shop door
+            //   stone plaza south of center with a water fountain
+            //   four dense tree groves in the corners
+            //   a few scattered stones + rare flower-trees elsewhere
+            tileFn(c, r, cols, rows) {
+                const cx = Math.floor(cols / 2);      // 37
+                const cy = Math.floor(rows / 2);      // 28
+                const plazaR = cy + 4;                // plaza row center
+                const shopDoorC = 31;                 // matches the shop door tile
+                const shopDoorR = 27;
+
+                // Fountain: water pool at plaza center
+                if (c === cx && r === plazaR) return TILE_WATER;
+
+                // Plaza: stone disc around (cx, plazaR), radius ~3
+                const pdx = c - cx;
+                const pdy = r - plazaR;
+                if (pdx * pdx + pdy * pdy <= 9) return TILE_STONE;
+
+                // Plaza entry path: one-tile column north from main
+                // path to the plaza rim.
+                if (c === cx && r >= cy + 1 && r < plazaR - 2) return TILE_PATH;
+
+                // Shop approach path: two-tile column from main path
+                // up to the shop's south wall.
+                if ((c === shopDoorC || c === shopDoorC + 1) &&
+                    r >= shopDoorR && r <= cy) return TILE_PATH;
+
+                // Main east-west road across the middle (2 tiles tall).
+                if (r === cy || r === cy - 1) return TILE_PATH;
+
+                // Tree groves in each corner - bounded boxes with
+                // hash-driven density so they feel organic.
+                const h = hash2(c, r);
+                const nwX = c >= 3 && c <= 20;
+                const neX = c >= cols - 21 && c <= cols - 4;
+                const topY = r >= 3 && r <= 12;
+                const botY = r >= rows - 13 && r <= rows - 4;
+                if ((nwX || neX) && topY && h < 0.42) return TILE_TREE;
+                if ((nwX || neX) && botY && h < 0.38) return TILE_TREE;
+
+                // Light decoration scattered across the rest: rare
+                // trees and a sprinkle of stones for texture.
+                if (h < 0.012) return TILE_STONE;
+                if (h > 0.988) return TILE_TREE;
+
+                return TILE_GRASS;
+            },
             enemyCount: 0,
             enemyOpts: {},
             exits: { east: "caverns" },
@@ -317,6 +366,15 @@
             if (onNorth && level.exits.north && Math.abs(c - midC) <= EXIT_GAP_TILES) return TILE_PATH;
             if (onSouth && level.exits.south && Math.abs(c - midC) <= EXIT_GAP_TILES) return TILE_PATH;
             return level.borderTile;
+        }
+
+        // Custom layout hook - a level can ship a tileFn to fully
+        // control interior tiles (e.g. the grove uses this to carve
+        // paths, a plaza, a fountain, and tree clusters). Returning
+        // undefined falls through to the scatter table below.
+        if (typeof level.tileFn === "function") {
+            const t = level.tileFn(c, r, cols, rows);
+            if (t !== undefined) return t;
         }
 
         const h = hash2(c, r);
@@ -3236,12 +3294,16 @@
         new Npc({
             id: "elder",
             name: "Village Elder",
-            x: WORLD_W / 2 + 140,
-            y: WORLD_H / 2 - 12,
+            // On the stone plaza south of the main road, a few tiles
+            // east of the fountain.
+            x: 1232,
+            y: 1024,
             width: 32, height: 32,
             interactRange: 60,
-            wanderRadius: 40,
-            speed: 22,
+            // Slightly wider so the Elder paces the plaza instead of
+            // pinning to one spot.
+            wanderRadius: 60,
+            speed: 24,
             colors: { robe: "#6b4e91", trim: "#503872", sash: "#ffd166", hat: "#4a2f70" },
             dialogue: {
                 greeting: '"Greetings, traveler. The grove welcomes you."',
@@ -3266,8 +3328,10 @@
         new Npc({
             id: "villager",
             name: "Villager",
-            x: WORLD_W / 2 + 40,
-            y: WORLD_H / 2 + 160,
+            // In the SW quarter between the tree grove and the main
+            // road - tending the old gardens, as their dialogue says.
+            x: 680,
+            y: 1260,
             width: 32, height: 32,
             interactRange: 60,
             wanderRadius: 140,
@@ -3295,12 +3359,14 @@
         new Npc({
             id: "scout",
             name: "Scout",
-            x: WORLD_W / 2 - 60,
-            y: WORLD_H / 2 - 180,
+            // Patrolling near the east gate (the exit to the caverns).
+            x: 2100,
+            y: 880,
             width: 32, height: 32,
             interactRange: 60,
-            wanderRadius: 90,
-            speed: 50,
+            // Wider radius + faster pace - they're on watch.
+            wanderRadius: 110,
+            speed: 54,
             colors: { robe: "#3c5c8c", trim: "#223a5a", sash: "#8ad9ff", hat: "#1a2c46" },
             dialogue: {
                 greeting: '"Stay alert out there. The watch is thin."',
