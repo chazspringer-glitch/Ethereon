@@ -989,6 +989,10 @@
 
         // Collected items, flat array of ids from the ITEMS catalog.
         inventory: [],
+
+        // Currently-equipped weapon index into `weapons[]`.
+        // 0 = sword (melee), 1 = energy blast (projectile).
+        weaponIndex: 0,
     };
 
     // ---------------------------------------------------------------
@@ -1179,6 +1183,171 @@
 
     // Inventory UI toggle state. Set from the `I` key in update().
     let inventoryOpen = false;
+
+    // ---------------------------------------------------------------
+    // Weapons
+    //
+    // The player carries a small set of weapons and picks one at a
+    // time via the `1` / `2` keys. Each weapon is an object with a
+    // consistent shape so the combat-input path can stay agnostic:
+    //
+    //   id            unique key (matches a HUD label)
+    //   name          display name
+    //   color         HUD accent
+    //   ready         bool - can it fire right now?
+    //   cooldownFrac  0..1 for the HUD bar (0 = just fired, 1 = ready)
+    //   fire(player)  triggers the weapon, self-gates on `ready`
+    //   update(dt)    advances the weapon's internal timers
+    //
+    // The sword is a thin wrapper around the existing `attack` module
+    // so behavior and state are byte-for-byte unchanged - scoring,
+    // drops, and the enemy-hit flash all keep working without
+    // modification. The energy weapon spawns projectiles and owns its
+    // own cooldown.
+    // ---------------------------------------------------------------
+
+    // --- Projectiles ---
+    const projectiles = [];
+
+    function spawnProjectile(owner, opts = {}) {
+        const cx = owner.x + owner.width / 2;
+        const cy = owner.y + owner.height / 2;
+        const fx = owner.facing.x;
+        const fy = owner.facing.y;
+        const mag = Math.hypot(fx, fy) || 1;
+        const speed = opts.speed ?? 520;
+        projectiles.push({
+            x: cx - 6,
+            y: cy - 6,
+            w: 12,
+            h: 12,
+            vx: (fx / mag) * speed,
+            vy: (fy / mag) * speed,
+            life: opts.life ?? 0.6,
+            damage: opts.damage ?? 1,
+            color: opts.color ?? "#8ad9ff",
+            age: 0,
+            alive: true,
+        });
+    }
+
+    function updateProjectiles(dt) {
+        for (let i = projectiles.length - 1; i >= 0; i--) {
+            const p = projectiles[i];
+            p.age += dt;
+            p.life -= dt;
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+
+            if (
+                p.life <= 0 ||
+                p.x < 0 || p.y < 0 ||
+                p.x > WORLD_W || p.y > WORLD_H
+            ) {
+                p.alive = false;
+            }
+
+            // Hit test against live enemies. Uses the existing
+            // `e.bounds()` scratch rect so no allocation per hit.
+            if (p.alive) {
+                for (const e of enemies) {
+                    if (!e.alive) continue;
+                    const b = e.bounds();
+                    if (
+                        p.x < b.x + b.w && p.x + p.w > b.x &&
+                        p.y < b.y + b.h && p.y + p.h > b.y
+                    ) {
+                        e.takeHit(p.damage);
+                        if (!e.alive) {
+                            stats.addKill(e);
+                            rollEnemyDrop(e);
+                        }
+                        p.alive = false;
+                        break;
+                    }
+                }
+            }
+
+            if (!p.alive) projectiles.splice(i, 1);
+        }
+    }
+
+    function drawProjectiles(ctx) {
+        for (const p of projectiles) {
+            const cx = Math.round(p.x + p.w / 2);
+            const cy = Math.round(p.y + p.h / 2);
+            const pulse = 0.8 + 0.2 * Math.sin(p.age * 30);
+
+            ctx.save();
+            ctx.globalAlpha = 0.5 * pulse;
+            ctx.fillStyle = p.color;
+            ctx.beginPath();
+            ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = "#eaf7ff";
+            ctx.beginPath();
+            ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+    }
+
+    // --- Weapons ---
+
+    // Sword: delegates everything to the existing attack module, so
+    // melee behavior is unchanged. Its "cooldown" and "ready" state
+    // are computed views of the attack module's live state.
+    const swordWeapon = {
+        id: "sword",
+        name: "Sword",
+        color: "#ffd166",
+        get ready() {
+            return !attack.active && attack.cooldownTimer <= 0;
+        },
+        cooldownFrac() {
+            if (attack.active) return 0;
+            if (attack.cooldownTimer <= 0) return 1;
+            return 1 - attack.cooldownTimer / attack.cooldown;
+        },
+        fire(player) { attack.tryStart(player); },
+        update(_dt) { /* attack module ticks itself */ },
+        reset() { /* attack state is reset elsewhere */ },
+    };
+
+    // Energy blast: owns its own cooldown and spawns a projectile on
+    // fire. Uses the same `sound.play("attack")` cue for now so the
+    // existing spam guard applies.
+    const energyWeapon = {
+        id: "energy",
+        name: "Energy Blast",
+        color: "#8ad9ff",
+        cooldownMax: 0.5,
+        cooldownTimer: 0,
+        get ready() { return this.cooldownTimer <= 0; },
+        cooldownFrac() {
+            if (this.cooldownTimer <= 0) return 1;
+            return 1 - this.cooldownTimer / this.cooldownMax;
+        },
+        fire(player) {
+            if (!this.ready) return;
+            this.cooldownTimer = this.cooldownMax;
+            spawnProjectile(player, { color: this.color });
+            sound.play("attack");
+        },
+        update(dt) {
+            if (this.cooldownTimer > 0) {
+                this.cooldownTimer = Math.max(0, this.cooldownTimer - dt);
+            }
+        },
+        reset() { this.cooldownTimer = 0; },
+    };
+
+    const weapons = [swordWeapon, energyWeapon];
+
+    function currentWeapon() {
+        return weapons[player.weaponIndex] ?? weapons[0];
+    }
 
     // ---------------------------------------------------------------
     // Attack module
@@ -1726,7 +1895,10 @@
         const keyboardAttack = keysJustPressed[" "] || keysJustPressed["Spacebar"];
         const touchAttack = attackButton.consumeJustPressed();
         if (keyboardAttack || touchAttack) {
-            attack.tryStart(player);
+            // Fires whichever weapon is equipped. Each weapon self-
+            // gates on its own `ready` check, so spam presses that
+            // land on cooldown quietly no-op.
+            currentWeapon().fire(player);
         }
     }
 
@@ -1752,10 +1924,16 @@
             inventoryOpen = !inventoryOpen;
         }
 
+        // Weapon switching - edge-triggered, alive-only.
+        if (keysJustPressed["1"]) player.weaponIndex = 0;
+        if (keysJustPressed["2"]) player.weaponIndex = 1;
+
         updateMovement(dt);
         updateCombatInput();
         attack.update(dt);
+        for (const w of weapons) w.update(dt);
         updateEnemies(dt);
+        updateProjectiles(dt);
         updateAttackCollision();
         updateEnemyContact();
         updatePlayerStatus(dt);
@@ -1807,6 +1985,12 @@
         drops.length = 0;
         inventoryOpen = false;
 
+        // Weapons - back to the starting loadout, clear any in-flight
+        // projectiles, and reset each weapon's internal timers.
+        player.weaponIndex = 0;
+        projectiles.length = 0;
+        for (const w of weapons) w.reset();
+
         // Camera - jump straight to the player so the world doesn't
         // pan in from wherever the death happened.
         camera.snap(player);
@@ -1857,6 +2041,9 @@
 
         // Attack hitbox on top of the player.
         attack.draw(ctx, player);
+
+        // Projectiles over everything else in the world layer.
+        drawProjectiles(ctx);
 
         ctx.restore();
 
@@ -2130,28 +2317,41 @@
     }
 
     function drawCooldownBar() {
-        const barW = 120;
+        const w = currentWeapon();
+        const barW = 140;
         const barH = 8;
         const x = 16;
         const y = VIEW_H - 24;
 
-        const ready = !attack.active && attack.cooldownTimer <= 0;
-        const fill = ready
-            ? 1
-            : attack.active
-                ? 0
-                : 1 - attack.cooldownTimer / attack.cooldown;
+        const fill = w.cooldownFrac();
+        const ready = w.ready;
 
+        // Track
         ctx.fillStyle = "#1a1a24";
         ctx.fillRect(x, y, barW, barH);
-        ctx.fillStyle = ready ? "#7ad17a" : "#d17a7a";
+        // Fill - weapon-tinted when ready, muted red while on cooldown.
+        ctx.fillStyle = ready ? w.color : "#d17a7a";
         ctx.fillRect(x, y, barW * fill, barH);
+        // Border
         ctx.strokeStyle = "#444458";
         ctx.strokeRect(x + 0.5, y + 0.5, barW - 1, barH - 1);
 
-        ctx.fillStyle = "#a0a0b8";
-        ctx.font = "12px system-ui, sans-serif";
-        ctx.fillText("Attack (SPACE)", x, y - 4);
+        // Weapon label + hotkey hint. Marks the active weapon so the
+        // player knows what's selected at a glance.
+        ctx.save();
+        drawShadowedText(
+            `WEAPON  ${w.name}`,
+            x, y - 6,
+            "#e8e8f0",
+            "bold 11px system-ui, sans-serif"
+        );
+        drawShadowedText(
+            `[ 1 Sword   2 Energy ]   SPACE to fire`,
+            x, y + barH + 12,
+            "#a0a0b8",
+            "10px system-ui, sans-serif"
+        );
+        ctx.restore();
     }
 
     // ---------------------------------------------------------------
