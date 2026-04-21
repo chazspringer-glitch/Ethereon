@@ -1,0 +1,49 @@
+/* ---------- Base layout ---------- */
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html,
+body {
+    height: 100%;
+    width: 100%;
+    background: #1a1a24;
+    color: #e8e8f0;
+    font-family: "Segoe UI", Roboto, system-ui, sans-serif;
+}
+
+/* ---------- Centered game area ---------- */
+.game-wrapper {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 20px;
+}
+
+.title {
+    font-size: 2rem;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: #ffd166;
+}
+
+.hint {
+    font-size: 0.95rem;
+    color: #a0a0b8;
+}
+
+/* ---------- Canvas ---------- */
+#game {
+    display: block;
+    background: #2a2a38;
+    border: 2px solid #444458;
+    border-radius: 6px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+    /* Keep the canvas at its intrinsic 800x600 resolution */
+    image-rendering: pixelated;
+}
