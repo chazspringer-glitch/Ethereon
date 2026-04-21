@@ -2065,6 +2065,14 @@
             return;
         }
 
+        // Cinematic: highest-priority modal. A tap advances the
+        // sequence; no other buttons react while text rolls.
+        if (cinematic.isOpen()) {
+            cinematic.advance();
+            e.preventDefault();
+            return;
+        }
+
         // Shop is modal - taps only hit item rows or the close button.
         if (shop.isOpen()) {
             handleShopPointer(x, y);
@@ -2386,10 +2394,19 @@
             this.state = id;
             this.save();
             sound.play("levelUp");
-            questLog.showToast(
-                `New chapter - ${CHAPTERS[id].title}`,
-                3.0
-            );
+
+            // Cinematic if one's defined for this chapter, otherwise
+            // fall back to the compact toast. Keeps the notification
+            // shape uniform but lets any chapter graduate to a full
+            // sequence with no call-site changes.
+            if (CINEMATICS[id]) {
+                cinematic.play(CINEMATICS[id]);
+            } else {
+                questLog.showToast(
+                    `New chapter - ${CHAPTERS[id].title}`,
+                    3.0
+                );
+            }
             return true;
         },
 
@@ -2532,6 +2549,215 @@
     };
 
     loreLog.load();
+
+    // ---------------------------------------------------------------
+    // Cinematics
+    //
+    // Short, modal, text-based sequences that fire on story beats.
+    // While a cinematic is active the world freezes, a dark letter-
+    // box fades in, and lines are shown one at a time - advances
+    // automatically on a timer or immediately on any input.
+    //
+    // State machine phases:
+    //   "in"    fade-in (bars + dim sweep onto the world)
+    //   "hold"  the current line is displayed; auto-advances or
+    //           the player can tap / press any key to skip ahead
+    //   "out"   fade-out; on end -> close()
+    //
+    // Data shape (CINEMATICS catalog, keyed by story chapter id):
+    //   { title, lines: [ "..." ] , perLine?, fadeIn?, fadeOut? }
+    // ---------------------------------------------------------------
+    const CINEMATICS = {
+        chapter2: {
+            title: "Chapter 2 - The Hunt Begins",
+            lines: [
+                "The air drops colder the moment you cross the threshold.",
+                "Caverns that once carried caravans now echo with other footsteps.",
+                "Something in the dark has learned to listen.",
+            ],
+        },
+        chapter3: {
+            title: "Chapter 3 - Shrine's Call",
+            lines: [
+                'The Elder presses the Golden Key into your palm.',
+                '"The shrine\'s lock answers to this, and nothing else."',
+                '"Whatever is down there has waited long enough. End it."',
+            ],
+        },
+        chapter4: {
+            title: "Chapter 4 - Into the Shrine",
+            lines: [
+                "The shrine's gate parts without a sound.",
+                "Inside, the walls feel like they are breathing.",
+                "Somewhere ahead, the Keeper turns its eyes toward you.",
+            ],
+        },
+        chapter5: {
+            title: "Chapter 5 - Victory",
+            lines: [
+                "The Keeper falls, and a silence floods the shrine.",
+                "The Ethereon Heart pulses once - softly - then goes still.",
+                "The world beyond the gate is quiet again.",
+                "You have bought it time.",
+            ],
+        },
+    };
+
+    const cinematic = {
+        active: null,
+        // Defaults; overridable per-cinematic config.
+        _defaults: { perLine: 3.6, fadeIn: 0.5, fadeOut: 0.5, lineFadeIn: 0.4 },
+
+        isOpen() { return this.active !== null; },
+
+        play(cfg) {
+            if (!cfg) return;
+            const lines = Array.isArray(cfg) ? cfg : (cfg.lines || []);
+            if (lines.length === 0) return;
+            this.active = {
+                title: cfg.title ?? null,
+                lines,
+                index: 0,
+                lineTimer: 0,
+                perLine: cfg.perLine ?? this._defaults.perLine,
+                fadeIn: cfg.fadeIn ?? this._defaults.fadeIn,
+                fadeOut: cfg.fadeOut ?? this._defaults.fadeOut,
+                lineFadeIn: this._defaults.lineFadeIn,
+                phase: "in",
+                phaseTimer: cfg.fadeIn ?? this._defaults.fadeIn,
+            };
+        },
+
+        // Tap / key advances to the next line, or ends the
+        // cinematic if already on the last one. The very first
+        // tap during fade-in skips that fade so the player never
+        // waits a second before the story starts.
+        advance() {
+            if (!this.active) return;
+            const a = this.active;
+            if (a.phase === "in") {
+                a.phase = "hold";
+                a.phaseTimer = 0;
+                return;
+            }
+            if (a.phase !== "hold") return;
+            a.index++;
+            a.lineTimer = 0;
+            if (a.index >= a.lines.length) {
+                a.phase = "out";
+                a.phaseTimer = a.fadeOut;
+            }
+        },
+
+        close() {
+            this.active = null;
+        },
+
+        update(dt) {
+            if (!this.active) return;
+            const a = this.active;
+            if (a.phase === "in") {
+                a.phaseTimer = Math.max(0, a.phaseTimer - dt);
+                if (a.phaseTimer <= 0) a.phase = "hold";
+            } else if (a.phase === "hold") {
+                a.lineTimer += dt;
+                if (a.lineTimer >= a.perLine) this.advance();
+            } else if (a.phase === "out") {
+                a.phaseTimer = Math.max(0, a.phaseTimer - dt);
+                if (a.phaseTimer <= 0) this.close();
+            }
+        },
+
+        // Alpha of the letterbox / dim layers based on phase.
+        _curtainAlpha() {
+            const a = this.active;
+            if (a.phase === "in")  return 1 - a.phaseTimer / a.fadeIn;
+            if (a.phase === "out") return a.phaseTimer / a.fadeOut;
+            return 1;
+        },
+
+        draw(ctx) {
+            if (!this.active) return;
+            const a = this.active;
+            const alpha = this._curtainAlpha();
+
+            // Full-screen dim sweep
+            ctx.save();
+            ctx.globalAlpha = alpha * 0.65;
+            ctx.fillStyle = "#000";
+            ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+            // Classic cinematic letterbox - solid black top/bottom
+            // bars 15% tall.
+            const barH = Math.max(48, Math.round(VIEW_H * 0.15));
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = "#000";
+            ctx.fillRect(0, 0, VIEW_W, barH);
+            ctx.fillRect(0, VIEW_H - barH, VIEW_W, barH);
+
+            // Chapter title sits inside the top bar.
+            if (a.title) {
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                drawShadowedText(
+                    a.title,
+                    VIEW_W / 2, barH / 2,
+                    "#ffd166",
+                    "bold 14px system-ui, sans-serif"
+                );
+            }
+
+            // Current line - fades in for the first fraction of its
+            // hold window so successive lines feel like cuts.
+            if (a.phase !== "out" && a.index < a.lines.length) {
+                let lineAlpha = 1;
+                if (a.phase === "hold" && a.lineTimer < a.lineFadeIn) {
+                    lineAlpha = a.lineTimer / a.lineFadeIn;
+                } else if (a.phase === "in") {
+                    lineAlpha = 0;
+                }
+                ctx.globalAlpha = alpha * lineAlpha;
+
+                const maxW = Math.min(640, VIEW_W - 48);
+                const font = "18px system-ui, sans-serif";
+                const wrapped = wrapText(a.lines[a.index], maxW, font);
+                const lineH = 26;
+                let ly = VIEW_H / 2 - ((wrapped.length - 1) * lineH) / 2;
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                for (const ln of wrapped) {
+                    drawShadowedText(
+                        ln,
+                        VIEW_W / 2, ly,
+                        "#e8e8f0",
+                        font
+                    );
+                    ly += lineH;
+                }
+            }
+
+            // "tap / any key" prompt only after the line has settled
+            // so it doesn't compete with the fade-in.
+            if (a.phase === "hold" && a.lineTimer > 0.9) {
+                const pulse = 0.55 + 0.45 *
+                    Math.abs(Math.sin(performance.now() * 0.003));
+                ctx.globalAlpha = alpha * pulse * 0.7;
+                const label = a.index < a.lines.length - 1
+                    ? "Tap / any key to continue"
+                    : "Tap / any key to close";
+                drawShadowedText(
+                    label,
+                    VIEW_W / 2, VIEW_H - barH / 2,
+                    "#a0a0b8",
+                    "bold 11px system-ui, sans-serif"
+                );
+            }
+
+            ctx.restore();
+        },
+
+        reset() { this.active = null; },
+    };
 
     // ---------------------------------------------------------------
     // Quests
@@ -6055,6 +6281,34 @@
             return;
         }
 
+        // Cinematic: highest-priority modal. While a sequence is
+        // playing the world (including enemies) freezes, and any
+        // input advances the text or closes it. Escape closes
+        // outright. Tick transient UI timers so toast fade doesn't
+        // stall underneath.
+        if (cinematic.isOpen()) {
+            cinematic.update(dt);
+            // Any keydown or a new touch advances the sequence.
+            let pressed = false;
+            for (const k in keysJustPressed) {
+                if (keysJustPressed[k]) { pressed = true; break; }
+            }
+            if (keysJustPressed["Escape"]) {
+                cinematic.close();
+            } else if (pressed) {
+                cinematic.advance();
+            }
+            // Consume any lingering touch press from the button
+            // that triggered the advance (e.g. attack / interact).
+            attackButton.consumeJustPressed();
+            interactButton.consumeJustPressed();
+            superPowerButton.consumeJustPressed();
+            powerButton.consumeJustPressed();
+            questLog.update(dt);
+            clearJustPressed();
+            return;
+        }
+
         // Shop is modal, same contract as dialogue: pick a row by
         // number, E / Escape closes.
         if (shop.isOpen()) {
@@ -6417,6 +6671,10 @@
         // Lore discoveries - same persistence contract as story.
         loreLog.reset();
 
+        // Cinematic - close any mid-playing sequence so the next
+        // run doesn't open on a stale letterbox.
+        cinematic.reset();
+
         // Dialogue - close any open box, drop cached option rects.
         dialogue.close();
 
@@ -6575,6 +6833,11 @@
             restartButton.draw(ctx);
         }
         if (gameState === "intro") drawIntro();
+
+        // Cinematic draws last - it overlays every other piece of
+        // UI (including the game-over overlay and intro) so story
+        // beats always read clearly.
+        cinematic.draw(ctx);
     }
 
     // --- HUD helpers ---
