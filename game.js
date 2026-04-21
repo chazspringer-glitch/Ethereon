@@ -618,6 +618,7 @@
             attack: 0.08,
             enemyHit: 0.05,
             playerHurt: 0.4,
+            power: 0.1,
         },
 
         _init() {
@@ -656,6 +657,7 @@
                 case "attack":     this._attack(now); break;
                 case "enemyHit":   this._enemyHit(now); break;
                 case "playerHurt": this._playerHurt(now); break;
+                case "power":      this._power(now); break;
             }
         },
 
@@ -702,6 +704,29 @@
             osc.connect(g).connect(this.master);
             osc.start(t);
             osc.stop(t + 0.24);
+        },
+
+        // Dramatic two-oscillator descending blast - "boom".
+        _power(t) {
+            const osc1 = this.ctx.createOscillator();
+            const osc2 = this.ctx.createOscillator();
+            const g = this.ctx.createGain();
+            osc1.type = "square";
+            osc2.type = "triangle";
+            osc1.frequency.setValueAtTime(180, t);
+            osc1.frequency.exponentialRampToValueAtTime(70, t + 0.32);
+            osc2.frequency.setValueAtTime(540, t);
+            osc2.frequency.exponentialRampToValueAtTime(220, t + 0.32);
+            g.gain.setValueAtTime(0.0001, t);
+            g.gain.exponentialRampToValueAtTime(0.38, t + 0.01);
+            g.gain.exponentialRampToValueAtTime(0.0001, t + 0.38);
+            osc1.connect(g);
+            osc2.connect(g);
+            g.connect(this.master);
+            osc1.start(t);
+            osc2.start(t);
+            osc1.stop(t + 0.4);
+            osc2.stop(t + 0.4);
         },
     };
 
@@ -971,6 +996,103 @@
         },
     };
 
+    // ---------------------------------------------------------------
+    // Power button (touch / pointer)
+    //
+    // Sits above the attack button. Tapping triggers `powerMove.activate`
+    // exactly like the Q key on keyboard. A cooldown ring inside the
+    // button shows remaining charge at a glance - classic ability-
+    // button idiom that reads even without any text.
+    // ---------------------------------------------------------------
+    const powerButton = {
+        x: VIEW_W - 78,
+        y: VIEW_H - 170,
+        radius: 38,
+
+        pressed: false,
+        pointerId: null,
+        justPressed: false,
+
+        contains(x, y) {
+            const dx = x - this.x;
+            const dy = y - this.y;
+            return dx * dx + dy * dy <= this.radius * this.radius;
+        },
+
+        onDown(x, y, pointerId) {
+            if (this.pressed) return false;
+            if (!this.contains(x, y)) return false;
+            this.pressed = true;
+            this.pointerId = pointerId;
+            this.justPressed = true;
+            return true;
+        },
+
+        onUp(pointerId) {
+            if (this.pointerId !== pointerId) return;
+            this.pressed = false;
+            this.pointerId = null;
+        },
+
+        consumeJustPressed() {
+            const v = this.justPressed;
+            this.justPressed = false;
+            return v;
+        },
+
+        draw(ctx) {
+            const cy = this.y + (this.pressed ? 2 : 0);
+            const ready = powerMove.ready;
+            const frac = powerMove.cooldownFrac();
+
+            ctx.save();
+
+            // Base circle - muted while charging, bright gold when ready.
+            ctx.globalAlpha = this.pressed ? 0.95 : 0.6;
+            ctx.fillStyle = ready ? "#ff8e3a" : "#5a3f2a";
+            ctx.beginPath();
+            ctx.arc(this.x, cy, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Cooldown ring - a pie slice that fills clockwise as the
+            // ability recharges. Drawn with a gap so it doesn't cover
+            // the label.
+            if (!ready) {
+                ctx.globalAlpha = 0.85;
+                ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+                ctx.beginPath();
+                ctx.moveTo(this.x, cy);
+                ctx.arc(
+                    this.x, cy, this.radius - 2,
+                    -Math.PI / 2 + frac * Math.PI * 2,
+                    Math.PI * 1.5
+                );
+                ctx.closePath();
+                ctx.fill();
+            }
+
+            // Rim
+            ctx.globalAlpha = 0.9;
+            ctx.strokeStyle = ready ? "#fff6d6" : "#888";
+            ctx.lineWidth = this.pressed ? 4 : 3;
+            ctx.beginPath();
+            ctx.arc(this.x, cy, this.radius, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Label
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = "#1a1a24";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.font = "bold 15px system-ui, sans-serif";
+            ctx.fillText("★", this.x, cy - 7);
+            ctx.font = "bold 10px system-ui, sans-serif";
+            ctx.fillText("POWER", this.x, cy + 8);
+
+            ctx.restore();
+        },
+    };
+
     // Convert a pointer event's clientX/Y into canvas-space coordinates
     // (the 960x540 internal grid). The canvas is CSS-scaled, so we
     // divide out that scale factor here.
@@ -1017,6 +1139,11 @@
             e.preventDefault();
             return;
         }
+        if (powerButton.onDown(x, y, e.pointerId)) {
+            canvas.setPointerCapture(e.pointerId);
+            e.preventDefault();
+            return;
+        }
 
         if (joystick.onDown(x, y, e.pointerId)) {
             // Keep receiving move/up even if the pointer leaves the
@@ -1038,6 +1165,7 @@
         joystick.onUp(e.pointerId);
         attackButton.onUp(e.pointerId);
         weaponSwapButton.onUp(e.pointerId);
+        powerButton.onUp(e.pointerId);
     }
     canvas.addEventListener("pointerup", endPointer);
     canvas.addEventListener("pointercancel", endPointer);
@@ -1448,6 +1576,131 @@
 
     function currentWeapon() {
         return weapons[player.weaponIndex] ?? weapons[0];
+    }
+
+    // ---------------------------------------------------------------
+    // Power move
+    //
+    // A radial AoE burst around the player - a counterweight to the
+    // 3-HP enemy rebalance. High damage, long cooldown, short active
+    // window. Independent of the weapon system so it's always
+    // available no matter what's equipped.
+    //
+    // The activation window lasts a few frames and `hitEnemies`
+    // guarantees each enemy is damaged exactly once per cast (same
+    // pattern as the sword's per-swing hit set).
+    //
+    // Numbers are laid out at the top so balancing is one place.
+    // ---------------------------------------------------------------
+    const powerMove = {
+        // Tunables
+        cooldownMax: 3.5,
+        activeDuration: 0.22,
+        radius: 80,
+        damage: 3,
+
+        // Runtime
+        cooldownTimer: 0,
+        activeTimer: 0,
+        hitEnemies: new Set(),
+
+        get ready() {
+            return this.cooldownTimer <= 0 && this.activeTimer <= 0;
+        },
+
+        cooldownFrac() {
+            if (this.cooldownTimer <= 0) return 1;
+            return 1 - this.cooldownTimer / this.cooldownMax;
+        },
+
+        activate(_entity) {
+            if (!this.ready) return false;
+            this.cooldownTimer = this.cooldownMax;
+            this.activeTimer = this.activeDuration;
+            this.hitEnemies.clear();
+            sound.play("power");
+            return true;
+        },
+
+        update(dt) {
+            if (this.activeTimer > 0) {
+                this.activeTimer = Math.max(0, this.activeTimer - dt);
+            }
+            if (this.cooldownTimer > 0) {
+                this.cooldownTimer = Math.max(0, this.cooldownTimer - dt);
+            }
+        },
+
+        reset() {
+            this.cooldownTimer = 0;
+            this.activeTimer = 0;
+            this.hitEnemies.clear();
+        },
+
+        // Expanding ring + glow centered on the player. Drawn in
+        // world space so it scrolls with the world correctly.
+        draw(ctx, entity) {
+            if (this.activeTimer <= 0) return;
+            const t = 1 - this.activeTimer / this.activeDuration; // 0 -> 1
+            const r = this.radius * (0.55 + 0.5 * t);
+            const cx = Math.round(entity.x + entity.width / 2);
+            const cy = Math.round(entity.y + entity.height / 2);
+            const fade = 1 - t;
+
+            ctx.save();
+
+            // Inner bloom
+            ctx.globalAlpha = fade * 0.28;
+            ctx.fillStyle = "#ffd166";
+            ctx.beginPath();
+            ctx.arc(cx, cy, r * 0.9, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Expanding rim
+            ctx.globalAlpha = fade * 0.85;
+            ctx.strokeStyle = "#ffd166";
+            ctx.lineWidth = 6 * fade + 2;
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Bright core rim
+            ctx.globalAlpha = fade;
+            ctx.strokeStyle = "#fff6d6";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, 0, Math.PI * 2);
+            ctx.stroke();
+
+            ctx.restore();
+        },
+    };
+
+    // Applies power-move damage to enemies inside the radius. Uses
+    // squared-distance compare (no sqrt) and reuses the per-cast
+    // `hitEnemies` set so each enemy takes damage at most once per
+    // activation, even though the active window spans several frames.
+    function updatePowerMoveCollision() {
+        if (powerMove.activeTimer <= 0) return;
+        const cx = player.x + player.width / 2;
+        const cy = player.y + player.height / 2;
+        const r2 = powerMove.radius * powerMove.radius;
+
+        for (const e of enemies) {
+            if (!e.alive || powerMove.hitEnemies.has(e)) continue;
+            const ex = e.x + e.width / 2;
+            const ey = e.y + e.height / 2;
+            const dx = ex - cx;
+            const dy = ey - cy;
+            if (dx * dx + dy * dy <= r2) {
+                e.takeHit(powerMove.damage);
+                powerMove.hitEnemies.add(e);
+                if (!e.alive) {
+                    stats.addKill(e);
+                    rollEnemyDrop(e);
+                }
+            }
+        }
     }
 
     // ---------------------------------------------------------------
@@ -2009,6 +2262,8 @@
     // ---------------------------------------------------------------
     function updateCombatInput() {
         if (!player.alive) return;
+
+        // Primary attack (weapon)
         const keyboardAttack = keysJustPressed[" "] || keysJustPressed["Spacebar"];
         const touchAttack = attackButton.consumeJustPressed();
         if (keyboardAttack || touchAttack) {
@@ -2016,6 +2271,13 @@
             // gates on its own `ready` check, so spam presses that
             // land on cooldown quietly no-op.
             currentWeapon().fire(player);
+        }
+
+        // Power move (shared across all weapons)
+        const keyboardPower = keysJustPressed["q"] || keysJustPressed["Q"];
+        const touchPower = powerButton.consumeJustPressed();
+        if (keyboardPower || touchPower) {
+            powerMove.activate(player);
         }
     }
 
@@ -2049,9 +2311,11 @@
         updateCombatInput();
         attack.update(dt);
         for (const w of weapons) w.update(dt);
+        powerMove.update(dt);
         updateEnemies(dt);
         updateProjectiles(dt);
         updateAttackCollision();
+        updatePowerMoveCollision();
         updateEnemyContact();
         updatePlayerStatus(dt);
         updateDrops(dt);
@@ -2108,6 +2372,9 @@
         projectiles.length = 0;
         for (const w of weapons) w.reset();
 
+        // Power move - rewind cooldown and clear any active burst.
+        powerMove.reset();
+
         // Camera - jump straight to the player so the world doesn't
         // pan in from wherever the death happened.
         camera.snap(player);
@@ -2124,6 +2391,9 @@
         attackButton.justPressed = false;
         weaponSwapButton.pressed = false;
         weaponSwapButton.pointerId = null;
+        powerButton.pressed = false;
+        powerButton.pointerId = null;
+        powerButton.justPressed = false;
 
         // Loop timing - prevent a huge dt spike on the first tick
         // after the restart keystroke.
@@ -2161,6 +2431,9 @@
         // Attack hitbox on top of the player.
         attack.draw(ctx, player);
 
+        // Power move ring - big AoE, goes over the weapon hitbox.
+        powerMove.draw(ctx, player);
+
         // Projectiles over everything else in the world layer.
         drawProjectiles(ctx);
 
@@ -2175,6 +2448,7 @@
         joystick.draw(ctx);
         attackButton.draw(ctx);
         weaponSwapButton.draw(ctx);
+        powerButton.draw(ctx);
 
         if (inventoryOpen) drawInventory();
         if (!player.alive) drawGameOver();
@@ -2441,37 +2715,44 @@
         const barW = 140;
         const barH = 8;
         const x = 16;
-        const y = VIEW_H - 24;
 
-        const fill = w.cooldownFrac();
-        const ready = w.ready;
+        // Two stacked bars: weapon above, power below. Power sits
+        // directly beneath the weapon bar so the whole combat-ready
+        // readout is one compact block.
+        const powerY = VIEW_H - 20;
+        const weaponY = powerY - 22;
 
-        // Track
-        ctx.fillStyle = "#1a1a24";
-        ctx.fillRect(x, y, barW, barH);
-        // Fill - weapon-tinted when ready, muted red while on cooldown.
-        ctx.fillStyle = ready ? w.color : "#d17a7a";
-        ctx.fillRect(x, y, barW * fill, barH);
-        // Border
-        ctx.strokeStyle = "#444458";
-        ctx.strokeRect(x + 0.5, y + 0.5, barW - 1, barH - 1);
-
-        // Weapon label + hotkey hint. Marks the active weapon so the
-        // player knows what's selected at a glance.
-        ctx.save();
+        // --- Weapon bar ---
+        drawMiniBar(x, weaponY, barW, barH, w.cooldownFrac(), w.ready ? w.color : "#d17a7a");
         drawShadowedText(
             `WEAPON  ${w.name}`,
-            x, y - 6,
+            x, weaponY - 6,
             "#e8e8f0",
             "bold 11px system-ui, sans-serif"
         );
-        drawShadowedText(
-            `[ 1 Sword   2 Energy ]   SPACE to fire`,
-            x, y + barH + 12,
-            "#a0a0b8",
-            "10px system-ui, sans-serif"
+
+        // --- Power bar ---
+        const powerReady = powerMove.ready;
+        drawMiniBar(
+            x, powerY, barW, barH,
+            powerMove.cooldownFrac(),
+            powerReady ? "#ff8e3a" : "#7a4030"
         );
-        ctx.restore();
+        drawShadowedText(
+            `POWER  ${powerReady ? "READY" : "charging..."}`,
+            x, powerY - 6,
+            "#e8e8f0",
+            "bold 11px system-ui, sans-serif"
+        );
+    }
+
+    function drawMiniBar(x, y, w, h, frac, color) {
+        ctx.fillStyle = "#1a1a24";
+        ctx.fillRect(x, y, w, h);
+        ctx.fillStyle = color;
+        ctx.fillRect(x, y, w * frac, h);
+        ctx.strokeStyle = "#444458";
+        ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
     }
 
     // ---------------------------------------------------------------
