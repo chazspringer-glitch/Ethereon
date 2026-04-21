@@ -81,6 +81,19 @@
     const WORLD_H = TILE * WORLD_ROWS;
 
     // ---------------------------------------------------------------
+    // Game state machine
+    //
+    //   "intro"    - cinematic title screen, world frozen
+    //   "playing"  - normal gameplay
+    //   "gameover" - player dead, world frozen, restart button up
+    //
+    // One enum driving update + draw keeps the "what's running right
+    // now?" decision in a single obvious place.
+    // ---------------------------------------------------------------
+    let gameState = "intro";
+    const introStart = performance.now();
+
+    // ---------------------------------------------------------------
     // World - tile-based map, larger than the viewport.
     //
     // The map is stored in a flat Uint8Array (cols*rows tile IDs) for
@@ -619,6 +632,7 @@
             enemyHit: 0.05,
             playerHurt: 0.4,
             power: 0.1,
+            levelUp: 1.5,
         },
 
         _init() {
@@ -658,6 +672,7 @@
                 case "enemyHit":   this._enemyHit(now); break;
                 case "playerHurt": this._playerHurt(now); break;
                 case "power":      this._power(now); break;
+                case "levelUp":    this._levelUp(now); break;
             }
         },
 
@@ -704,6 +719,24 @@
             osc.connect(g).connect(this.master);
             osc.start(t);
             osc.stop(t + 0.24);
+        },
+
+        // Rising major-triad arpeggio - "ding ding ding".
+        _levelUp(t) {
+            const notes = [523, 659, 784]; // C5 E5 G5
+            for (let i = 0; i < notes.length; i++) {
+                const start = t + i * 0.08;
+                const osc = this.ctx.createOscillator();
+                const g = this.ctx.createGain();
+                osc.type = "triangle";
+                osc.frequency.setValueAtTime(notes[i], start);
+                g.gain.setValueAtTime(0.0001, start);
+                g.gain.exponentialRampToValueAtTime(0.25, start + 0.01);
+                g.gain.exponentialRampToValueAtTime(0.0001, start + 0.22);
+                osc.connect(g).connect(this.master);
+                osc.start(start);
+                osc.stop(start + 0.24);
+            }
         },
 
         // Dramatic two-oscillator descending blast - "boom".
@@ -1093,6 +1126,75 @@
         },
     };
 
+    // ---------------------------------------------------------------
+    // Restart button (game-over only)
+    //
+    // A clearly-tappable rectangle centered on the game-over screen.
+    // Only active while `gameState === "gameover"`, so pointer events
+    // during gameplay can't accidentally hit it. Tapping calls the
+    // same `restartGame()` used by the R key, so both paths converge.
+    // ---------------------------------------------------------------
+    const restartButton = {
+        w: 200,
+        h: 48,
+        pressed: false,
+        pointerId: null,
+
+        bounds() {
+            return {
+                x: (VIEW_W - this.w) / 2,
+                y: VIEW_H / 2 + 98,
+                w: this.w,
+                h: this.h,
+            };
+        },
+
+        contains(x, y) {
+            const b = this.bounds();
+            return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+        },
+
+        onDown(x, y, pointerId) {
+            if (gameState !== "gameover") return false;
+            if (!this.contains(x, y)) return false;
+            this.pressed = true;
+            this.pointerId = pointerId;
+            return true;
+        },
+
+        onUp(pointerId) {
+            if (this.pointerId !== pointerId) return;
+            const wasPressed = this.pressed;
+            this.pressed = false;
+            this.pointerId = null;
+            // Fire on release so a drag-off cancels the tap, which is
+            // the standard button UX.
+            if (wasPressed && gameState === "gameover") {
+                restartGame();
+            }
+        },
+
+        draw(ctx) {
+            if (gameState !== "gameover") return;
+            const b = this.bounds();
+
+            ctx.save();
+            roundRectPath(ctx, b.x, b.y, b.w, b.h, 10);
+            ctx.fillStyle = this.pressed ? "#d9a73b" : "#ffd166";
+            ctx.fill();
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.5)";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            ctx.fillStyle = "#1a1a24";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.font = "bold 20px system-ui, sans-serif";
+            ctx.fillText("RESTART", b.x + b.w / 2, b.y + b.h / 2 + (this.pressed ? 1 : 0));
+            ctx.restore();
+        },
+    };
+
     // Convert a pointer event's clientX/Y into canvas-space coordinates
     // (the 960x540 internal grid). The canvas is CSS-scaled, so we
     // divide out that scale factor here.
@@ -1124,6 +1226,24 @@
         sound.resume();
 
         const { x, y } = pointerToCanvas(e);
+
+        // Intro: any tap begins the game. Nothing else should react
+        // until playing is active.
+        if (gameState === "intro") {
+            startGame();
+            e.preventDefault();
+            return;
+        }
+
+        // Game over: the only live control is the restart button.
+        // Pointer capture keeps it responsive if the finger drifts.
+        if (gameState === "gameover") {
+            if (restartButton.onDown(x, y, e.pointerId)) {
+                canvas.setPointerCapture(e.pointerId);
+                e.preventDefault();
+            }
+            return;
+        }
 
         // Try the fixed-rect right-side buttons first. They share the
         // right half of the canvas with nothing else (the joystick
@@ -1166,6 +1286,7 @@
         attackButton.onUp(e.pointerId);
         weaponSwapButton.onUp(e.pointerId);
         powerButton.onUp(e.pointerId);
+        restartButton.onUp(e.pointerId);
     }
     canvas.addEventListener("pointerup", endPointer);
     canvas.addEventListener("pointercancel", endPointer);
@@ -1232,7 +1353,10 @@
         player.iframes = player.iframeDuration;
         sound.play("playerHurt");
 
-        if (player.hp <= 0) player.alive = false;
+        if (player.hp <= 0) {
+            player.alive = false;
+            gameState = "gameover";
+        }
     }
 
     function healPlayer(amount) {
@@ -1262,6 +1386,15 @@
         scoreModifiers: [],
         onScoreChanged: [],
 
+        // Leveling
+        level: 1,
+        xp: 0,
+        xpForNext: 30,
+        onLevelChanged: [],
+
+        // Brief "LEVEL UP!" toast countdown (seconds remaining visible)
+        levelUpToast: 0,
+
         addScore(amount) {
             let final = amount;
             for (const mod of this.scoreModifiers) final = mod(final);
@@ -1273,11 +1406,56 @@
         addKill(enemy) {
             this.kills += 1;
             this.addScore(enemy?.reward ?? 10);
+            this.addXp(enemy?.xpReward ?? 10);
+        },
+
+        // Grants XP and levels the player up as many times as the
+        // batch allows (so a huge XP drop can carry through multiple
+        // tiers cleanly).
+        addXp(amount) {
+            if (amount <= 0) return;
+            this.xp += amount;
+            while (this.xp >= this.xpForNext) {
+                this.xp -= this.xpForNext;
+                this._applyLevelUp();
+                this.xpForNext = Math.floor(30 + (this.level - 1) * 20);
+            }
+            for (const fn of this.onLevelChanged) fn(this.level);
+        },
+
+        // Each level applies a fixed upgrade recipe, tiered so every
+        // level meaningfully changes stats but the ramp stays bounded.
+        //   always:           +8 max HP (and instant heal by +8)
+        //   every 2 levels:   +1 sword damage
+        //   every 3 levels:   +1 energy damage
+        //   every 4 levels:   +1 power-move damage
+        //   every 5 levels:   attack & energy cooldowns *= 0.85
+        _applyLevelUp() {
+            this.level += 1;
+            this.levelUpToast = 1.8;
+
+            player.maxHp += 8;
+            player.hp = Math.min(player.maxHp, player.hp + 8);
+
+            const lvl = this.level;
+            if (lvl % 2 === 0) swordWeapon.damage += 1;
+            if (lvl % 3 === 0) energyWeapon.damage += 1;
+            if (lvl % 4 === 0) powerMove.damage += 1;
+            if (lvl % 5 === 0) {
+                attack.cooldown = Math.max(0.15, attack.cooldown * 0.85);
+                energyWeapon.cooldownMax = Math.max(0.25, energyWeapon.cooldownMax * 0.85);
+            }
+
+            sound.play("levelUp");
         },
 
         reset() {
             this.score = 0;
             this.kills = 0;
+            this.level = 1;
+            this.xp = 0;
+            this.xpForNext = 30;
+            this.levelUpToast = 0;
         },
     };
 
@@ -1871,6 +2049,10 @@
             // bosses) can override via opts.reward.
             this.reward = opts.reward ?? 10;
 
+            // XP granted on defeat. Independent from `reward` so
+            // bosses can give fat XP without trivializing score.
+            this.xpReward = opts.xpReward ?? 10;
+
             // Sprite + animation (each enemy owns its own animator so
             // their walk cycles aren't locked in lockstep).
             this.sheet = opts.sheet ?? enemySheet;
@@ -2285,14 +2467,24 @@
     // Update - top-level tick. Keeps sub-systems in a clear order.
     // ---------------------------------------------------------------
     function update(dt) {
-        // When the player is dead the world is frozen - no enemy AI,
-        // no spawns, no camera tracking - and the tick listens only
-        // for the restart key. This is the single chokepoint for
-        // "game stopped", so any future pause / menu / dialog state
-        // can plug in here the same way.
-        if (!player.alive) {
+        // Intro: any key press begins the game.
+        if (gameState === "intro") {
+            for (const k in keysJustPressed) {
+                if (keysJustPressed[k]) { startGame(); break; }
+            }
+            clearJustPressed();
+            return;
+        }
+
+        // Game over: frozen. The R key (and restart button, handled in
+        // pointer events) are the only live inputs. The level-up
+        // toast is left decaying so it can fade out gracefully.
+        if (gameState === "gameover") {
             if (keysJustPressed["r"] || keysJustPressed["R"]) {
                 restartGame();
+            }
+            if (stats.levelUpToast > 0) {
+                stats.levelUpToast = Math.max(0, stats.levelUpToast - dt);
             }
             clearJustPressed();
             return;
@@ -2306,6 +2498,11 @@
         // Weapon switching - edge-triggered, alive-only.
         if (keysJustPressed["1"]) player.weaponIndex = 0;
         if (keysJustPressed["2"]) player.weaponIndex = 1;
+
+        // Decay the brief "LEVEL UP!" toast.
+        if (stats.levelUpToast > 0) {
+            stats.levelUpToast = Math.max(0, stats.levelUpToast - dt);
+        }
 
         updateMovement(dt);
         updateCombatInput();
@@ -2325,14 +2522,49 @@
     }
 
     // ---------------------------------------------------------------
+    // Base-stats snapshot. Captured at boot, after every module's
+    // runtime values are at their "baseline" state - we use this to
+    // restore level-up upgrades on restart. Keeps the reset story
+    // declarative rather than re-typing constants.
+    const baseStats = {
+        playerMaxHp: player.maxHp,
+        attackCooldown: attack.cooldown,
+        swordDamage: swordWeapon.damage,
+        energyDamage: energyWeapon.damage,
+        energyCooldown: energyWeapon.cooldownMax,
+        powerDamage: powerMove.damage,
+    };
+
+    // Transition out of the intro screen and into gameplay. Called
+    // from the update tick (any key) and the pointerdown handler
+    // (any tap). Resets the loop clock so the first live frame
+    // doesn't get a huge dt from the intro's idle time.
+    function startGame() {
+        gameState = "playing";
+        lastTime = performance.now();
+        // Clear any held keys that might be stuck from the input
+        // that dismissed the intro.
+        for (const k in keys) keys[k] = false;
+    }
+
     // Restart - resets every piece of run-scoped state back to its
-    // boot values. New systems that hold run state (e.g. pickups,
-    // xp, map seed) reset themselves here so the reset story stays in
-    // one obvious place.
+    // boot values, including any level-up upgrades. New systems that
+    // hold run state (pickups, xp, map seed) reset themselves here
+    // so the reset story stays in one obvious place.
     // ---------------------------------------------------------------
     function restartGame() {
-        // Stats
+        gameState = "playing";
+
+        // Stats (score, kills, level, xp)
         stats.reset();
+
+        // Roll back any upgrades applied on previous level-ups.
+        player.maxHp = baseStats.playerMaxHp;
+        attack.cooldown = baseStats.attackCooldown;
+        swordWeapon.damage = baseStats.swordDamage;
+        energyWeapon.damage = baseStats.energyDamage;
+        energyWeapon.cooldownMax = baseStats.energyCooldown;
+        powerMove.damage = baseStats.powerDamage;
 
         // Player
         player.x = WORLD_W / 2 - 16;
@@ -2394,6 +2626,8 @@
         powerButton.pressed = false;
         powerButton.pointerId = null;
         powerButton.justPressed = false;
+        restartButton.pressed = false;
+        restartButton.pointerId = null;
 
         // Loop timing - prevent a huge dt spike on the first tick
         // after the restart keystroke.
@@ -2443,6 +2677,7 @@
         drawStatsPanel();
         drawScore();
         drawHealthBar();
+        drawXpBar();
         drawCooldownBar();
         drawEnemyCounter();
         joystick.draw(ctx);
@@ -2450,8 +2685,15 @@
         weaponSwapButton.draw(ctx);
         powerButton.draw(ctx);
 
+        if (stats.levelUpToast > 0) drawLevelUpToast();
         if (inventoryOpen) drawInventory();
-        if (!player.alive) drawGameOver();
+
+        // Overlays driven by the state machine.
+        if (gameState === "gameover") {
+            drawGameOver();
+            restartButton.draw(ctx);
+        }
+        if (gameState === "intro") drawIntro();
     }
 
     // --- HUD helpers ---
@@ -2484,11 +2726,11 @@
         ctx.fillText(text, x, y);
     }
 
-    // A subtle dark-glass panel behind the score + health stack so
+    // A subtle dark-glass panel behind the score / HP / XP stack so
     // the readouts don't compete with the terrain behind them.
     function drawStatsPanel() {
         ctx.save();
-        roundRectPath(ctx, 8, 8, 280, 56, 8);
+        roundRectPath(ctx, 8, 8, 280, 82, 8);
         ctx.fillStyle = "rgba(12, 12, 22, 0.62)";
         ctx.fill();
         ctx.strokeStyle = "rgba(255, 209, 102, 0.28)";
@@ -2497,8 +2739,8 @@
         ctx.restore();
     }
 
-    // Score: small grey label + bold gold value, both with a subtle
-    // drop shadow so they read over the panel at any terrain.
+    // Score on the left, level badge on the right. Both line up on
+    // the same row so the HUD reads left-to-right cleanly.
     function drawScore() {
         const x = 16;
         const y = 14;
@@ -2512,6 +2754,142 @@
             "#ffd166",
             "bold 20px system-ui, sans-serif"
         );
+
+        // Level badge - lives in the right half of the panel.
+        const lvlX = 228;
+        drawShadowedText("LVL", lvlX, y, "#a0a0b8", "11px system-ui, sans-serif");
+        drawShadowedText(
+            String(stats.level),
+            lvlX + 28, y - 2,
+            "#8ad9ff",
+            "bold 20px system-ui, sans-serif"
+        );
+
+        ctx.restore();
+    }
+
+    // XP progress bar directly below the HP bar. Cyan fill to echo
+    // the level badge's color, and a small "XP" label on the left.
+    function drawXpBar() {
+        const barW = 252;
+        const barH = 6;
+        const x = 28;
+        const y = 70;
+        const r = 3;
+
+        const frac = Math.max(0, Math.min(1, stats.xp / stats.xpForNext));
+
+        ctx.save();
+
+        // "XP" label left of the bar.
+        ctx.textBaseline = "middle";
+        drawShadowedText(
+            "XP",
+            12, y + barH / 2 + 1,
+            "#a0a0b8",
+            "bold 10px system-ui, sans-serif"
+        );
+
+        // Track
+        roundRectPath(ctx, x, y, barW, barH, r);
+        ctx.fillStyle = "#13131c";
+        ctx.fill();
+
+        // Fill
+        if (frac > 0) {
+            ctx.save();
+            ctx.clip();
+            ctx.fillStyle = "#8ad9ff";
+            ctx.fillRect(x, y, barW * frac, barH);
+            ctx.fillStyle = "rgba(255, 255, 255, 0.25)";
+            ctx.fillRect(x, y + 1, barW * frac, 2);
+            ctx.restore();
+        }
+
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.18)";
+        ctx.lineWidth = 1;
+        roundRectPath(ctx, x + 0.5, y + 0.5, barW - 1, barH - 1, r);
+        ctx.stroke();
+
+        ctx.restore();
+    }
+
+    // Gold "LEVEL UP!" flash that fades out over ~1.8s.
+    function drawLevelUpToast() {
+        const duration = 1.8;
+        const t = 1 - stats.levelUpToast / duration; // 0 -> 1
+        const alpha = Math.max(0, 1 - t);
+        const offset = -30 * t;
+
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        drawShadowedText(
+            `LEVEL UP!  ${stats.level}`,
+            VIEW_W / 2, VIEW_H / 2 - 80 + offset,
+            "#ffd166",
+            "bold 36px system-ui, sans-serif"
+        );
+        ctx.restore();
+    }
+
+    // Cinematic intro screen. Fades in the title over ~2s, then
+    // pulses a "press / tap to begin" prompt.
+    function drawIntro() {
+        const now = performance.now();
+        const elapsed = (now - introStart) / 1000;
+        const titleFade = Math.min(1, elapsed / 1.6);
+        const showPrompt = elapsed >= 1.6;
+
+        // Full-screen dim so the world reads as "not playing yet".
+        ctx.fillStyle = "rgba(10, 10, 20, 0.88)";
+        ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+        ctx.save();
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+
+        // Title - slides up slightly as it fades in.
+        const titleY = VIEW_H / 2 - 40 + (1 - titleFade) * 20;
+        ctx.globalAlpha = titleFade;
+        drawShadowedText(
+            "ETHEREON",
+            VIEW_W / 2, titleY,
+            "#ffd166",
+            "bold 68px system-ui, sans-serif"
+        );
+
+        // Tagline
+        ctx.globalAlpha = titleFade * 0.85;
+        drawShadowedText(
+            "a small action-RPG",
+            VIEW_W / 2, titleY + 54,
+            "#a0a0b8",
+            "15px system-ui, sans-serif"
+        );
+
+        // Press / tap prompt - pulses gently after title resolves.
+        if (showPrompt) {
+            const pulse = 0.55 + 0.45 * Math.abs(Math.sin(now * 0.004));
+            ctx.globalAlpha = pulse;
+            drawShadowedText(
+                "Press any key  or  tap to begin",
+                VIEW_W / 2, VIEW_H / 2 + 90,
+                "#e8e8f0",
+                "bold 16px system-ui, sans-serif"
+            );
+
+            // Small hint line with the controls.
+            ctx.globalAlpha = pulse * 0.7;
+            drawShadowedText(
+                "Arrows / joystick to move  ·  SPACE / ATK to attack  ·  Q / ★ for power",
+                VIEW_W / 2, VIEW_H / 2 + 120,
+                "#a0a0b8",
+                "11px system-ui, sans-serif"
+            );
+        }
+
         ctx.restore();
     }
 
@@ -2688,18 +3066,19 @@
         ctx.font = "bold 40px system-ui, sans-serif";
         ctx.fillText(String(stats.score).padStart(5, "0"), cx, cy + 46);
 
-        // Kill count tucked underneath so it reads but doesn't compete.
+        // Kill count + level reached.
         ctx.fillStyle = "#a0a0b8";
         ctx.font = "13px system-ui, sans-serif";
         ctx.fillText(`Enemies defeated: ${stats.kills}`, cx, cy + 70);
+        ctx.fillStyle = "#8ad9ff";
+        ctx.fillText(`Reached level ${stats.level}`, cx, cy + 88);
 
-        // Restart prompt - gently pulses so it draws the eye without
-        // feeling noisy. Uses performance.now so it ticks even while
-        // the update loop is frozen.
-        const pulse = 0.6 + 0.4 * Math.abs(Math.sin(performance.now() * 0.004));
-        ctx.fillStyle = `rgba(255, 209, 102, ${pulse.toFixed(3)})`;
-        ctx.font = "bold 16px system-ui, sans-serif";
-        ctx.fillText("Press  R  to restart", cx, cy + 106);
+        // The big RESTART button renders right below (drawn by
+        // `restartButton.draw`, called from the HUD pass). A small
+        // keyboard hint sits underneath it for desktop players.
+        ctx.fillStyle = "#a0a0b8";
+        ctx.font = "11px system-ui, sans-serif";
+        ctx.fillText("( or press  R  )", cx, cy + 170);
 
         ctx.restore();
     }
