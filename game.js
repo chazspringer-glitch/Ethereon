@@ -1495,6 +1495,13 @@
             return;
         }
 
+        // Dialogue is modal - taps only hit options or advance text.
+        if (dialogue.isOpen()) {
+            handleDialoguePointer(x, y);
+            e.preventDefault();
+            return;
+        }
+
         // Game over: the only live control is the restart button.
         // Pointer capture keeps it responsive if the finger drifts.
         if (gameState === "gameover") {
@@ -2911,6 +2918,97 @@
         questLog.accept(id);
     }
 
+    // ---------------------------------------------------------------
+    // Dialogue
+    //
+    // Modal conversation UI. `dialogue.open(npc)` reads the NPC's
+    // declarative `dialogue` config:
+    //
+    //   dialogue: {
+    //       greeting: "Hello.",
+    //       options: [
+    //           { label: "Who are you?", response: "..." },
+    //           { label: "Any work?",    action() { elderInteract(); } },
+    //           { label: "Goodbye",      close: true },
+    //       ],
+    //   }
+    //
+    // Two modes:
+    //   "menu"     — greeting + numbered option list
+    //   "response" — selected option's response text + continue hint
+    //
+    // An option with `response` flips to response mode (continue
+    // returns to menu). An option with `action` runs the callback
+    // and closes dialogue. An option with `close: true` closes.
+    // Adding new option types - quests, trades, yes/no branches -
+    // is a matter of handling more fields in `selectOption`.
+    //
+    // Gameplay input (movement, attack, weapon switch, inventory,
+    // power) is gated on `dialogue.isOpen()` so the world pauses
+    // while the box is up.
+    // ---------------------------------------------------------------
+    const dialogue = {
+        active: null,              // { speaker, greeting, options, text, mode }
+        optionRects: [],           // screen-space hitboxes for touch
+
+        open(npc) {
+            if (!npc || !npc.dialogue) {
+                // Legacy fallback: NPCs without a dialogue config
+                // still fire their old interact() directly.
+                if (npc && typeof npc.interact === "function") npc.interact();
+                return;
+            }
+            const d = npc.dialogue;
+            this.active = {
+                speaker: npc.name,
+                greeting: d.greeting,
+                options: d.options,
+                text: d.greeting,
+                mode: "menu",
+            };
+            this.optionRects = [];
+        },
+
+        close() {
+            this.active = null;
+            this.optionRects = [];
+        },
+
+        isOpen() {
+            return this.active !== null;
+        },
+
+        // Picks an option by its zero-based index. No-op if the
+        // dialogue isn't in menu mode or the index is out of range.
+        selectOption(index) {
+            if (!this.active || this.active.mode !== "menu") return;
+            const opt = this.active.options[index];
+            if (!opt) return;
+            if (opt.close) { this.close(); return; }
+            if (typeof opt.action === "function") {
+                opt.action();
+                this.close();
+                return;
+            }
+            if (typeof opt.response === "string") {
+                this.active.text = opt.response;
+                this.active.mode = "response";
+                return;
+            }
+        },
+
+        // In response mode, return to the menu. In menu mode, close.
+        advance() {
+            if (!this.active) return;
+            if (this.active.mode === "response") {
+                this.active.text = this.active.greeting;
+                this.active.mode = "menu";
+            } else {
+                this.close();
+            }
+        },
+    };
+
     // Populate the grove with four NPCs: Elder (quest), Merchant
     // (placeholder shop), Villager (flavor), Scout (lore hint).
     LEVELS.grove.npcs = [
@@ -2921,11 +3019,27 @@
             y: WORLD_H / 2 - 12,
             width: 32, height: 32,
             interactRange: 60,
-            // Elder stays near their seat - smaller roam radius.
             wanderRadius: 40,
             speed: 22,
             colors: { robe: "#6b4e91", trim: "#503872", sash: "#ffd166", hat: "#4a2f70" },
-            interact: elderInteract,
+            dialogue: {
+                greeting: '"Greetings, traveler. The grove welcomes you."',
+                options: [
+                    {
+                        label: "Who are you?",
+                        response: "I am the Elder - keeper of these grounds since before the star-fall.",
+                    },
+                    {
+                        label: "What is this place?",
+                        response: "The Sunlit Grove. Last safe haven before the dark places east.",
+                    },
+                    {
+                        label: "Any work for me?",
+                        action: elderInteract,  // jumps into the quest chain
+                    },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
         }),
         new Npc({
             id: "merchant",
@@ -2934,16 +3048,26 @@
             y: WORLD_H / 2 - 20,
             width: 32, height: 32,
             interactRange: 60,
-            // Merchant tends their stall - very small radius.
             wanderRadius: 28,
             speed: 28,
             colors: { robe: "#8c5a3c", trim: "#5f3c26", sash: "#e0b066", hat: "#3d2a18" },
-            interact() {
-                const lines = [
-                    'Merchant: "My wares arrive with the next caravan!"',
-                    'Merchant: "Gold coins will open doors, friend."',
-                ];
-                questLog.showToast(lines[Math.floor(Math.random() * lines.length)], 2.4);
+            dialogue: {
+                greeting: '"Browse if you must - my shelves are bare."',
+                options: [
+                    {
+                        label: "Who are you?",
+                        response: "Hemlen, trader of trinkets. My caravan is overdue.",
+                    },
+                    {
+                        label: "What do you sell?",
+                        response: "Potions, charms, blades - when the next wagon arrives. Come back soon.",
+                    },
+                    {
+                        label: "Heard any news?",
+                        response: "Strange lights from the shrine past the caverns. Locals don't go near.",
+                    },
+                    { label: "Goodbye.", close: true },
+                ],
             },
         }),
         new Npc({
@@ -2953,17 +3077,26 @@
             y: WORLD_H / 2 + 160,
             width: 32, height: 32,
             interactRange: 60,
-            // Villager strolls the widest - free spirit.
             wanderRadius: 140,
             speed: 42,
             colors: { robe: "#4e915c", trim: "#356840", sash: "#a0d0a0", hat: "#2f5a3a" },
-            interact() {
-                const lines = [
-                    'Villager: "The Elder has work for brave souls."',
-                    'Villager: "It\'s peaceful here - but stay sharp beyond the gates."',
-                    'Villager: "Lovely day in the grove, isn\'t it?"',
-                ];
-                questLog.showToast(lines[Math.floor(Math.random() * lines.length)], 2.4);
+            dialogue: {
+                greeting: '"Oh! A visitor. Good to see a new face."',
+                options: [
+                    {
+                        label: "Who are you?",
+                        response: "Just a resident - I tend the old gardens by the well.",
+                    },
+                    {
+                        label: "What is this place?",
+                        response: "The Sunlit Grove. The Elder knows its history better than I.",
+                    },
+                    {
+                        label: "Any work for me?",
+                        response: "You'll want the Elder for that. I'm just a gardener.",
+                    },
+                    { label: "Goodbye.", close: true },
+                ],
             },
         }),
         new Npc({
@@ -2973,15 +3106,26 @@
             y: WORLD_H / 2 - 180,
             width: 32, height: 32,
             interactRange: 60,
-            // Scout paces on watch.
             wanderRadius: 90,
             speed: 50,
             colors: { robe: "#3c5c8c", trim: "#223a5a", sash: "#8ad9ff", hat: "#1a2c46" },
-            interact() {
-                questLog.showToast(
-                    'Scout: "The caverns to the east hold treasures - and danger. Tread well."',
-                    2.8
-                );
+            dialogue: {
+                greeting: '"Stay alert out there. The watch is thin."',
+                options: [
+                    {
+                        label: "Who are you?",
+                        response: "A scout of the grove's watch. I patrol the gates.",
+                    },
+                    {
+                        label: "What's east of here?",
+                        response: "The Echo Caverns. Beyond, the Shrine. Ruin and relic both.",
+                    },
+                    {
+                        label: "Any advice?",
+                        response: "Keep a weapon ready and your health full. Retreat costs nothing.",
+                    },
+                    { label: "Goodbye.", close: true },
+                ],
             },
         }),
     ];
@@ -3228,6 +3372,24 @@
             return;
         }
 
+        // Dialogue is modal: while it's open, gameplay input is
+        // suspended and the tick only routes keys to the dialogue
+        // box. Number keys pick options; E / Space / Enter advance a
+        // response back to the menu or close the menu; Escape closes
+        // immediately. Consume the TALK button press so it doesn't
+        // carry into gameplay when we close.
+        if (dialogue.isOpen()) {
+            interactButton.consumeJustPressed();
+            handleDialogueKeyInput();
+            questLog.update(dt);
+            if (stats.levelUpToast > 0) {
+                stats.levelUpToast = Math.max(0, stats.levelUpToast - dt);
+            }
+            updateNpcs(dt);   // NPCs keep wandering behind the dialogue
+            clearJustPressed();
+            return;
+        }
+
         // Inventory toggle - edge-triggered, alive-only.
         if (keysJustPressed["i"] || keysJustPressed["I"]) {
             inventoryOpen = !inventoryOpen;
@@ -3237,14 +3399,14 @@
         if (keysJustPressed["1"]) player.weaponIndex = 0;
         if (keysJustPressed["2"]) player.weaponIndex = 1;
 
-        // NPC interact - E key or the mobile TALK button. Proximity
-        // is checked inside `npc.interact`, so a stray press with no
-        // NPC in range is a no-op.
+        // NPC interact - E key or the mobile TALK button. Opens the
+        // nearest NPC's dialogue box; a stray press with no NPC in
+        // range is a no-op because nearestNpc returns null.
         const keyboardInteract = keysJustPressed["e"] || keysJustPressed["E"];
         const touchInteract = interactButton.consumeJustPressed();
         if (keyboardInteract || touchInteract) {
             const target = nearestNpc();
-            if (target) target.interact();
+            if (target) dialogue.open(target);
         }
 
         // Tick transient UI state (quest + level toasts).
@@ -3296,6 +3458,60 @@
     // from the update tick (any key) and the pointerdown handler
     // (any tap). Resets the loop clock so the first live frame
     // doesn't get a huge dt from the intro's idle time.
+    // Pointer handling for the dialogue overlay. In response mode,
+    // any tap advances back to the menu; in menu mode, taps test
+    // against the option rects filled in by `drawDialogue`.
+    function handleDialoguePointer(x, y) {
+        if (!dialogue.isOpen()) return;
+        if (dialogue.active.mode === "response") {
+            dialogue.advance();
+            return;
+        }
+        const rects = dialogue.optionRects;
+        for (let i = 0; i < rects.length; i++) {
+            const r = rects[i];
+            if (x >= r.x && x <= r.x + r.w &&
+                y >= r.y && y <= r.y + r.h) {
+                dialogue.selectOption(i);
+                return;
+            }
+        }
+    }
+
+    // Keyboard handling while a dialogue box is open. Separate
+    // function so the normal-gameplay tick stays compact.
+    function handleDialogueKeyInput() {
+        if (!dialogue.isOpen()) return;
+
+        if (keysJustPressed["Escape"]) {
+            dialogue.close();
+            return;
+        }
+
+        if (dialogue.active.mode === "response") {
+            // Any "continue" key returns to the option menu.
+            if (
+                keysJustPressed["e"] || keysJustPressed["E"] ||
+                keysJustPressed["Enter"] || keysJustPressed[" "]
+            ) {
+                dialogue.advance();
+            }
+            return;
+        }
+
+        // Menu mode: number keys pick options.
+        for (let i = 1; i <= 9; i++) {
+            if (keysJustPressed[String(i)]) {
+                dialogue.selectOption(i - 1);
+                return;
+            }
+        }
+        // E closes the menu (same key that opened it).
+        if (keysJustPressed["e"] || keysJustPressed["E"]) {
+            dialogue.close();
+        }
+    }
+
     function startGame() {
         gameState = "playing";
         lastTime = performance.now();
@@ -3427,6 +3643,9 @@
         // Quests - fresh run resets the chain back to the start.
         questLog.reset();
 
+        // Dialogue - close any open box, drop cached option rects.
+        dialogue.close();
+
         // Weapons - back to the starting loadout, clear any in-flight
         // projectiles, and reset each weapon's internal timers.
         player.weaponIndex = 0;
@@ -3527,6 +3746,7 @@
         if (stats.levelUpToast > 0) drawLevelUpToast();
         if (questLog.toastTimer > 0) drawQuestToast();
         if (inventoryOpen) drawInventory();
+        if (dialogue.isOpen()) drawDialogue();
 
         // Overlays driven by the state machine.
         if (gameState === "gameover") {
@@ -3906,6 +4126,154 @@
     }
 
     // Inventory panel - centered on screen. Aggregates `player.inventory`
+    // Modal dialogue box. Sits at the bottom of the screen like a
+    // Zelda / JRPG text window. Menu mode draws the greeting + a
+    // numbered option list whose hitboxes are cached on
+    // `dialogue.optionRects` for touch. Response mode draws the
+    // response text and a "tap to continue" hint. The world behind
+    // it keeps rendering (NPCs even keep wandering) so it reads as
+    // a dialogue, not a full-screen menu.
+    function drawDialogue() {
+        const d = dialogue.active;
+        if (!d) return;
+
+        // Scale the box to the viewport so it reads on any screen.
+        // 16px side margin, 92% of width capped at 640, 44% of
+        // height (or 220 min) anchored at the bottom with an 18px
+        // safe-area gap.
+        const boxW = Math.min(640, VIEW_W - 32);
+        const boxH = Math.max(200, Math.min(260, Math.round(VIEW_H * 0.44)));
+        const x = Math.floor((VIEW_W - boxW) / 2);
+        const y = VIEW_H - boxH - 18;
+
+        // Backdrop dim - subtle, so the world stays legible.
+        ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
+        ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+        // Panel
+        ctx.save();
+        roundRectPath(ctx, x, y, boxW, boxH, 12);
+        ctx.fillStyle = "rgba(18, 18, 30, 0.95)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255, 209, 102, 0.55)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Speaker name banner
+        ctx.textBaseline = "top";
+        ctx.textAlign = "left";
+        drawShadowedText(
+            d.speaker,
+            x + 18, y + 12,
+            "#ffd166",
+            "bold 16px system-ui, sans-serif"
+        );
+
+        // Divider under the speaker name
+        ctx.strokeStyle = "rgba(255, 209, 102, 0.3)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x + 16, y + 38);
+        ctx.lineTo(x + boxW - 16, y + 38);
+        ctx.stroke();
+
+        // Body text (wrapped across lines)
+        const textX = x + 18;
+        const textY = y + 50;
+        const textMaxW = boxW - 36;
+        const wrapped = wrapText(d.text, textMaxW, "14px system-ui, sans-serif");
+        let lineY = textY;
+        for (const line of wrapped) {
+            drawShadowedText(
+                line,
+                textX, lineY,
+                "#e8e8f0",
+                "14px system-ui, sans-serif"
+            );
+            lineY += 18;
+        }
+
+        // Options area or continue hint
+        dialogue.optionRects = [];
+        if (d.mode === "menu") {
+            // Options start below the body text, each clickable.
+            const optionsTop = Math.max(lineY + 10, y + boxH - 10 - d.options.length * 26);
+            for (let i = 0; i < d.options.length; i++) {
+                const opt = d.options[i];
+                const oy = optionsTop + i * 26;
+                const oh = 24;
+                const ox = x + 16;
+                const ow = boxW - 32;
+
+                // Highlight "Goodbye" row with the close accent.
+                const isClose = opt.close === true;
+                ctx.fillStyle = isClose
+                    ? "rgba(110, 110, 130, 0.18)"
+                    : "rgba(255, 209, 102, 0.10)";
+                roundRectPath(ctx, ox, oy, ow, oh, 6);
+                ctx.fill();
+                ctx.strokeStyle = isClose
+                    ? "rgba(160, 160, 184, 0.35)"
+                    : "rgba(255, 209, 102, 0.38)";
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // Number prefix + label
+                drawShadowedText(
+                    String(i + 1),
+                    ox + 10, oy + 4,
+                    isClose ? "#a0a0b8" : "#ffd166",
+                    "bold 13px system-ui, sans-serif"
+                );
+                drawShadowedText(
+                    opt.label,
+                    ox + 30, oy + 4,
+                    "#e8e8f0",
+                    "13px system-ui, sans-serif"
+                );
+
+                dialogue.optionRects.push({ x: ox, y: oy, w: ow, h: oh });
+            }
+        } else {
+            // Response mode: continue hint at the bottom.
+            const pulse = 0.55 + 0.45 * Math.abs(Math.sin(performance.now() * 0.004));
+            ctx.globalAlpha = pulse;
+            ctx.textAlign = "right";
+            drawShadowedText(
+                "tap / E to continue",
+                x + boxW - 16, y + boxH - 20,
+                "#a0a0b8",
+                "bold 11px system-ui, sans-serif"
+            );
+            ctx.textAlign = "left";
+            ctx.globalAlpha = 1;
+        }
+
+        ctx.restore();
+    }
+
+    // Small word-wrap helper. Walks through words, keeping a
+    // running line and breaking when `measureText` exceeds maxW.
+    // Called only while dialogue is open, so per-frame cost is
+    // small - one measurement per word.
+    function wrapText(text, maxW, font) {
+        ctx.font = font;
+        const words = text.split(/\s+/);
+        const lines = [];
+        let line = "";
+        for (const word of words) {
+            const probe = line ? line + " " + word : word;
+            if (ctx.measureText(probe).width > maxW && line) {
+                lines.push(line);
+                line = word;
+            } else {
+                line = probe;
+            }
+        }
+        if (line) lines.push(line);
+        return lines;
+    }
+
     // into counts at draw time, so add/remove stays O(1) and the UI
     // stays accurate without a dedicated counts cache.
     function drawInventory() {
