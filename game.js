@@ -161,14 +161,27 @@
                 Math.floor((camera.y + VIEW_H) / TILE)
             );
 
+            // Grass covers the vast majority of tiles. Fill the whole
+            // visible block with grass base color in one fillRect, then
+            // only iterate and draw the *non-grass* tiles on top. This
+            // collapses ~450 per-tile fillStyle writes into a single
+            // state change and is the single biggest mobile win.
+            const baseX = startCol * TILE;
+            const baseY = startRow * TILE;
+            const baseW = (endCol - startCol + 1) * TILE;
+            const baseH = (endRow - startRow + 1) * TILE;
+            ctx.fillStyle = "#3a5a3a";
+            ctx.fillRect(baseX, baseY, baseW, baseH);
+
+            const cols = WORLD_COLS;
+            const data = this.data;
             for (let r = startRow; r <= endRow; r++) {
+                const rowBase = r * cols;
                 for (let c = startCol; c <= endCol; c++) {
-                    drawTile(
-                        ctx,
-                        this.data[r * WORLD_COLS + c],
-                        c * TILE,
-                        r * TILE
-                    );
+                    const t = data[rowBase + c];
+                    if (t !== TILE_GRASS) {
+                        drawTile(ctx, t, c * TILE, r * TILE);
+                    }
                 }
             }
         },
@@ -201,8 +214,8 @@
                 ctx.fillRect(x, y, TILE, TILE);
                 break;
             case TILE_TREE:
-                ctx.fillStyle = "#3a5a3a";
-                ctx.fillRect(x, y, TILE, TILE);
+                // Grass base is already filled by world.draw; skip the
+                // redundant rect and only draw the tree silhouette.
                 ctx.fillStyle = "#23422a";
                 ctx.fillRect(x + 4, y + 2, TILE - 8, TILE - 8);
                 ctx.fillStyle = "#5a3a22";
@@ -723,12 +736,27 @@
     // Convert a pointer event's clientX/Y into canvas-space coordinates
     // (the 960x540 internal grid). The canvas is CSS-scaled, so we
     // divide out that scale factor here.
+    //
+    // `getBoundingClientRect()` forces a synchronous layout, so on
+    // mobile a pointermove fired at touch sample rate (~60-120Hz) can
+    // stall rendering. Cache the rect and invalidate only when
+    // layout-affecting things change. A shared scratch object avoids
+    // per-event allocation in the hot drag path.
+    let _canvasRect = null;
+    function invalidateCanvasRect() {
+        _canvasRect = null;
+    }
+    window.addEventListener("resize", invalidateCanvasRect);
+    window.addEventListener("orientationchange", invalidateCanvasRect);
+    window.addEventListener("scroll", invalidateCanvasRect, { passive: true });
+
+    const _pointerOut = { x: 0, y: 0 };
     function pointerToCanvas(e) {
-        const rect = canvas.getBoundingClientRect();
-        return {
-            x: (e.clientX - rect.left) * (VIEW_W / rect.width),
-            y: (e.clientY - rect.top) * (VIEW_H / rect.height),
-        };
+        if (!_canvasRect) _canvasRect = canvas.getBoundingClientRect();
+        const r = _canvasRect;
+        _pointerOut.x = (e.clientX - r.left) * (VIEW_W / r.width);
+        _pointerOut.y = (e.clientY - r.top) * (VIEW_H / r.height);
+        return _pointerOut;
     }
 
     canvas.addEventListener("pointerdown", (e) => {
@@ -888,15 +916,17 @@
             }
         },
 
+        // Scratch rect - mutated and returned by `getHitbox` so we
+        // don't allocate a fresh object every frame during a swing.
+        _hitbox: { x: 0, y: 0, w: 0, h: 0 },
+
         // Returns the current hitbox as an axis-aligned rect, or null
-        // if the attack isn't active. Other systems (enemy collision,
-        // damage numbers, etc.) can consume this.
+        // if the attack isn't active. The returned rect is owned by
+        // the attack module - callers must not hold it across frames.
         getHitbox(entity) {
             if (!this.active) return null;
 
-            // Horizontal vs. vertical swing based on latched facing.
             const horizontal = Math.abs(this.dirX) >= Math.abs(this.dirY);
-
             const w = horizontal ? this.reach : this.thickness;
             const h = horizontal ? this.thickness : this.reach;
 
@@ -914,7 +944,9 @@
                 y = sign > 0 ? entity.y + entity.height : entity.y - h;
             }
 
-            return { x, y, w, h };
+            const out = this._hitbox;
+            out.x = x; out.y = y; out.w = w; out.h = h;
+            return out;
         },
 
         draw(ctx, entity) {
@@ -1029,9 +1061,18 @@
             if (this.hp <= 0) this.alive = false;
         }
 
-        // Expose a rect in the shape used by rectsOverlap/getHitbox.
+        // Expose a rect in the shape used by rectsOverlap / getHitbox.
+        // Reuses a per-enemy scratch object so hot collision loops
+        // don't allocate each frame. Mutate-and-return is safe because
+        // the caller reads the rect immediately in the same tick.
         bounds() {
-            return { x: this.x, y: this.y, w: this.width, h: this.height };
+            if (!this._bounds) this._bounds = { x: 0, y: 0, w: 0, h: 0 };
+            const b = this._bounds;
+            b.x = this.x;
+            b.y = this.y;
+            b.w = this.width;
+            b.h = this.height;
+            return b;
         }
     }
 
@@ -1040,8 +1081,16 @@
     // ---------------------------------------------------------------
     const enemies = [];
 
+    // Soft cap on active enemies. Keeps per-frame cost bounded on
+    // low-end devices even if future spawners get aggressive; can be
+    // raised once a broadphase (spatial grid, quadtree) is in place.
+    const MAX_ENEMIES = 24;
+
     function spawnEnemy(x, y, opts) {
-        enemies.push(new Enemy(x, y, opts));
+        if (enemies.length >= MAX_ENEMIES) return null;
+        const e = new Enemy(x, y, opts);
+        enemies.push(e);
+        return e;
     }
 
     // Spawn a starting group in a ring around the player's spawn so
@@ -1087,20 +1136,21 @@
         }
     }
 
+    // Reused scratch rect so updateEnemyContact doesn't allocate each frame.
+    const _playerBox = { x: 0, y: 0, w: 0, h: 0 };
+
     // Enemy bodies touching the player deal contact damage. `damagePlayer`
     // is a no-op while iframes are active, so one collision won't drain
     // the whole bar.
     function updateEnemyContact() {
         if (!player.alive) return;
-        const playerBox = {
-            x: player.x,
-            y: player.y,
-            w: player.width,
-            h: player.height,
-        };
+        _playerBox.x = player.x;
+        _playerBox.y = player.y;
+        _playerBox.w = player.width;
+        _playerBox.h = player.height;
         for (const e of enemies) {
             if (!e.alive) continue;
-            if (rectsOverlap(playerBox, e.bounds())) {
+            if (rectsOverlap(_playerBox, e.bounds())) {
                 damagePlayer(10);
                 break; // one damage event per frame is enough
             }
@@ -1325,11 +1375,37 @@
 
     // ---------------------------------------------------------------
     // Main loop
+    //
+    // Pauses automatically while the tab is hidden. Browsers already
+    // throttle requestAnimationFrame in background tabs, but skipping
+    // the update/draw entirely saves battery on mobile and prevents
+    // stray keys/touches from advancing a game the player can't see.
+    // On resume, `lastTime` is reset so the first visible frame gets
+    // a normal-sized dt instead of a huge catch-up step.
     // ---------------------------------------------------------------
     let lastTime = performance.now();
+    let running = !document.hidden;
+
+    document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+            running = false;
+        } else {
+            running = true;
+            lastTime = performance.now();
+            // Release any held keys; they're "lost" while we're backgrounded.
+            for (const k in keys) keys[k] = false;
+            for (const k in keysJustPressed) delete keysJustPressed[k];
+        }
+    });
 
     function frame(now) {
-        // Convert ms -> s, cap dt to avoid huge jumps after a tab switch.
+        if (!running) {
+            requestAnimationFrame(frame);
+            return;
+        }
+
+        // Convert ms -> s, cap dt so any unexpected gap (hitch, GC,
+        // just-unthrottled frame) can't teleport the simulation.
         const dt = Math.min((now - lastTime) / 1000, 1 / 30);
         lastTime = now;
 
