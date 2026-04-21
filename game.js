@@ -3,30 +3,218 @@
  *
  * Architecture:
  *   - Input:   tracks which keys are held and which were pressed this frame.
+ *   - World:   tile-based map, larger than the viewport. Pluggable: swap
+ *              `world.getTile` for a loader that reads a real tilemap.
+ *   - Camera:  viewport into the world. Smoothly lerps toward the player
+ *              and clamps to world bounds.
  *   - Player:  entity state (position, size, facing, stats).
  *   - Stats:   damagePlayer/healPlayer route through one place so future
  *              items and upgrades can apply modifiers in a single spot.
  *   - Attack:  self-contained combat module (state, timers, hitbox, draw).
  *   - Enemies: Enemy class + a flat array of instances.
  *   - Update:  advances game state based on time elapsed.
- *   - Draw:    renders the current game state to the canvas.
+ *   - Draw:    renders world-space under a camera transform, then HUD.
  *   - Loop:    a requestAnimationFrame loop that calls update/draw every frame.
  *
- * Everything is vanilla JS - no libraries. Expand by adding new entities,
- * collision, maps, etc. in their own clearly-named sections.
+ * Coordinate systems:
+ *   - World space: where the player / enemies / tiles live (0..WORLD_W).
+ *   - Screen space: canvas pixels (0..VIEW_W). HUD is drawn here.
+ *
+ * Everything is vanilla JS - no libraries.
  */
 
 (() => {
     "use strict";
 
     // ---------------------------------------------------------------
-    // Canvas setup
+    // Canvas / world dimensions
+    //
+    // VIEW_*  = size of the canvas (the camera's window on the world).
+    // WORLD_* = size of the playable map (bigger than the viewport).
+    // TILE    = size of a single world tile in pixels.
     // ---------------------------------------------------------------
     const canvas = document.getElementById("game");
     const ctx = canvas.getContext("2d");
 
-    const WIDTH = canvas.width;   // 800
-    const HEIGHT = canvas.height; // 600
+    const VIEW_W = canvas.width;    // 800
+    const VIEW_H = canvas.height;   // 600
+
+    const TILE = 32;
+    const WORLD_COLS = 75;          // 75 * 32 = 2400
+    const WORLD_ROWS = 56;          // 56 * 32 = 1792
+    const WORLD_W = TILE * WORLD_COLS;
+    const WORLD_H = TILE * WORLD_ROWS;
+
+    // ---------------------------------------------------------------
+    // World - tile-based map, larger than the viewport.
+    //
+    // The map is stored in a flat Uint8Array (cols*rows tile IDs) for
+    // fast access and cache-friendly iteration. `getTile` is the
+    // extension seam: swap it for a JSON loader, a Tiled parser, or
+    // anything else, and every other system keeps working.
+    //
+    // `draw(ctx, camera)` renders only tiles that intersect the
+    // camera's view, so the world can grow without per-frame cost
+    // scaling with total world size.
+    // ---------------------------------------------------------------
+    const TILE_GRASS = 0;
+    const TILE_STONE = 1;
+    const TILE_TREE = 2;
+    const TILE_WATER = 3;
+    const TILE_PATH = 4;
+
+    // Cheap deterministic "hash" for procedural decoration. Stable
+    // per (col, row) with no setup; replace with a real tilemap later.
+    function hash2(x, y) {
+        let h = (x * 374761393 + y * 668265263) | 0;
+        h = (h ^ (h >>> 13)) * 1274126177;
+        return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+    }
+
+    const world = {
+        cols: WORLD_COLS,
+        rows: WORLD_ROWS,
+        width: WORLD_W,
+        height: WORLD_H,
+        tileSize: TILE,
+        data: new Uint8Array(WORLD_COLS * WORLD_ROWS),
+
+        init() {
+            for (let r = 0; r < WORLD_ROWS; r++) {
+                for (let c = 0; c < WORLD_COLS; c++) {
+                    const onBorder =
+                        c === 0 || r === 0 ||
+                        c === WORLD_COLS - 1 || r === WORLD_ROWS - 1;
+
+                    let t = TILE_GRASS;
+                    if (onBorder) {
+                        t = TILE_STONE;
+                    } else {
+                        const h = hash2(c, r);
+                        if (h < 0.035) t = TILE_TREE;
+                        else if (h < 0.055) t = TILE_STONE;
+                        else if (h > 0.975) t = TILE_PATH;
+                    }
+                    this.data[r * WORLD_COLS + c] = t;
+                }
+            }
+        },
+
+        getTile(col, row) {
+            if (col < 0 || row < 0 || col >= WORLD_COLS || row >= WORLD_ROWS) {
+                return TILE_STONE;
+            }
+            return this.data[row * WORLD_COLS + col];
+        },
+
+        // Extension point for per-tile collision. The world boundary
+        // alone keeps the player on the map for now, but callers that
+        // eventually want solid trees / water can rely on this API.
+        isSolid(_col, _row) {
+            return false;
+        },
+
+        draw(ctx, camera) {
+            const startCol = Math.max(0, Math.floor(camera.x / TILE));
+            const endCol = Math.min(
+                WORLD_COLS - 1,
+                Math.floor((camera.x + VIEW_W) / TILE)
+            );
+            const startRow = Math.max(0, Math.floor(camera.y / TILE));
+            const endRow = Math.min(
+                WORLD_ROWS - 1,
+                Math.floor((camera.y + VIEW_H) / TILE)
+            );
+
+            for (let r = startRow; r <= endRow; r++) {
+                for (let c = startCol; c <= endCol; c++) {
+                    drawTile(
+                        ctx,
+                        this.data[r * WORLD_COLS + c],
+                        c * TILE,
+                        r * TILE
+                    );
+                }
+            }
+        },
+    };
+
+    // The one place that turns tile IDs into pixels. Replace the
+    // fillRects here with drawImage(spriteSheet, ...) once art arrives.
+    function drawTile(ctx, tile, x, y) {
+        switch (tile) {
+            case TILE_GRASS:
+                ctx.fillStyle = "#3a5a3a";
+                ctx.fillRect(x, y, TILE, TILE);
+                ctx.fillStyle = "#456d44";
+                ctx.fillRect(x + 3, y + TILE - 5, 3, 2);
+                break;
+            case TILE_PATH:
+                ctx.fillStyle = "#8c7a55";
+                ctx.fillRect(x, y, TILE, TILE);
+                ctx.fillStyle = "#7a6846";
+                ctx.fillRect(x + 6, y + 10, 4, 2);
+                break;
+            case TILE_STONE:
+                ctx.fillStyle = "#5c5c6e";
+                ctx.fillRect(x, y, TILE, TILE);
+                ctx.fillStyle = "#6e6e82";
+                ctx.fillRect(x + 4, y + 4, TILE - 8, TILE - 8);
+                break;
+            case TILE_WATER:
+                ctx.fillStyle = "#3560a0";
+                ctx.fillRect(x, y, TILE, TILE);
+                break;
+            case TILE_TREE:
+                ctx.fillStyle = "#3a5a3a";
+                ctx.fillRect(x, y, TILE, TILE);
+                ctx.fillStyle = "#23422a";
+                ctx.fillRect(x + 4, y + 2, TILE - 8, TILE - 8);
+                ctx.fillStyle = "#5a3a22";
+                ctx.fillRect(x + TILE / 2 - 2, y + TILE - 6, 4, 6);
+                break;
+            default:
+                ctx.fillStyle = "#2a2a38";
+                ctx.fillRect(x, y, TILE, TILE);
+        }
+    }
+
+    world.init();
+
+    // ---------------------------------------------------------------
+    // Camera - viewport into the world.
+    //
+    // `follow` uses a frame-rate-independent exponential lerp so the
+    // camera smoothly catches up to the player without the jitter you
+    // get from naive `this.x += (target - this.x) * 0.1` per frame.
+    // ---------------------------------------------------------------
+    const camera = {
+        x: 0,
+        y: 0,
+        sharpness: 8, // higher = snappier follow
+
+        follow(target, dt) {
+            const tx = target.x + target.width / 2 - VIEW_W / 2;
+            const ty = target.y + target.height / 2 - VIEW_H / 2;
+
+            const t = 1 - Math.exp(-this.sharpness * dt);
+            this.x += (tx - this.x) * t;
+            this.y += (ty - this.y) * t;
+
+            this.clamp();
+        },
+
+        snap(target) {
+            this.x = target.x + target.width / 2 - VIEW_W / 2;
+            this.y = target.y + target.height / 2 - VIEW_H / 2;
+            this.clamp();
+        },
+
+        clamp() {
+            this.x = Math.max(0, Math.min(WORLD_W - VIEW_W, this.x));
+            this.y = Math.max(0, Math.min(WORLD_H - VIEW_H, this.y));
+        },
+    };
 
     // ---------------------------------------------------------------
     // Input - tracks keys held down AND keys pressed this frame
@@ -57,8 +245,8 @@
     //   last moved. It's used to position the attack hitbox.
     // ---------------------------------------------------------------
     const player = {
-        x: WIDTH / 2 - 16,
-        y: HEIGHT / 2 - 16,
+        x: WORLD_W / 2 - 16,
+        y: WORLD_H / 2 - 16,
         width: 32,
         height: 32,
         speed: 220, // pixels per second
@@ -305,11 +493,22 @@
         enemies.push(new Enemy(x, y, opts));
     }
 
-    // Spawn a starting group at the four corners of the arena.
-    spawnEnemy(60, 60);
-    spawnEnemy(WIDTH - 90, 60);
-    spawnEnemy(60, HEIGHT - 90);
-    spawnEnemy(WIDTH - 90, HEIGHT - 90);
+    // Spawn a starting group in a ring around the player's spawn so
+    // the player always has something on screen at the start.
+    {
+        const cx = WORLD_W / 2;
+        const cy = WORLD_H / 2;
+        spawnEnemy(cx - 220, cy - 160);
+        spawnEnemy(cx + 200, cy - 160);
+        spawnEnemy(cx - 220, cy + 140);
+        spawnEnemy(cx + 200, cy + 140);
+        spawnEnemy(cx + 360, cy);
+        spawnEnemy(cx - 380, cy);
+    }
+
+    // Place the camera on the player before the first frame so we
+    // don't see it lerp in from (0, 0).
+    camera.snap(player);
 
     // ---------------------------------------------------------------
     // Enemy update + collision with the player's attack
@@ -394,9 +593,9 @@
         player.x += dx * player.speed * dt;
         player.y += dy * player.speed * dt;
 
-        // Clamp the player inside the canvas.
-        player.x = Math.max(0, Math.min(WIDTH - player.width, player.x));
-        player.y = Math.max(0, Math.min(HEIGHT - player.height, player.y));
+        // Clamp the player inside the world, not the viewport.
+        player.x = Math.max(0, Math.min(WORLD_W - player.width, player.x));
+        player.y = Math.max(0, Math.min(WORLD_H - player.height, player.y));
     }
 
     // ---------------------------------------------------------------
@@ -420,6 +619,7 @@
         updateAttackCollision();
         updateEnemyContact();
         updatePlayerStatus(dt);
+        camera.follow(player, dt);
         clearJustPressed();
     }
 
@@ -427,12 +627,18 @@
     // Draw - paint the current state. No logic lives here.
     // ---------------------------------------------------------------
     function draw() {
-        // Background
-        ctx.fillStyle = "#2a2a38";
-        ctx.fillRect(0, 0, WIDTH, HEIGHT);
+        // Screen-space safety fill (visible only if the camera ever
+        // somehow leaves the world; clamping should prevent it).
+        ctx.fillStyle = "#1a1a24";
+        ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
-        // A simple grid to give a sense of movement.
-        drawGrid(32, "#33334a");
+        // --- World space ---
+        // Round the translate to whole pixels to avoid tile-seam
+        // shimmering when the camera is sub-pixel offset.
+        ctx.save();
+        ctx.translate(-Math.round(camera.x), -Math.round(camera.y));
+
+        world.draw(ctx, camera);
 
         // Enemies beneath the player so the player always reads on top.
         for (const e of enemies) e.draw(ctx);
@@ -444,7 +650,9 @@
         // Attack hitbox on top of the player.
         attack.draw(ctx, player);
 
-        // HUD
+        ctx.restore();
+
+        // --- Screen space (HUD) ---
         drawHealthBar();
         drawCooldownBar();
         drawEnemyCounter();
@@ -491,45 +699,30 @@
 
     function drawGameOver() {
         ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
-        ctx.fillRect(0, 0, WIDTH, HEIGHT);
+        ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
         ctx.fillStyle = "#ffd166";
         ctx.font = "bold 48px system-ui, sans-serif";
         ctx.textAlign = "center";
-        ctx.fillText("GAME OVER", WIDTH / 2, HEIGHT / 2);
+        ctx.fillText("GAME OVER", VIEW_W / 2, VIEW_H / 2);
 
         ctx.fillStyle = "#a0a0b8";
         ctx.font = "14px system-ui, sans-serif";
-        ctx.fillText("Refresh the page to try again", WIDTH / 2, HEIGHT / 2 + 32);
+        ctx.fillText("Refresh the page to try again", VIEW_W / 2, VIEW_H / 2 + 32);
         ctx.textAlign = "start"; // restore default
     }
 
     function drawEnemyCounter() {
         ctx.fillStyle = "#a0a0b8";
         ctx.font = "12px system-ui, sans-serif";
-        ctx.fillText(`Enemies: ${enemies.length}`, WIDTH - 96, HEIGHT - 16);
-    }
-
-    function drawGrid(cellSize, color) {
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        for (let x = 0; x <= WIDTH; x += cellSize) {
-            ctx.moveTo(x + 0.5, 0);
-            ctx.lineTo(x + 0.5, HEIGHT);
-        }
-        for (let y = 0; y <= HEIGHT; y += cellSize) {
-            ctx.moveTo(0, y + 0.5);
-            ctx.lineTo(WIDTH, y + 0.5);
-        }
-        ctx.stroke();
+        ctx.fillText(`Enemies: ${enemies.length}`, VIEW_W - 96, VIEW_H - 16);
     }
 
     function drawCooldownBar() {
         const barW = 120;
         const barH = 8;
         const x = 16;
-        const y = HEIGHT - 24;
+        const y = VIEW_H - 24;
 
         const ready = !attack.active && attack.cooldownTimer <= 0;
         const fill = ready
