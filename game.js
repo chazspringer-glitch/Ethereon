@@ -2,10 +2,12 @@
  * Ethereon - a tiny 2D RPG starter.
  *
  * Architecture:
- *   - Input:  keeps track of which keys are currently pressed.
- *   - Update: advances game state based on time elapsed.
- *   - Draw:   renders the current game state to the canvas.
- *   - Loop:   a requestAnimationFrame loop that calls update/draw every frame.
+ *   - Input:   tracks which keys are held and which were pressed this frame.
+ *   - Player:  entity state (position, size, facing direction).
+ *   - Attack:  self-contained combat module (state, timers, hitbox, draw).
+ *   - Update:  advances game state based on time elapsed.
+ *   - Draw:    renders the current game state to the canvas.
+ *   - Loop:    a requestAnimationFrame loop that calls update/draw every frame.
  *
  * Everything is vanilla JS - no libraries. Expand by adding new entities,
  * collision, maps, enemies, etc. in their own clearly-named sections.
@@ -24,22 +26,32 @@
     const HEIGHT = canvas.height; // 600
 
     // ---------------------------------------------------------------
-    // Input - tracks which keys are held down this frame
+    // Input - tracks keys held down AND keys pressed this frame
+    // (edge-triggered). `keysJustPressed` is cleared at the end of
+    // each update so actions like "attack" only fire once per press.
     // ---------------------------------------------------------------
     const keys = Object.create(null);
+    const keysJustPressed = Object.create(null);
 
     window.addEventListener("keydown", (e) => {
+        if (!keys[e.key]) keysJustPressed[e.key] = true;
         keys[e.key] = true;
-        // Stop the page from scrolling when arrow keys are used.
-        if (e.key.startsWith("Arrow")) e.preventDefault();
+        // Stop the page from scrolling with arrow keys or space.
+        if (e.key.startsWith("Arrow") || e.key === " ") e.preventDefault();
     });
 
     window.addEventListener("keyup", (e) => {
         keys[e.key] = false;
     });
 
+    function clearJustPressed() {
+        for (const k in keysJustPressed) delete keysJustPressed[k];
+    }
+
     // ---------------------------------------------------------------
     // Player entity
+    //   `facing` is a unit vector pointing in the direction the player
+    //   last moved. It's used to position the attack hitbox.
     // ---------------------------------------------------------------
     const player = {
         x: WIDTH / 2 - 16,
@@ -48,12 +60,116 @@
         height: 32,
         speed: 220, // pixels per second
         color: "#ffd166",
+        facing: { x: 1, y: 0 }, // default: facing right
     };
 
     // ---------------------------------------------------------------
-    // Update - pure game-state changes. `dt` is delta time in seconds.
+    // Attack module
+    //
+    // A single, self-contained piece of state describing the player's
+    // current attack. Designed so you can later swap the flat "hitbox
+    // rectangle" for an animated sprite by reading `attack.progress`
+    // (0 -> 1 over the life of the swing) to pick a frame.
+    //
+    // Tunables:
+    //   duration  - how long the hitbox is active (seconds)
+    //   cooldown  - time before the player can attack again (seconds)
+    //   reach     - how far the hitbox extends in front of the player
+    //   thickness - perpendicular size of the hitbox
     // ---------------------------------------------------------------
-    function update(dt) {
+    const attack = {
+        // Tunables
+        duration: 0.18,
+        cooldown: 0.35,
+        reach: 36,
+        thickness: 40,
+
+        // Runtime state
+        active: false,
+        timer: 0,          // counts down while active
+        cooldownTimer: 0,  // counts down after an attack
+        progress: 0,       // 0 -> 1 over duration; useful for animations
+
+        // Latched facing for the current swing so rotating the player
+        // mid-swing doesn't teleport the hitbox.
+        dirX: 1,
+        dirY: 0,
+
+        tryStart(entity) {
+            if (this.active || this.cooldownTimer > 0) return false;
+            this.active = true;
+            this.timer = this.duration;
+            this.progress = 0;
+            this.dirX = entity.facing.x;
+            this.dirY = entity.facing.y;
+            return true;
+        },
+
+        update(dt) {
+            if (this.active) {
+                this.timer -= dt;
+                this.progress = 1 - Math.max(0, this.timer) / this.duration;
+                if (this.timer <= 0) {
+                    this.active = false;
+                    this.timer = 0;
+                    this.progress = 1;
+                    this.cooldownTimer = this.cooldown;
+                }
+            } else if (this.cooldownTimer > 0) {
+                this.cooldownTimer = Math.max(0, this.cooldownTimer - dt);
+            }
+        },
+
+        // Returns the current hitbox as an axis-aligned rect, or null
+        // if the attack isn't active. Other systems (enemy collision,
+        // damage numbers, etc.) can consume this.
+        getHitbox(entity) {
+            if (!this.active) return null;
+
+            // Horizontal vs. vertical swing based on latched facing.
+            const horizontal = Math.abs(this.dirX) >= Math.abs(this.dirY);
+
+            const w = horizontal ? this.reach : this.thickness;
+            const h = horizontal ? this.thickness : this.reach;
+
+            const cx = entity.x + entity.width / 2;
+            const cy = entity.y + entity.height / 2;
+
+            let x, y;
+            if (horizontal) {
+                const sign = Math.sign(this.dirX) || 1;
+                x = sign > 0 ? entity.x + entity.width : entity.x - w;
+                y = cy - h / 2;
+            } else {
+                const sign = Math.sign(this.dirY) || 1;
+                x = cx - w / 2;
+                y = sign > 0 ? entity.y + entity.height : entity.y - h;
+            }
+
+            return { x, y, w, h };
+        },
+
+        draw(ctx, entity) {
+            const box = this.getHitbox(entity);
+            if (!box) return;
+
+            // Fade out over the life of the swing so it reads as a
+            // quick slash. When you later add sprites, replace this
+            // whole block with a frame lookup using `this.progress`.
+            const alpha = 1 - this.progress;
+            ctx.fillStyle = `rgba(255, 90, 90, ${0.35 + 0.35 * alpha})`;
+            ctx.fillRect(box.x, box.y, box.w, box.h);
+
+            ctx.strokeStyle = `rgba(255, 220, 220, ${0.6 + 0.4 * alpha})`;
+            ctx.lineWidth = 2;
+            ctx.strokeRect(box.x + 0.5, box.y + 0.5, box.w - 1, box.h - 1);
+        },
+    };
+
+    // ---------------------------------------------------------------
+    // Movement - reads input, moves the player, updates facing.
+    // ---------------------------------------------------------------
+    function updateMovement(dt) {
         let dx = 0;
         let dy = 0;
 
@@ -69,12 +185,37 @@
             dy *= inv;
         }
 
+        // Update facing to the most recent movement direction.
+        if (dx !== 0 || dy !== 0) {
+            player.facing.x = dx;
+            player.facing.y = dy;
+        }
+
         player.x += dx * player.speed * dt;
         player.y += dy * player.speed * dt;
 
         // Clamp the player inside the canvas.
         player.x = Math.max(0, Math.min(WIDTH - player.width, player.x));
         player.y = Math.max(0, Math.min(HEIGHT - player.height, player.y));
+    }
+
+    // ---------------------------------------------------------------
+    // Combat input - trigger attacks on SPACE, once per press.
+    // ---------------------------------------------------------------
+    function updateCombatInput() {
+        if (keysJustPressed[" "] || keysJustPressed["Spacebar"]) {
+            attack.tryStart(player);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Update - top-level tick. Keeps sub-systems in a clear order.
+    // ---------------------------------------------------------------
+    function update(dt) {
+        updateMovement(dt);
+        updateCombatInput();
+        attack.update(dt);
+        clearJustPressed();
     }
 
     // ---------------------------------------------------------------
@@ -91,6 +232,12 @@
         // Player
         ctx.fillStyle = player.color;
         ctx.fillRect(player.x, player.y, player.width, player.height);
+
+        // Attack hitbox on top of the player.
+        attack.draw(ctx, player);
+
+        // HUD: cooldown indicator.
+        drawCooldownBar();
     }
 
     function drawGrid(cellSize, color) {
@@ -106,6 +253,31 @@
             ctx.lineTo(WIDTH, y + 0.5);
         }
         ctx.stroke();
+    }
+
+    function drawCooldownBar() {
+        const barW = 120;
+        const barH = 8;
+        const x = 16;
+        const y = HEIGHT - 24;
+
+        const ready = !attack.active && attack.cooldownTimer <= 0;
+        const fill = ready
+            ? 1
+            : attack.active
+                ? 0
+                : 1 - attack.cooldownTimer / attack.cooldown;
+
+        ctx.fillStyle = "#1a1a24";
+        ctx.fillRect(x, y, barW, barH);
+        ctx.fillStyle = ready ? "#7ad17a" : "#d17a7a";
+        ctx.fillRect(x, y, barW * fill, barH);
+        ctx.strokeStyle = "#444458";
+        ctx.strokeRect(x + 0.5, y + 0.5, barW - 1, barH - 1);
+
+        ctx.fillStyle = "#a0a0b8";
+        ctx.font = "12px system-ui, sans-serif";
+        ctx.fillText("Attack (SPACE)", x, y - 4);
     }
 
     // ---------------------------------------------------------------
