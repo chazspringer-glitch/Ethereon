@@ -541,6 +541,130 @@
     }
 
     // ---------------------------------------------------------------
+    // Virtual joystick (touch / pointer)
+    //
+    // A floating joystick that spawns wherever the player first
+    // presses on the left half of the canvas, lets them drag in any
+    // direction, and releases on lift. It outputs an analog vector
+    // `(dx, dy)` in [-1, 1] which is combined with keyboard input in
+    // `updateMovement`, so keyboard and touch work simultaneously.
+    //
+    // Input is captured via Pointer Events (which abstract both mouse
+    // and touch), and we track pointerId so multi-touch doesn't
+    // confuse which pointer owns the joystick.
+    // ---------------------------------------------------------------
+    const joystick = {
+        active: false,
+        pointerId: null,
+        baseX: 0, baseY: 0,     // where the press landed (center of ring)
+        stickX: 0, stickY: 0,   // where the stick is being held
+        radius: 60,             // max drag distance, in canvas pixels
+        dx: 0, dy: 0,           // output vector, -1..1
+
+        // Only spawn the joystick on the left half of the canvas so
+        // future right-side buttons don't conflict with it.
+        onDown(x, y, pointerId) {
+            if (this.active) return false;
+            if (x > VIEW_W / 2) return false;
+            this.active = true;
+            this.pointerId = pointerId;
+            this.baseX = this.stickX = x;
+            this.baseY = this.stickY = y;
+            this.dx = 0;
+            this.dy = 0;
+            return true;
+        },
+
+        onMove(x, y, pointerId) {
+            if (!this.active || this.pointerId !== pointerId) return;
+            let ox = x - this.baseX;
+            let oy = y - this.baseY;
+            const dist = Math.hypot(ox, oy);
+            if (dist > this.radius) {
+                const inv = this.radius / dist;
+                ox *= inv;
+                oy *= inv;
+            }
+            this.stickX = this.baseX + ox;
+            this.stickY = this.baseY + oy;
+            this.dx = ox / this.radius;
+            this.dy = oy / this.radius;
+        },
+
+        onUp(pointerId) {
+            if (this.pointerId !== pointerId) return;
+            this.active = false;
+            this.pointerId = null;
+            this.dx = 0;
+            this.dy = 0;
+        },
+
+        draw(ctx) {
+            if (!this.active) return;
+            ctx.save();
+
+            // Outer ring
+            ctx.globalAlpha = 0.45;
+            ctx.strokeStyle = "#ffffff";
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(this.baseX, this.baseY, this.radius, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Inner fill (subtle)
+            ctx.globalAlpha = 0.12;
+            ctx.fillStyle = "#ffffff";
+            ctx.beginPath();
+            ctx.arc(this.baseX, this.baseY, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Stick
+            ctx.globalAlpha = 0.85;
+            ctx.fillStyle = "#ffd166";
+            ctx.beginPath();
+            ctx.arc(this.stickX, this.stickY, 26, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.restore();
+        },
+    };
+
+    // Convert a pointer event's clientX/Y into canvas-space coordinates
+    // (the 960x540 internal grid). The canvas is CSS-scaled, so we
+    // divide out that scale factor here.
+    function pointerToCanvas(e) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+            x: (e.clientX - rect.left) * (VIEW_W / rect.width),
+            y: (e.clientY - rect.top) * (VIEW_H / rect.height),
+        };
+    }
+
+    canvas.addEventListener("pointerdown", (e) => {
+        const { x, y } = pointerToCanvas(e);
+        if (joystick.onDown(x, y, e.pointerId)) {
+            // Keep receiving move/up even if the pointer leaves the
+            // canvas, which is especially important for touch drags.
+            canvas.setPointerCapture(e.pointerId);
+            e.preventDefault();
+        }
+    });
+
+    canvas.addEventListener("pointermove", (e) => {
+        if (!joystick.active || joystick.pointerId !== e.pointerId) return;
+        const { x, y } = pointerToCanvas(e);
+        joystick.onMove(x, y, e.pointerId);
+        e.preventDefault();
+    });
+
+    function endPointer(e) {
+        joystick.onUp(e.pointerId);
+    }
+    canvas.addEventListener("pointerup", endPointer);
+    canvas.addEventListener("pointercancel", endPointer);
+    canvas.addEventListener("pointerleave", endPointer);
+
+    // ---------------------------------------------------------------
     // Player entity
     //   `facing` is a unit vector pointing in the direction the player
     //   last moved. It's used to position the attack hitbox.
@@ -900,11 +1024,22 @@
         if (keys["ArrowUp"]) dy -= 1;
         if (keys["ArrowDown"]) dy += 1;
 
-        // Normalize diagonal movement so it isn't faster than cardinal movement.
-        if (dx !== 0 && dy !== 0) {
-            const inv = 1 / Math.SQRT2;
-            dx *= inv;
-            dy *= inv;
+        // Fold in the virtual joystick. Its output is analog (length
+        // 0..1) so a gentle tilt yields a slow walk, while a full
+        // push matches a held arrow key.
+        if (joystick.active) {
+            dx += joystick.dx;
+            dy += joystick.dy;
+        }
+
+        // Clamp the combined magnitude to 1 so pairing keyboard and
+        // joystick (or pressing two arrow keys) never exceeds full
+        // speed. This replaces the prior "normalize on diagonal"
+        // special case and preserves analog magnitude when < 1.
+        const mag = Math.hypot(dx, dy);
+        if (mag > 1) {
+            dx /= mag;
+            dy /= mag;
         }
 
         // Update facing (vector for attack, cardinal for animation).
@@ -989,6 +1124,7 @@
         drawHealthBar();
         drawCooldownBar();
         drawEnemyCounter();
+        joystick.draw(ctx);
 
         if (!player.alive) drawGameOver();
     }
