@@ -2366,6 +2366,41 @@
     story.load();
 
     // ---------------------------------------------------------------
+    // Chapter-staged text picker
+    //
+    // NPC dialogue (and any other text that wants to react to story
+    // progress) can be declared as a chapter-keyed object:
+    //
+    //   greeting: {
+    //       chapter1: "Hello, stranger.",
+    //       chapter3: "Back again - you carry the key, I see.",
+    //       chapter5: "Hero of the grove.",
+    //   }
+    //
+    // `pickStage(obj)` walks `story.chapterOrder` forward and
+    // returns the latest entry the player's chapter qualifies for.
+    // Missing chapters fall through to the previous stage, so two
+    // stages are enough to cover a full campaign if that's all the
+    // NPC has to say.
+    //
+    // Plain strings and functions pass through unchanged - an NPC
+    // can stay static, use function-form (any condition), or use
+    // the staged object - whichever fits.
+    // ---------------------------------------------------------------
+    function pickStage(stages) {
+        if (stages == null) return null;
+        if (typeof stages === "string") return stages;
+        if (typeof stages === "function") return stages();
+        let chosen = null;
+        for (const chId of story.chapterOrder) {
+            if (chId in stages && story.atLeast(chId)) {
+                chosen = stages[chId];
+            }
+        }
+        return chosen;
+    }
+
+    // ---------------------------------------------------------------
     // Quests
     //
     // QUESTS is a read-only catalog of quest templates keyed by id.
@@ -4573,12 +4608,13 @@
                 return;
             }
             const d = npc.dialogue;
-            // Greeting may be a string or a function-of-state. The
-            // function form lets an NPC react to `story.state` or
-            // anything else at open-time without mutating data.
+            // Greeting may be a plain string (static), a function
+            // (open-time compute of any condition), or a chapter-
+            // keyed object (staged lines keyed by story chapter).
+            // `pickStage` handles all three uniformly.
             const greeting = typeof d.greeting === "function"
                 ? d.greeting(npc)
-                : d.greeting;
+                : pickStage(d.greeting) ?? d.greeting;
             this.active = {
                 speaker: npc.name,
                 npc,                   // kept so submitQuestion can call askNpc
@@ -4662,25 +4698,14 @@
             speed: 24,
             colors: { robe: "#6b4e91", trim: "#503872", sash: "#ffd166", hat: "#4a2f70" },
             dialogue: {
-                // Chapter-aware greeting. Every other option below
-                // is static - this is the first line of color the
-                // Elder gives, so it's the natural place to signal
-                // what chapter the campaign is in.
-                greeting() {
-                    switch (story.state) {
-                        case "chapter1":
-                            return '"Greetings, traveler. The grove welcomes you."';
-                        case "chapter2":
-                            return '"Back from the caverns? Their dark runs deep. Keep at it."';
-                        case "chapter3":
-                            return '"You carry the Golden Key. The shrine waits - walk with care."';
-                        case "chapter4":
-                            return '"You stood at the shrine\'s threshold. Whatever comes, we\'ll mourn or cheer."';
-                        case "chapter5":
-                            return '"Hero of the grove. The Keeper\'s silence - that\'s your work. Thank you."';
-                        default:
-                            return '"Greetings, traveler."';
-                    }
+                // Chapter-staged greeting. The Elder carries a line
+                // for every chapter since they anchor the campaign.
+                greeting: {
+                    chapter1: '"Greetings, traveler. The grove welcomes you."',
+                    chapter2: '"Back from the caverns? Their dark runs deep. Keep at it."',
+                    chapter3: '"You carry the Golden Key. The shrine waits - walk with care."',
+                    chapter4: '"You stood at the shrine\'s threshold. Whatever comes, we\'ll mourn or cheer."',
+                    chapter5: '"Hero of the grove. The Keeper\'s silence - that\'s your work. Thank you."',
                 },
                 options: [
                     {
@@ -4735,7 +4760,11 @@
             speed: 42,
             colors: { robe: "#4e915c", trim: "#356840", sash: "#a0d0a0", hat: "#2f5a3a" },
             dialogue: {
-                greeting: '"Oh! A visitor. Good to see a new face."',
+                greeting: {
+                    chapter1: '"Oh! A visitor. Good to see a new face."',
+                    chapter3: '"The whole grove\'s talking about you."',
+                    chapter5: '"Hero on my street! Don\'t tread on the roses."',
+                },
                 options: [
                     {
                         label: "Who are you?",
@@ -4787,7 +4816,13 @@
             idleMin: 0.6, idleMax: 1.4, // short pauses between legs
             colors: { robe: "#3c5c8c", trim: "#223a5a", sash: "#8ad9ff", hat: "#1a2c46" },
             dialogue: {
-                greeting: '"Stay alert out there. The watch is thin."',
+                greeting: {
+                    chapter1: '"Stay alert out there. The watch is thin."',
+                    chapter2: '"Back in one piece? The caverns are waking up."',
+                    chapter3: '"Golden Key on you? That gate answers to it now."',
+                    chapter4: '"You went past the gate. Word of advice - don\'t look down."',
+                    chapter5: '"Hero. I stood this watch for nothing, it seems. Good work."',
+                },
                 options: [
                     {
                         label: "Who are you?",
@@ -4865,7 +4900,11 @@
             walkMin: 2.0, walkMax: 4.0,
             colors: { robe: "#dcdce8", trim: "#9898a8", sash: "#8ad9ff", hat: "#a0a0b0" },
             dialogue: {
-                greeting: '"Peace find you, wanderer."',
+                greeting: {
+                    chapter1: '"Peace find you, wanderer."',
+                    chapter4: '"The water trembled when the gate opened. It remembers."',
+                    chapter5: '"Still waters again. You gave that to us."',
+                },
                 options: [
                     { label: "Who are you?", response: "I tend the fountain, and the small prayers that go with it." },
                     { label: "What is this place?", response: "The grove's heart. Water rose here the night the star fell." },
@@ -5026,7 +5065,11 @@
             walkMin: 1.5, walkMax: 3.5,
             colors: { robe: "#8860a8", trim: "#4a2a60", sash: "#f0d8ff", hat: "#301a44" },
             dialogue: {
-                greeting: '"Settle in, dear. I\'ve seen worse than you."',
+                greeting: {
+                    chapter1: '"Settle in, dear. I\'ve seen worse than you."',
+                    chapter3: '"You carry a shrine key. Oh, the ghosts I\'ve seen try."',
+                    chapter5: '"The night the star fell - it felt like tonight. Only quieter."',
+                },
                 options: [
                     { label: "Who are you?", response: "Nana to most. I remember the star-fall, if you can believe it." },
                     { label: "Any stories?", response: "The shrine was a temple once. Beautiful. Now - well. Now it isn't." },
@@ -5127,7 +5170,11 @@
             speed: 18,
             colors: { robe: "#8c5a3c", trim: "#5f3c26", sash: "#e0b066", hat: "#3d2a18" },
             dialogue: {
-                greeting: '"Welcome to my shop, traveler. Browse freely."',
+                greeting: {
+                    chapter1: '"Welcome to my shop, traveler. Browse freely."',
+                    chapter3: '"Word is you took the Elder\'s task. Coins well earned."',
+                    chapter5: '"The hero, in my humble shop! I\'ve... not raised prices. Promise."',
+                },
                 options: [
                     {
                         label: "Browse wares.",
@@ -5177,7 +5224,12 @@
             speed: 18,
             colors: { robe: "#a54824", trim: "#6e2e18", sash: "#f0c270", hat: "#4a1e0c" },
             dialogue: {
-                greeting: '"Sit a spell, traveler. Tales flow free here."',
+                greeting: {
+                    chapter1: '"Sit a spell, traveler. Tales flow free here."',
+                    chapter2: '"Heard you were in the caverns. The stew knows tough customers."',
+                    chapter4: '"So the shrine opened. Drinks on the house if you come back whole."',
+                    chapter5: '"The hero drinks free tonight. Sit. Breathe. You earned it."',
+                },
                 options: [
                     {
                         label: "Rest by the fire.",
@@ -5271,7 +5323,12 @@
             speed: 22,
             colors: { robe: "#3c5c8c", trim: "#223a5a", sash: "#8ad9ff", hat: "#1a2c46" },
             dialogue: {
-                greeting: '"Adventurer. The guild logs every blade that passes through."',
+                greeting: {
+                    chapter1: '"Adventurer. The guild logs every blade that passes through."',
+                    chapter2: '"Caverns on your sword? Good. Keep the logs honest."',
+                    chapter3: '"Key-bearer. Your name goes in the thicker ledger now."',
+                    chapter5: '"By the guild\'s mark - you\'re a Blade of Ethereon. Stand down, captain\'s orders."',
+                },
                 options: [
                     {
                         label: "What does the guild do?",
