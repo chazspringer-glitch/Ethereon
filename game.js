@@ -2268,6 +2268,104 @@
     };
 
     // ---------------------------------------------------------------
+    // Story progression
+    //
+    // A single `story.state` string advances forward through the
+    // CHAPTERS catalog based on player actions. Every other system
+    // (NPC dialogue, objectives, HUD) can query `story.is(id)`,
+    // `story.atLeast(id)`, or `story.title()` to branch.
+    //
+    // Persistence: the current state is mirrored to localStorage so
+    // a page reload keeps progress. `restartGame` intentionally
+    // clears it (death = fresh campaign) to match the rest of the
+    // reset story - inventory, quests, upgrades, coins, etc.
+    //
+    // Triggers (wired below in combat / transition / quest paths):
+    //   chapter1  default - "Arrival"
+    //   chapter2  first time the player enters the caverns
+    //   chapter3  finishing the `slay10` quest (receive Golden Key)
+    //   chapter4  first time the player enters the shrine
+    //   chapter5  defeating a boss
+    //
+    // Adding a new chapter: append to CHAPTERS + chapterOrder and
+    // call `story.advance("chapterN")` from wherever the new event
+    // fires. Nothing else cares about the list length.
+    // ---------------------------------------------------------------
+    const CHAPTERS = {
+        chapter1: { id: "chapter1", title: "Arrival" },
+        chapter2: { id: "chapter2", title: "The Hunt Begins" },
+        chapter3: { id: "chapter3", title: "Shrine's Call" },
+        chapter4: { id: "chapter4", title: "Into the Shrine" },
+        chapter5: { id: "chapter5", title: "Victory" },
+    };
+
+    const STORY_STORAGE_KEY = "ethereon.storyState";
+
+    const story = {
+        state: "chapter1",
+        // Ordered list drives `atLeast` and enforces one-way advance.
+        chapterOrder: ["chapter1", "chapter2", "chapter3", "chapter4", "chapter5"],
+
+        is(id) { return this.state === id; },
+
+        atLeast(id) {
+            const a = this.chapterOrder.indexOf(this.state);
+            const b = this.chapterOrder.indexOf(id);
+            return b >= 0 && a >= b;
+        },
+
+        title() {
+            return CHAPTERS[this.state]?.title ?? "";
+        },
+
+        // Moves forward to `id` if and only if it's further along
+        // the chapter order. Ignores attempts to skip sideways /
+        // backward. Toasts + persists on a real advance.
+        advance(id) {
+            const target = this.chapterOrder.indexOf(id);
+            const current = this.chapterOrder.indexOf(this.state);
+            if (target < 0 || target <= current) return false;
+
+            this.state = id;
+            this.save();
+            sound.play("levelUp");
+            questLog.showToast(
+                `New chapter - ${CHAPTERS[id].title}`,
+                3.0
+            );
+            return true;
+        },
+
+        save() {
+            try {
+                if (typeof localStorage !== "undefined") {
+                    localStorage.setItem(STORY_STORAGE_KEY, this.state);
+                }
+            } catch (_e) { /* Safari private mode, full quota, etc. */ }
+        },
+
+        load() {
+            try {
+                if (typeof localStorage === "undefined") return;
+                const v = localStorage.getItem(STORY_STORAGE_KEY);
+                if (v && CHAPTERS[v]) this.state = v;
+            } catch (_e) { /* ignore */ }
+        },
+
+        reset() {
+            this.state = "chapter1";
+            try {
+                if (typeof localStorage !== "undefined") {
+                    localStorage.removeItem(STORY_STORAGE_KEY);
+                }
+            } catch (_e) { /* ignore */ }
+        },
+    };
+
+    // Pull any persisted chapter from a previous session.
+    story.load();
+
+    // ---------------------------------------------------------------
     // Quests
     //
     // QUESTS is a read-only catalog of quest templates keyed by id.
@@ -2364,6 +2462,10 @@
                 : "";
             this.showToast(`Quest complete: ${tmpl.title}!${itemSuffix}`);
             this.active = null;
+
+            // Story beat on the capstone quest - handing off the
+            // Golden Key opens the shrine chapter.
+            if (tmpl.id === "slay10") story.advance("chapter3");
         },
 
         showToast(msg, duration = 2.5) {
@@ -2474,6 +2576,9 @@
             defeatedBosses.add(enemy.levelId);
             questLog.showToast(`${enemy.name} defeated!`, 2.6);
             sound.play("levelUp");
+            // Victory chapter - the only boss today is the Shrine
+            // Keeper, so its fall closes the campaign.
+            story.advance("chapter5");
         }
     }
 
@@ -4468,12 +4573,18 @@
                 return;
             }
             const d = npc.dialogue;
+            // Greeting may be a string or a function-of-state. The
+            // function form lets an NPC react to `story.state` or
+            // anything else at open-time without mutating data.
+            const greeting = typeof d.greeting === "function"
+                ? d.greeting(npc)
+                : d.greeting;
             this.active = {
                 speaker: npc.name,
                 npc,                   // kept so submitQuestion can call askNpc
-                greeting: d.greeting,
+                greeting,
                 options: d.options,
-                text: d.greeting,
+                text: greeting,
                 mode: "menu",
             };
             this.optionRects = [];
@@ -4551,7 +4662,26 @@
             speed: 24,
             colors: { robe: "#6b4e91", trim: "#503872", sash: "#ffd166", hat: "#4a2f70" },
             dialogue: {
-                greeting: '"Greetings, traveler. The grove welcomes you."',
+                // Chapter-aware greeting. Every other option below
+                // is static - this is the first line of color the
+                // Elder gives, so it's the natural place to signal
+                // what chapter the campaign is in.
+                greeting() {
+                    switch (story.state) {
+                        case "chapter1":
+                            return '"Greetings, traveler. The grove welcomes you."';
+                        case "chapter2":
+                            return '"Back from the caverns? Their dark runs deep. Keep at it."';
+                        case "chapter3":
+                            return '"You carry the Golden Key. The shrine waits - walk with care."';
+                        case "chapter4":
+                            return '"You stood at the shrine\'s threshold. Whatever comes, we\'ll mourn or cheer."';
+                        case "chapter5":
+                            return '"Hero of the grove. The Keeper\'s silence - that\'s your work. Thank you."';
+                        default:
+                            return '"Greetings, traveler."';
+                    }
+                },
                 options: [
                     {
                         label: "Who are you?",
@@ -5802,6 +5932,11 @@
         const level = LEVELS[id];
         if (!level) return;
 
+        // Story beats tied to zone entries. Advances no-op if the
+        // player already progressed past that chapter.
+        if (id === "caverns") story.advance("chapter2");
+        if (id === "shrine")  story.advance("chapter4");
+
         currentLevel = level;
         world.load(level);
 
@@ -5921,6 +6056,11 @@
 
         // Quests - fresh run resets the chain back to the start.
         questLog.reset();
+
+        // Story progression - death ends the current campaign run;
+        // localStorage is also cleared so the next page load opens
+        // on chapter 1, not wherever we died.
+        story.reset();
 
         // Dialogue - close any open box, drop cached option rects.
         dialogue.close();
@@ -6298,7 +6438,7 @@
     // shadowed-text style as the rest of the HUD.
     function drawQuestPanel() {
         const w = 240;
-        const h = 48;
+        const h = 64;
 
         // Stats panel occupies x 8..288 at top. Give it 8px of gap
         // before placing the quest panel alongside.
@@ -6315,9 +6455,35 @@
         ctx.stroke();
 
         ctx.textBaseline = "top";
+
+        // Chapter header - always visible, drives the "where am I in
+        // the campaign?" question even when there's no active quest.
+        const chapterIdx = story.chapterOrder.indexOf(story.state) + 1;
+        drawShadowedText(
+            `CH ${chapterIdx}`,
+            x + 12, y + 7,
+            "#b06bff",
+            "bold 10px system-ui, sans-serif"
+        );
+        drawShadowedText(
+            story.title(),
+            x + 38, y + 7,
+            "#e8e8f0",
+            "bold 11px system-ui, sans-serif"
+        );
+
+        // Hairline divider between chapter header and quest body.
+        ctx.strokeStyle = "rgba(138, 217, 255, 0.18)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x + 10, y + 22);
+        ctx.lineTo(x + w - 10, y + 22);
+        ctx.stroke();
+
+        // Quest row - moved 16px down to make room for chapter line.
         drawShadowedText(
             "QUEST",
-            x + 12, y + 8,
+            x + 12, y + 26,
             "#a0a0b8",
             "11px system-ui, sans-serif"
         );
@@ -6325,7 +6491,7 @@
         if (!questLog.active) {
             drawShadowedText(
                 "(none)  talk to the Elder",
-                x + 58, y + 8,
+                x + 58, y + 26,
                 "#a0a0b8",
                 "bold 12px system-ui, sans-serif"
             );
@@ -6337,14 +6503,14 @@
             // Title
             drawShadowedText(
                 tmpl.title,
-                x + 58, y + 8,
+                x + 58, y + 26,
                 "#ffd166",
                 "bold 13px system-ui, sans-serif"
             );
 
             // Progress bar below the title.
             const barX = x + 12;
-            const barY = y + 28;
+            const barY = y + 46;
             const barW = w - 24;
             const barH = 8;
             const frac = Math.max(0, Math.min(1, prog / goal));
@@ -6366,11 +6532,12 @@
             roundRectPath(ctx, barX + 0.5, barY + 0.5, barW - 1, barH - 1, 4);
             ctx.stroke();
 
-            // Progress numbers aligned to the right of the bar.
+            // Progress numbers aligned to the right of the quest
+            // title row.
             ctx.textAlign = "right";
             drawShadowedText(
                 `${prog} / ${goal}`,
-                x + w - 12, y + 9,
+                x + w - 12, y + 27,
                 "#8ad9ff",
                 "bold 12px system-ui, sans-serif"
             );
