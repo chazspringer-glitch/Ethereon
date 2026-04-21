@@ -361,6 +361,39 @@
                 },
             },
             npcs: [],
+            // Lore discoveries scattered along the cavern path.
+            // Each piece reveals a sliver of pre-fall history so
+            // reading them all paints a coherent world arc.
+            lore: [
+                {
+                    id: "cavern_1",
+                    name: "Weathered Marker",
+                    kind: "statue",
+                    x: 400, y: 880,
+                    text: '"Before the star-fall, these tunnels were trade roads between seven cities. Now, echoes serve as coin."',
+                },
+                {
+                    id: "cavern_2",
+                    name: "Broken Relic",
+                    kind: "relic",
+                    x: 1200, y: 480,
+                    text: '"The relic hummed once, I am told. Now it only watches. Whatever it awaits, it has waited long."',
+                },
+                {
+                    id: "cavern_3",
+                    name: "Traveler\'s Pack",
+                    kind: "book",
+                    x: 1420, y: 1360,
+                    text: '"Their notes are dated three days before the fall. The last line reads: \'Grove is quiet. I\'ll return soon.\' They did not."',
+                },
+                {
+                    id: "cavern_4",
+                    name: "Warden\'s Mark",
+                    kind: "statue",
+                    x: 2040, y: 900,
+                    text: '"A sigil of the Shrine Wardens. Their order collapsed a century before the star-fall; the mark endures - so, somewhere, does the duty."',
+                },
+            ],
         },
         shrine: {
             id: "shrine",
@@ -391,6 +424,29 @@
                 xpReward: 120,
                 contactDamage: 25,
             },
+            lore: [
+                {
+                    id: "shrine_1",
+                    name: "Shrine Tablet",
+                    kind: "statue",
+                    x: 860, y: 1100,
+                    text: '"The Shrine was built around a wound in the world. The Keeper was built around the Shrine."',
+                },
+                {
+                    id: "shrine_2",
+                    name: "Keeper\'s Journal",
+                    kind: "book",
+                    x: 1180, y: 480,
+                    text: '"\'I remember being a man. I remember a name. I remember less of it every dawn. Soon I will be the shrine itself.\'"',
+                },
+                {
+                    id: "shrine_3",
+                    name: "Ethereon Heart",
+                    kind: "relic",
+                    x: 1820, y: 1300,
+                    text: '"A stone that beats when the shrine sleeps. They say when it stops, the world does too. Thus the Keeper. Thus the fall."',
+                },
+            ],
         },
 
         // Interior of the grove shop. Much smaller than an outdoor
@@ -1825,7 +1881,8 @@
         justPressed: false,
 
         visible() {
-            return gameState === "playing" && nearestNpc() !== null;
+            return gameState === "playing" &&
+                (nearestNpc() !== null || nearestLore() !== null);
         },
 
         contains(x, y) {
@@ -2399,6 +2456,82 @@
         }
         return chosen;
     }
+
+    // ---------------------------------------------------------------
+    // Lore discovery
+    //
+    // Levels can carry a `lore: [...]` list of world-space objects
+    // the player can read:
+    //
+    //   { id, name, kind: "book"|"statue"|"relic", x, y, text }
+    //
+    // Each entry is a one-off discovery - read once, mark collected,
+    // and the object stays in the world (slightly dimmed) as a
+    // breadcrumb. `loreLog` tracks the set of collected ids and
+    // persists it to localStorage so a page reload preserves
+    // discovered history (match the story-state pattern).
+    //
+    // `restartGame` clears the set - death ends the run including
+    // its lore run.
+    // ---------------------------------------------------------------
+    const LORE_STORAGE_KEY = "ethereon.loreCollected";
+
+    const loreLog = {
+        collected: new Set(),
+
+        has(id) { return this.collected.has(id); },
+        count() { return this.collected.size; },
+
+        // Walk every level's lore list and sum - gives a stable
+        // denominator for the "3 / 7" HUD counter.
+        total() {
+            let n = 0;
+            for (const id in LEVELS) {
+                const list = LEVELS[id].lore;
+                if (list) n += list.length;
+            }
+            return n;
+        },
+
+        // Marks `id` collected, returns true on first-time collect.
+        collect(id) {
+            if (this.collected.has(id)) return false;
+            this.collected.add(id);
+            this.save();
+            return true;
+        },
+
+        save() {
+            try {
+                if (typeof localStorage === "undefined") return;
+                localStorage.setItem(
+                    LORE_STORAGE_KEY,
+                    JSON.stringify([...this.collected])
+                );
+            } catch (_e) { /* ignore */ }
+        },
+
+        load() {
+            try {
+                if (typeof localStorage === "undefined") return;
+                const raw = localStorage.getItem(LORE_STORAGE_KEY);
+                if (!raw) return;
+                const arr = JSON.parse(raw);
+                if (Array.isArray(arr)) this.collected = new Set(arr);
+            } catch (_e) { /* ignore */ }
+        },
+
+        reset() {
+            this.collected = new Set();
+            try {
+                if (typeof localStorage !== "undefined") {
+                    localStorage.removeItem(LORE_STORAGE_KEY);
+                }
+            } catch (_e) { /* ignore */ }
+        },
+    };
+
+    loreLog.load();
 
     // ---------------------------------------------------------------
     // Quests
@@ -4026,6 +4159,47 @@
         return currentLevel.npcs || [];
     }
 
+    // Lore entries for the current level. Returns [] for levels
+    // without any, so call sites don't need null-guards.
+    function activeLore() {
+        return currentLevel.lore || [];
+    }
+
+    // Loose 50-px proximity - a bit more forgiving than NPC range
+    // since lore objects don't move so they're easier to miss-target.
+    const LORE_INTERACT_RANGE = 50;
+
+    function loreIsNear(entry) {
+        const cx = entry.x + 16;  // lore sprite is 32x32
+        const cy = entry.y + 16;
+        const px = player.x + player.width / 2;
+        const py = player.y + player.height / 2;
+        const dx = px - cx;
+        const dy = py - cy;
+        return dx * dx + dy * dy <= LORE_INTERACT_RANGE * LORE_INTERACT_RANGE;
+    }
+
+    // Closest lore entry within range, or null.
+    function nearestLore() {
+        let best = null;
+        let bestD = Infinity;
+        const r2 = LORE_INTERACT_RANGE * LORE_INTERACT_RANGE;
+        const px = player.x + player.width / 2;
+        const py = player.y + player.height / 2;
+        for (const entry of activeLore()) {
+            const cx = entry.x + 16;
+            const cy = entry.y + 16;
+            const dx = px - cx;
+            const dy = py - cy;
+            const d = dx * dx + dy * dy;
+            if (d <= r2 && d < bestD) {
+                best = entry;
+                bestD = d;
+            }
+        }
+        return best;
+    }
+
     function npcIsNear(n) {
         const cx = n.x + n.width / 2;
         const cy = n.y + n.height / 2;
@@ -4205,6 +4379,120 @@
             p.y < b.doorY + b.doorH &&
             p.y + p.height > b.doorY
         );
+    }
+
+    // Lore-object sprite. Three visual flavors: book, statue,
+    // relic. Collected entries render dimmed so they still read as
+    // landmarks without calling attention to already-read content.
+    // Fresh entries carry a soft gold halo that pulses so they
+    // catch the eye from across the room.
+    function drawLoreObject(ctx, entry) {
+        const x = Math.round(entry.x);
+        const y = Math.round(entry.y);
+        const collected = loreLog.has(entry.id);
+
+        // Fresh lore gets a pulsing gold halo so the player can
+        // spot it without hunting every corner.
+        if (!collected) {
+            const pulse = 0.35 + 0.4 *
+                Math.abs(Math.sin(performance.now() * 0.003));
+            ctx.save();
+            ctx.globalAlpha = pulse;
+            ctx.fillStyle = "#ffd166";
+            ctx.beginPath();
+            ctx.arc(x + 16, y + 20, 20, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+
+        // Ground shadow
+        ctx.fillStyle = "rgba(0, 0, 0, 0.32)";
+        ctx.beginPath();
+        ctx.ellipse(x + 16, y + 29, 7, 2.5, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Body by kind.
+        const kind = entry.kind || "book";
+        if (kind === "book") {
+            // Closed tome
+            ctx.fillStyle = collected ? "#6a4a2a" : "#8c5a3c";
+            ctx.fillRect(x + 10, y + 14, 12, 14);
+            ctx.fillStyle = collected ? "#4a3018" : "#5c3a20";
+            ctx.fillRect(x + 10, y + 14, 12, 2);
+            ctx.fillStyle = collected ? "#c8b88a" : "#f0e0c0";
+            ctx.fillRect(x + 12, y + 17, 8, 10);
+            ctx.fillStyle = collected ? "#6a4a2a" : "#8c5a3c";
+            ctx.fillRect(x + 15, y + 17, 2, 10);  // spine
+        } else if (kind === "statue") {
+            // Squat plinth with a head
+            ctx.fillStyle = collected ? "#787888" : "#a0a0b0";
+            ctx.fillRect(x + 8, y + 12, 16, 16);
+            ctx.fillStyle = collected ? "#555562" : "#7a7a8a";
+            ctx.fillRect(x + 8, y + 26, 16, 2);
+            ctx.fillStyle = collected ? "#686878" : "#888898";
+            ctx.fillRect(x + 11, y + 6, 10, 8);
+            ctx.fillStyle = "#1a1a24";
+            ctx.fillRect(x + 13, y + 10, 2, 2);
+            ctx.fillRect(x + 17, y + 10, 2, 2);
+        } else {
+            // Relic: faceted crystal on a base
+            ctx.fillStyle = collected ? "#463050" : "#553070";
+            ctx.fillRect(x + 8, y + 24, 16, 4);
+            ctx.fillStyle = collected ? "#604060" : "#c060c0";
+            ctx.beginPath();
+            ctx.moveTo(x + 16, y + 6);
+            ctx.lineTo(x + 24, y + 16);
+            ctx.lineTo(x + 16, y + 24);
+            ctx.lineTo(x + 8, y + 16);
+            ctx.closePath();
+            ctx.fill();
+            ctx.fillStyle = collected ? "#8060a0" : "#e8a0e8";
+            ctx.fillRect(x + 14, y + 11, 3, 3);
+        }
+
+        // Interact bubble when the player is in range.
+        if (gameState === "playing" && loreIsNear(entry)) {
+            const bx = x + 16;
+            const by = y - 14;
+            ctx.save();
+            ctx.fillStyle = "#1a1a24";
+            ctx.beginPath();
+            ctx.arc(bx, by, 11, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = "#ffd166";
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+            ctx.fillStyle = "#ffd166";
+            ctx.font = "bold 13px system-ui, sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText("E", bx, by + 1);
+            ctx.restore();
+        }
+    }
+
+    // Opens a lore entry as a dialogue box (reuses the existing
+    // modal pipeline). `dialogue.open` accepts any `{ name,
+    // dialogue }` shape, so synthesizing one here keeps the lore
+    // UI visually consistent with NPC conversations.
+    function openLore(entry) {
+        const firstTime = loreLog.collect(entry.id);
+        if (firstTime) {
+            sound.play("levelUp");
+            questLog.showToast(
+                `Lore discovered  (${loreLog.count()}/${loreLog.total()})`,
+                2.2
+            );
+        }
+        dialogue.open({
+            name: entry.name,
+            dialogue: {
+                greeting: entry.text,
+                options: [
+                    { label: "Close.", close: true },
+                ],
+            },
+        });
     }
 
     function drawNpc(ctx, n) {
@@ -5814,8 +6102,15 @@
         const keyboardInteract = keysJustPressed["e"] || keysJustPressed["E"];
         const touchInteract = interactButton.consumeJustPressed();
         if (keyboardInteract || touchInteract) {
-            const target = nearestNpc();
-            if (target) dialogue.open(target);
+            // Prefer NPCs (conversation), fall through to lore
+            // objects (discovery). Same key, one interact button.
+            const npcTarget = nearestNpc();
+            if (npcTarget) {
+                dialogue.open(npcTarget);
+            } else {
+                const loreTarget = nearestLore();
+                if (loreTarget) openLore(loreTarget);
+            }
         }
 
         // Tick transient UI state (quest + level toasts).
@@ -6119,6 +6414,9 @@
         // on chapter 1, not wherever we died.
         story.reset();
 
+        // Lore discoveries - same persistence contract as story.
+        loreLog.reset();
+
         // Dialogue - close any open box, drop cached option rects.
         dialogue.close();
 
@@ -6221,6 +6519,11 @@
         // beneath the player so the player always reads on top. Each
         // draws its own "E" bubble when the player is in range.
         for (const n of activeNpcs()) drawNpc(ctx, n);
+
+        // Lore objects - painted above the floor but below
+        // enemies / player, so they read as landmarks a moving
+        // entity can walk past.
+        for (const entry of activeLore()) drawLoreObject(ctx, entry);
 
         // Enemies beneath the player so the player always reads on top.
         for (const e of enemies) e.draw(ctx);
@@ -6528,6 +6831,20 @@
             "#e8e8f0",
             "bold 11px system-ui, sans-serif"
         );
+
+        // Lore counter pinned to the right of the chapter header
+        // so the player can see how much history they've uncovered.
+        const loreTotal = loreLog.total();
+        if (loreTotal > 0) {
+            ctx.textAlign = "right";
+            drawShadowedText(
+                `LORE  ${loreLog.count()}/${loreTotal}`,
+                x + w - 10, y + 7,
+                "#ffd166",
+                "bold 10px system-ui, sans-serif"
+            );
+            ctx.textAlign = "start";
+        }
 
         // Hairline divider between chapter header and quest body.
         ctx.strokeStyle = "rgba(138, 217, 255, 0.18)";
