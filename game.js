@@ -533,8 +533,12 @@
         width: WORLD_W,
         height: WORLD_H,
         tileSize: TILE,
-        // Allocated at max dimensions once so interiors / zones of
-        // any size up to MAX_WORLD_* fit without realloc.
+        // Initial allocation sized to the MAX_ constants; grows on
+        // demand in `load` if a level exceeds it. Uint8Array
+        // semantics silently drop out-of-bounds writes, so a too-
+        // small buffer previously painted undefined tiles as the
+        // drawTile "default" (dark grey) instead of the level's
+        // tiles - visible as grey blocks over parts of the grove.
         data: new Uint8Array(MAX_WORLD_COLS * MAX_WORLD_ROWS),
 
         // Regenerate tile data from a level definition. Used at boot
@@ -552,6 +556,14 @@
             this.rows = rows;
             this.width = WORLD_W;
             this.height = WORLD_H;
+
+            // Grow the tile buffer if the level is bigger than the
+            // current allocation. Kept as a live `this.data` swap so
+            // any references to the world module see the new buffer.
+            const needed = cols * rows;
+            if (this.data.length < needed) {
+                this.data = new Uint8Array(needed);
+            }
 
             for (let r = 0; r < rows; r++) {
                 for (let c = 0; c < cols; c++) {
