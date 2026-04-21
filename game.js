@@ -1127,6 +1127,80 @@
     };
 
     // ---------------------------------------------------------------
+    // Interact button (touch / pointer)
+    //
+    // Appears bottom-center only when the player is standing near an
+    // NPC and gameplay is active. Tapping runs the same `npc.interact`
+    // path the E key uses, so keyboard and touch converge.
+    // ---------------------------------------------------------------
+    const interactButton = {
+        x: VIEW_W / 2,
+        y: VIEW_H - 84,
+        radius: 34,
+
+        pressed: false,
+        pointerId: null,
+        justPressed: false,
+
+        visible() {
+            return gameState === "playing" && npc.isNearPlayer();
+        },
+
+        contains(x, y) {
+            const dx = x - this.x;
+            const dy = y - this.y;
+            return dx * dx + dy * dy <= this.radius * this.radius;
+        },
+
+        onDown(x, y, pointerId) {
+            if (!this.visible()) return false;
+            if (this.pressed) return false;
+            if (!this.contains(x, y)) return false;
+            this.pressed = true;
+            this.pointerId = pointerId;
+            this.justPressed = true;
+            return true;
+        },
+
+        onUp(pointerId) {
+            if (this.pointerId !== pointerId) return;
+            this.pressed = false;
+            this.pointerId = null;
+        },
+
+        consumeJustPressed() {
+            const v = this.justPressed;
+            this.justPressed = false;
+            return v;
+        },
+
+        draw(ctx) {
+            if (!this.visible()) return;
+            const cy = this.y + (this.pressed ? 2 : 0);
+
+            ctx.save();
+            ctx.globalAlpha = this.pressed ? 0.95 : 0.75;
+            ctx.fillStyle = "#8ad9ff";
+            ctx.beginPath();
+            ctx.arc(this.x, cy, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.globalAlpha = 0.95;
+            ctx.strokeStyle = "#ffffff";
+            ctx.lineWidth = this.pressed ? 4 : 3;
+            ctx.stroke();
+
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = "#1a1a24";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.font = "bold 14px system-ui, sans-serif";
+            ctx.fillText("TALK", this.x, cy);
+            ctx.restore();
+        },
+    };
+
+    // ---------------------------------------------------------------
     // Restart button (game-over only)
     //
     // A clearly-tappable rectangle centered on the game-over screen.
@@ -1264,6 +1338,11 @@
             e.preventDefault();
             return;
         }
+        if (interactButton.onDown(x, y, e.pointerId)) {
+            canvas.setPointerCapture(e.pointerId);
+            e.preventDefault();
+            return;
+        }
 
         if (joystick.onDown(x, y, e.pointerId)) {
             // Keep receiving move/up even if the pointer leaves the
@@ -1286,6 +1365,7 @@
         attackButton.onUp(e.pointerId);
         weaponSwapButton.onUp(e.pointerId);
         powerButton.onUp(e.pointerId);
+        interactButton.onUp(e.pointerId);
         restartButton.onUp(e.pointerId);
     }
     canvas.addEventListener("pointerup", endPointer);
@@ -1407,6 +1487,7 @@
             this.kills += 1;
             this.addScore(enemy?.reward ?? 10);
             this.addXp(enemy?.xpReward ?? 10);
+            questLog.onKill();
         },
 
         // Grants XP and levels the player up as many times as the
@@ -1456,6 +1537,115 @@
             this.xp = 0;
             this.xpForNext = 30;
             this.levelUpToast = 0;
+        },
+    };
+
+    // ---------------------------------------------------------------
+    // Quests
+    //
+    // QUESTS is a read-only catalog of quest templates keyed by id.
+    // Each template carries display info and an objective:
+    //
+    //   id            unique key
+    //   title         short HUD / toast name
+    //   description   what the player is asked to do
+    //   kind          "kill" today; extension point for "collect",
+    //                 "reach", "escort" - onKill / onPickup / etc.
+    //                 checks switch on this field.
+    //   target        numeric goal (e.g. 3 kills)
+    //   rewardXp      xp granted on completion
+    //   rewardScore   score granted on completion
+    //   next          chained quest id, or null for end of chain
+    //
+    // questLog holds the active instance and a set of completed ids.
+    // Additions: just push another object into QUESTS and make sure
+    // a quest earlier in the chain points at it via `next`.
+    // ---------------------------------------------------------------
+    const QUESTS = {
+        slay3: {
+            id: "slay3",
+            title: "First Hunt",
+            description: "Defeat 3 enemies.",
+            kind: "kill",
+            target: 3,
+            rewardXp: 30,
+            rewardScore: 50,
+            next: "slay10",
+        },
+        slay10: {
+            id: "slay10",
+            title: "Experienced Hunter",
+            description: "Defeat 10 more enemies.",
+            kind: "kill",
+            target: 10,
+            rewardXp: 80,
+            rewardScore: 150,
+            next: null,
+        },
+    };
+
+    const questLog = {
+        active: null,              // { id, progress } or null
+        completedIds: new Set(),
+        toast: "",                 // text shown mid-screen
+        toastTimer: 0,             // seconds remaining visible
+
+        hasCompleted(id) {
+            return this.completedIds.has(id);
+        },
+
+        // True if this id is already active or already finished.
+        isKnown(id) {
+            return (this.active && this.active.id === id) || this.hasCompleted(id);
+        },
+
+        accept(id) {
+            const tmpl = QUESTS[id];
+            if (!tmpl) return false;
+            if (this.active || this.hasCompleted(id)) return false;
+            this.active = { id, progress: 0 };
+            this.showToast(`New quest: ${tmpl.title}`);
+            return true;
+        },
+
+        // Call from stats.addKill. Advances any active "kill" quest
+        // by one and triggers completion when the target is reached.
+        onKill() {
+            if (!this.active) return;
+            const tmpl = QUESTS[this.active.id];
+            if (tmpl.kind !== "kill") return;
+            this.active.progress = Math.min(tmpl.target, this.active.progress + 1);
+            if (this.active.progress >= tmpl.target) {
+                this._complete();
+            }
+        },
+
+        _complete() {
+            const tmpl = QUESTS[this.active.id];
+            this.completedIds.add(tmpl.id);
+            stats.addXp(tmpl.rewardXp);
+            stats.addScore(tmpl.rewardScore);
+            sound.play("levelUp");
+            this.showToast(`Quest complete: ${tmpl.title}!`);
+            this.active = null;
+        },
+
+        showToast(msg, duration = 2.5) {
+            this.toast = msg;
+            this.toastTimer = duration;
+        },
+
+        update(dt) {
+            if (this.toastTimer > 0) {
+                this.toastTimer = Math.max(0, this.toastTimer - dt);
+            }
+        },
+
+        reset() {
+            this.active = null;
+            this.completedIds = new Set();
+            this.toast = "";
+            this.toastTimer = 0;
         },
     };
 
@@ -2292,6 +2482,114 @@
 
     spawner.seed();
 
+    // ---------------------------------------------------------------
+    // NPC - a single friendly character who hands out quests.
+    //
+    // Stationary, one fixed position, square hitbox. Interaction is
+    // proximity-gated (`isNearPlayer`) so the world never fires
+    // dialogue at arm's length. Adding more NPCs later is a matter
+    // of pushing into an npcs array - the one-off `npc` singleton
+    // keeps this iteration simple.
+    // ---------------------------------------------------------------
+    const npc = {
+        x: WORLD_W / 2 + 140,     // just off to the right of player spawn
+        y: WORLD_H / 2 - 12,
+        width: 32,
+        height: 32,
+        name: "Village Elder",
+        interactRange: 60,
+
+        isNearPlayer() {
+            const cx = this.x + this.width / 2;
+            const cy = this.y + this.height / 2;
+            const px = player.x + player.width / 2;
+            const py = player.y + player.height / 2;
+            const dx = px - cx;
+            const dy = py - cy;
+            return dx * dx + dy * dy <=
+                this.interactRange * this.interactRange;
+        },
+
+        // Advances the quest chain. If nothing is active and an
+        // unfinished template exists, start it; otherwise give a
+        // status update or a farewell.
+        interact() {
+            if (questLog.active) {
+                const tmpl = QUESTS[questLog.active.id];
+                questLog.showToast(
+                    `${tmpl.description}  (${questLog.active.progress}/${tmpl.target})`
+                );
+                return;
+            }
+
+            // Find the first quest in the chain that isn't completed.
+            // `slay3` is the chain head; `next` walks forward.
+            let id = "slay3";
+            while (id && questLog.hasCompleted(id)) {
+                id = QUESTS[id].next;
+            }
+            if (!id) {
+                questLog.showToast("Safe travels, hero.");
+                return;
+            }
+            questLog.accept(id);
+        },
+
+        draw(ctx) {
+            const x = Math.round(this.x);
+            const y = Math.round(this.y);
+
+            // Shadow
+            ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
+            ctx.beginPath();
+            ctx.ellipse(x + 16, y + 29, 9, 3, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Robe
+            ctx.fillStyle = "#6b4e91";
+            ctx.fillRect(x + 8, y + 12, 16, 16);
+            ctx.fillStyle = "#503872";
+            ctx.fillRect(x + 8, y + 25, 16, 3);
+            // Sash
+            ctx.fillStyle = "#ffd166";
+            ctx.fillRect(x + 8, y + 19, 16, 2);
+
+            // Head
+            ctx.fillStyle = "#e8c096";
+            ctx.fillRect(x + 10, y + 6, 12, 8);
+            // Hat
+            ctx.fillStyle = "#4a2f70";
+            ctx.fillRect(x + 9, y + 3, 14, 4);
+
+            // Eyes
+            ctx.fillStyle = "#1a1a24";
+            ctx.fillRect(x + 13, y + 10, 2, 2);
+            ctx.fillRect(x + 17, y + 10, 2, 2);
+
+            // Interact hint when in range (world-space bubble with "E").
+            if (gameState === "playing" && this.isNearPlayer()) {
+                const bx = x + 16;
+                const by = y - 14;
+                ctx.save();
+                // Bubble background
+                ctx.fillStyle = "#1a1a24";
+                ctx.beginPath();
+                ctx.arc(bx, by, 11, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = "#ffd166";
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+                // Letter
+                ctx.fillStyle = "#ffd166";
+                ctx.font = "bold 13px system-ui, sans-serif";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.fillText("E", bx, by + 1);
+                ctx.restore();
+            }
+        },
+    };
+
     // Place the camera on the player before the first frame so we
     // don't see it lerp in from (0, 0).
     camera.snap(player);
@@ -2499,7 +2797,17 @@
         if (keysJustPressed["1"]) player.weaponIndex = 0;
         if (keysJustPressed["2"]) player.weaponIndex = 1;
 
-        // Decay the brief "LEVEL UP!" toast.
+        // NPC interact - E key or the mobile TALK button. Proximity
+        // is checked inside `npc.interact`, so a stray press with no
+        // NPC in range is a no-op.
+        const keyboardInteract = keysJustPressed["e"] || keysJustPressed["E"];
+        const touchInteract = interactButton.consumeJustPressed();
+        if ((keyboardInteract || touchInteract) && npc.isNearPlayer()) {
+            npc.interact();
+        }
+
+        // Tick transient UI state (quest + level toasts).
+        questLog.update(dt);
         if (stats.levelUpToast > 0) {
             stats.levelUpToast = Math.max(0, stats.levelUpToast - dt);
         }
@@ -2598,6 +2906,9 @@
         drops.length = 0;
         inventoryOpen = false;
 
+        // Quests - fresh run resets the chain back to the start.
+        questLog.reset();
+
         // Weapons - back to the starting loadout, clear any in-flight
         // projectiles, and reset each weapon's internal timers.
         player.weaponIndex = 0;
@@ -2626,6 +2937,9 @@
         powerButton.pressed = false;
         powerButton.pointerId = null;
         powerButton.justPressed = false;
+        interactButton.pressed = false;
+        interactButton.pointerId = null;
+        interactButton.justPressed = false;
         restartButton.pressed = false;
         restartButton.pointerId = null;
 
@@ -2654,6 +2968,10 @@
         // Drops beneath enemies and player so they can't be obscured
         // by a live enemy standing over the same tile.
         drawDrops(ctx);
+
+        // NPC - static, beneath enemies/player so they can pass in
+        // front. Their interact bubble draws as part of the NPC.
+        npc.draw(ctx);
 
         // Enemies beneath the player so the player always reads on top.
         for (const e of enemies) e.draw(ctx);
@@ -2684,8 +3002,11 @@
         attackButton.draw(ctx);
         weaponSwapButton.draw(ctx);
         powerButton.draw(ctx);
+        interactButton.draw(ctx);
+        drawQuestPanel();
 
         if (stats.levelUpToast > 0) drawLevelUpToast();
+        if (questLog.toastTimer > 0) drawQuestToast();
         if (inventoryOpen) drawInventory();
 
         // Overlays driven by the state machine.
@@ -2811,6 +3132,109 @@
         roundRectPath(ctx, x + 0.5, y + 0.5, barW - 1, barH - 1, r);
         ctx.stroke();
 
+        ctx.restore();
+    }
+
+    // Quest HUD - a compact panel in the top-right showing the
+    // active quest or a "(no active quest)" stub. Uses the same
+    // dark-glass + shadowed-text style as the rest of the HUD.
+    function drawQuestPanel() {
+        const w = 240;
+        const h = 48;
+        const x = VIEW_W - w - 8;
+        const y = 8;
+
+        ctx.save();
+        roundRectPath(ctx, x, y, w, h, 8);
+        ctx.fillStyle = "rgba(12, 12, 22, 0.62)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(138, 217, 255, 0.32)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.textBaseline = "top";
+        drawShadowedText(
+            "QUEST",
+            x + 12, y + 8,
+            "#a0a0b8",
+            "11px system-ui, sans-serif"
+        );
+
+        if (!questLog.active) {
+            drawShadowedText(
+                "(none)  talk to the Elder",
+                x + 58, y + 8,
+                "#a0a0b8",
+                "bold 12px system-ui, sans-serif"
+            );
+        } else {
+            const tmpl = QUESTS[questLog.active.id];
+            const prog = questLog.active.progress;
+            const goal = tmpl.target;
+
+            // Title
+            drawShadowedText(
+                tmpl.title,
+                x + 58, y + 8,
+                "#ffd166",
+                "bold 13px system-ui, sans-serif"
+            );
+
+            // Progress bar below the title.
+            const barX = x + 12;
+            const barY = y + 28;
+            const barW = w - 24;
+            const barH = 8;
+            const frac = Math.max(0, Math.min(1, prog / goal));
+
+            roundRectPath(ctx, barX, barY, barW, barH, 4);
+            ctx.fillStyle = "#13131c";
+            ctx.fill();
+            if (frac > 0) {
+                ctx.save();
+                ctx.clip();
+                ctx.fillStyle = "#8ad9ff";
+                ctx.fillRect(barX, barY, barW * frac, barH);
+                ctx.fillStyle = "rgba(255, 255, 255, 0.22)";
+                ctx.fillRect(barX, barY + 1, barW * frac, 2);
+                ctx.restore();
+            }
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.2)";
+            ctx.lineWidth = 1;
+            roundRectPath(ctx, barX + 0.5, barY + 0.5, barW - 1, barH - 1, 4);
+            ctx.stroke();
+
+            // Progress numbers aligned to the right of the bar.
+            ctx.textAlign = "right";
+            drawShadowedText(
+                `${prog} / ${goal}`,
+                x + w - 12, y + 9,
+                "#8ad9ff",
+                "bold 12px system-ui, sans-serif"
+            );
+            ctx.textAlign = "start";
+        }
+
+        ctx.restore();
+    }
+
+    // Center-screen toast for quest events (start / progress
+    // reminder / completion). Fades out over its remaining time.
+    function drawQuestToast() {
+        const full = 2.5;
+        const t = 1 - questLog.toastTimer / full;
+        const alpha = Math.max(0, 1 - t);
+
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        drawShadowedText(
+            questLog.toast,
+            VIEW_W / 2, VIEW_H / 2 - 40,
+            "#e8e8f0",
+            "bold 18px system-ui, sans-serif"
+        );
         ctx.restore();
     }
 
