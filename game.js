@@ -885,6 +885,92 @@
         },
     };
 
+    // ---------------------------------------------------------------
+    // Weapon-swap button (touch / pointer)
+    //
+    // Sits beside the attack button so mobile users can cycle
+    // weapons without a keyboard. Edge-triggered on tap (one press =
+    // one cycle). Always visible and always labelled with the
+    // currently-equipped weapon, so what's active is obvious even
+    // while playing one-handed.
+    //
+    // Lives on the right half of the canvas alongside the attack
+    // button, so the joystick (which only activates on the left
+    // half) can never steal its touches.
+    // ---------------------------------------------------------------
+    const weaponSwapButton = {
+        x: VIEW_W - 166,
+        y: VIEW_H - 78,
+        radius: 36,
+
+        pressed: false,
+        pointerId: null,
+
+        contains(x, y) {
+            const dx = x - this.x;
+            const dy = y - this.y;
+            return dx * dx + dy * dy <= this.radius * this.radius;
+        },
+
+        onDown(x, y, pointerId) {
+            if (this.pressed) return false;
+            if (!this.contains(x, y)) return false;
+            this.pressed = true;
+            this.pointerId = pointerId;
+            // Edge-triggered cycle: advance on press, not on release,
+            // for responsive feel.
+            player.weaponIndex = (player.weaponIndex + 1) % weapons.length;
+            return true;
+        },
+
+        onUp(pointerId) {
+            if (this.pointerId !== pointerId) return;
+            this.pressed = false;
+            this.pointerId = null;
+        },
+
+        draw(ctx) {
+            const w = currentWeapon();
+            const cy = this.y + (this.pressed ? 2 : 0);
+
+            ctx.save();
+
+            // Base fill - tinted by the current weapon so the active
+            // loadout is obvious at a glance.
+            ctx.globalAlpha = this.pressed ? 0.95 : 0.6;
+            ctx.fillStyle = w.color;
+            ctx.beginPath();
+            ctx.arc(this.x, cy, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Rim
+            ctx.globalAlpha = 0.9;
+            ctx.strokeStyle = "#ffffff";
+            ctx.lineWidth = this.pressed ? 4 : 3;
+            ctx.stroke();
+
+            if (this.pressed) {
+                ctx.globalAlpha = 0.35;
+                ctx.fillStyle = "#ffffff";
+                ctx.beginPath();
+                ctx.arc(this.x, cy, this.radius - 5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Label: a small cycle glyph + current weapon's short name.
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = "#1a1a24";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.font = "bold 12px system-ui, sans-serif";
+            ctx.fillText("↻", this.x, cy - 10);
+            ctx.font = "bold 11px system-ui, sans-serif";
+            ctx.fillText(w.shortName, this.x, cy + 8);
+
+            ctx.restore();
+        },
+    };
+
     // Convert a pointer event's clientX/Y into canvas-space coordinates
     // (the 960x540 internal grid). The canvas is CSS-scaled, so we
     // divide out that scale factor here.
@@ -917,11 +1003,16 @@
 
         const { x, y } = pointerToCanvas(e);
 
-        // Try the attack button first - it's a fixed rect, so this
-        // hit test is O(1) and never blocks the joystick since the
-        // button lives on the right half and the joystick only spawns
-        // on the left half.
+        // Try the fixed-rect right-side buttons first. They share the
+        // right half of the canvas with nothing else (the joystick
+        // only spawns on the left half), so this ordering can never
+        // steal a joystick touch.
         if (attackButton.onDown(x, y, e.pointerId)) {
+            canvas.setPointerCapture(e.pointerId);
+            e.preventDefault();
+            return;
+        }
+        if (weaponSwapButton.onDown(x, y, e.pointerId)) {
             canvas.setPointerCapture(e.pointerId);
             e.preventDefault();
             return;
@@ -946,6 +1037,7 @@
     function endPointer(e) {
         joystick.onUp(e.pointerId);
         attackButton.onUp(e.pointerId);
+        weaponSwapButton.onUp(e.pointerId);
     }
     canvas.addEventListener("pointerup", endPointer);
     canvas.addEventListener("pointercancel", endPointer);
@@ -1301,6 +1393,7 @@
     const swordWeapon = {
         id: "sword",
         name: "Sword",
+        shortName: "SWORD",   // compact label for the mobile swap button
         color: "#ffd166",
         get ready() {
             return !attack.active && attack.cooldownTimer <= 0;
@@ -1321,6 +1414,7 @@
     const energyWeapon = {
         id: "energy",
         name: "Energy Blast",
+        shortName: "ENERGY",
         color: "#8ad9ff",
         cooldownMax: 0.5,
         cooldownTimer: 0,
@@ -2005,6 +2099,8 @@
         attackButton.pressed = false;
         attackButton.pointerId = null;
         attackButton.justPressed = false;
+        weaponSwapButton.pressed = false;
+        weaponSwapButton.pointerId = null;
 
         // Loop timing - prevent a huge dt spike on the first tick
         // after the restart keystroke.
@@ -2055,6 +2151,7 @@
         drawEnemyCounter();
         joystick.draw(ctx);
         attackButton.draw(ctx);
+        weaponSwapButton.draw(ctx);
 
         if (inventoryOpen) drawInventory();
         if (!player.alive) drawGameOver();
