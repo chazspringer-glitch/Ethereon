@@ -1152,6 +1152,10 @@
             power: 0.1,
             super: 0.2,
             levelUp: 1.5,
+            // Coin pickups: a swept burst should register as one
+            // sound, not a flurry - keep the cooldown above the
+            // likely frame gap between successive pickups.
+            coin: 0.06,
         },
 
         _init() {
@@ -1193,6 +1197,7 @@
                 case "power":      this._power(now); break;
                 case "super":      this._super(now); break;
                 case "levelUp":    this._levelUp(now); break;
+                case "coin":       this._coin(now); break;
             }
         },
 
@@ -1239,6 +1244,24 @@
             osc.connect(g).connect(this.master);
             osc.start(t);
             osc.stop(t + 0.24);
+        },
+
+        // Coin chirp - tiny two-note pop so pickups feel snappy.
+        _coin(t) {
+            const notes = [880, 1320];
+            for (let i = 0; i < notes.length; i++) {
+                const start = t + i * 0.04;
+                const osc = this.ctx.createOscillator();
+                const g = this.ctx.createGain();
+                osc.type = "square";
+                osc.frequency.setValueAtTime(notes[i], start);
+                g.gain.setValueAtTime(0.0001, start);
+                g.gain.exponentialRampToValueAtTime(0.18, start + 0.01);
+                g.gain.exponentialRampToValueAtTime(0.0001, start + 0.09);
+                osc.connect(g).connect(this.master);
+                osc.start(start);
+                osc.stop(start + 0.10);
+            }
         },
 
         // Rising major-triad arpeggio - "ding ding ding".
@@ -2107,6 +2130,11 @@
         // Collected items, flat array of ids from the ITEMS catalog.
         inventory: [],
 
+        // Gold coins - the purse. Coins are picked up automatically
+        // on contact (routed here instead of `inventory`) and spent
+        // at the merchant's shop.
+        coins: 0,
+
         // Currently-equipped weapon index into `weapons[]`.
         // 0 = sword (melee), 1 = energy blast (projectile).
         weaponIndex: 0,
@@ -2390,7 +2418,12 @@
             id: "coin",
             name: "Gold Coin",
             color: "#ffd166",
-            use(_player) { stats.addScore(20); },
+            // Coins are currency rather than inventory items. Marked
+            // `currency: true` so `updateDrops` routes them into
+            // `player.coins` on pickup instead of the inventory list.
+            currency: true,
+            value: 1,
+            use(_player) {},
         },
         // Keys are inventory tokens the door system consumes on
         // unlock. `use` is a no-op - keys are spent by walking
@@ -2446,20 +2479,38 @@
 
     // Rolls on enemy death. Tunable drop table in one place.
     function rollEnemyDrop(enemy) {
-        // Bosses guarantee both a potion and a coin on death so the
-        // room always leaves something meaningful behind.
-        if (enemy.isBoss) {
-            const cx = enemy.x + enemy.width / 2;
-            const cy = enemy.y + enemy.height / 2;
-            spawnDrop(cx - 14, cy, "potion");
-            spawnDrop(cx + 14, cy, "coin");
-            return;
-        }
-        const r = Math.random();
         const cx = enemy.x + enemy.width / 2;
         const cy = enemy.y + enemy.height / 2;
-        if (r < 0.25)      spawnDrop(cx, cy, "potion");
-        else if (r < 0.55) spawnDrop(cx, cy, "coin");
+
+        // Bosses always leave a purse plus a potion - a big reward
+        // for the long fight. Coins arc out in a short circle so
+        // pickup feels like a burst, not a single tile.
+        if (enemy.isBoss) {
+            spawnDrop(cx, cy - 20, "potion");
+            const coinCount = 8;
+            for (let i = 0; i < coinCount; i++) {
+                const angle = (i / coinCount) * Math.PI * 2;
+                const r = 26 + Math.random() * 14;
+                spawnDrop(
+                    cx + Math.cos(angle) * r,
+                    cy + Math.sin(angle) * r,
+                    "coin"
+                );
+            }
+            return;
+        }
+
+        // Regular enemy table:
+        //   25% potion, 45% one coin, 15% two coins, 15% nothing.
+        const r = Math.random();
+        if (r < 0.25) {
+            spawnDrop(cx, cy, "potion");
+        } else if (r < 0.70) {
+            spawnDrop(cx, cy, "coin");
+        } else if (r < 0.85) {
+            spawnDrop(cx - 8, cy, "coin");
+            spawnDrop(cx + 8, cy, "coin");
+        }
         // else nothing
     }
 
@@ -2481,7 +2532,15 @@
                 pxMin < dxMax && pxMax > dxMin &&
                 pyMin < dyMax && pyMax > dyMin
             ) {
-                addToInventory(d.itemId);
+                const tmpl = ITEMS[d.itemId];
+                if (tmpl && tmpl.currency) {
+                    // Currency drop - goes into the purse, not the
+                    // inventory. `value` defaults to 1 when unset.
+                    player.coins += tmpl.value ?? 1;
+                    sound.play("coin");
+                } else {
+                    addToInventory(d.itemId);
+                }
                 drops.splice(i, 1);
             }
         }
@@ -4143,11 +4202,25 @@
         close() { this.open_ = false; this.itemRects = []; this.closeRect = null; },
         isOpen() { return this.open_; },
 
-        // Placeholder: wallet + inventory integration comes later.
+        // Checks the purse, deducts on success, toasts either way.
+        // Actual item effects / inventory tie-in are out of scope
+        // here - the point is that coins now *buy* something.
         selectItem(index) {
             const item = SHOP_ITEMS[index];
             if (!item) return;
-            questLog.showToast(`"${item.name}" - coming soon!`, 1.8);
+            if (player.coins < item.price) {
+                questLog.showToast(
+                    `Not enough coins (${player.coins}/${item.price}g).`,
+                    1.8
+                );
+                return;
+            }
+            player.coins -= item.price;
+            sound.play("coin");
+            questLog.showToast(
+                `Purchased: ${item.name}  (-${item.price}g)`,
+                2.0
+            );
         },
     };
 
@@ -5766,6 +5839,7 @@
 
         // Inventory / drops / UI state - fresh run has no loot.
         player.inventory.length = 0;
+        player.coins = 0;
         drops.length = 0;
         inventoryOpen = false;
 
@@ -5967,8 +6041,9 @@
         ctx.restore();
     }
 
-    // Score on the left, level badge on the right. Both line up on
-    // the same row so the HUD reads left-to-right cleanly.
+    // Top HUD row: SCORE on the left, a coin icon + purse count in
+    // the middle, level badge on the right. Everything on one line
+    // so the whole stats panel stays compact.
     function drawScore() {
         const x = 16;
         const y = 14;
@@ -5978,9 +6053,18 @@
         drawShadowedText("SCORE", x, y, "#a0a0b8", "11px system-ui, sans-serif");
         drawShadowedText(
             String(stats.score).padStart(5, "0"),
-            x + 46, y - 2,
+            x + 42, y - 2,
             "#ffd166",
-            "bold 20px system-ui, sans-serif"
+            "bold 18px system-ui, sans-serif"
+        );
+
+        // Coin icon + purse value - middle of the row.
+        drawCoinIcon(132, y + 11, 6);
+        drawShadowedText(
+            String(player.coins).padStart(4, "0"),
+            146, y - 2,
+            "#ffd166",
+            "bold 18px system-ui, sans-serif"
         );
 
         // Level badge - lives in the right half of the panel.
@@ -5990,10 +6074,24 @@
             String(stats.level),
             lvlX + 28, y - 2,
             "#8ad9ff",
-            "bold 20px system-ui, sans-serif"
+            "bold 18px system-ui, sans-serif"
         );
 
         ctx.restore();
+    }
+
+    // Small gold coin sprite: base circle + rim + tiny highlight.
+    // Used by the HUD purse indicator and the shop rows.
+    function drawCoinIcon(cx, cy, r) {
+        ctx.fillStyle = "#ffd166";
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(80, 50, 0, 0.55)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.fillStyle = "#fff0a8";
+        ctx.fillRect(cx - r + 2, cy - r + 2, 2, 2);
     }
 
     // XP progress bar directly below the HP bar. Cyan fill to echo
