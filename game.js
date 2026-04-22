@@ -954,18 +954,28 @@
             this.dir = DIR_DOWN;
         }
 
+        // Switch state without a hard reset if the two clips share
+        // frame 0 - keeps the walk <-> idle transition continuous
+        // rather than snapping the foot pose back to neutral each
+        // time motion starts or stops.
         setState(state) {
             if (state === this.state) return;
+            const prev = this.clips[this.state];
+            const next = this.clips[state];
+            const continuous = prev.currentFrame() === next.frames[0];
             this.state = state;
-            this.clips[state].reset();
+            if (!continuous) next.reset();
         }
 
         setDir(dir) {
             this.dir = dir;
         }
 
-        update(dt) {
-            this.clips[this.state].update(dt);
+        // Optional `speedScale` lets callers tie the clip's rate to
+        // motion - a fast run advances the walk cycle faster than a
+        // slow creep. Default 1 keeps old behavior.
+        update(dt, speedScale = 1) {
+            this.clips[this.state].update(dt * speedScale);
         }
 
         get col() {
@@ -975,6 +985,15 @@
         get row() {
             return this.dir;
         }
+    }
+
+    // Vertical pixel bob for a given sprite column. Cols 1 / 2 are
+    // the walk mid-steps and col 3 is the idle breath-in pose - all
+    // three raise the body by 1px so the shoulders float briefly.
+    // drawPlayerFrame and the cloak anchor share this table so the
+    // cloak stays glued to the shoulders through the bob.
+    function playerFrameBob(col) {
+        return col === 0 ? 0 : -1;
     }
 
     // Helper: pick a cardinal direction from a motion vector. Returns
@@ -1035,10 +1054,14 @@
         ctx.ellipse(ox + 16, oy + 29, 8, 3, 0, 0, Math.PI * 2);
         ctx.fill();
 
-        // Vertical bob on the "up" steps of the walk cycle.
-        const bob = frame === 1 ? -1 : frame === 3 ? -1 : 0;
+        // Vertical body bob - 1px up on every frame except the plant
+        // (col 0). This is the same table the cloak anchor reads so
+        // shoulders and cloak lift together.
+        const bob = playerFrameBob(frame);
 
-        // --- Legs / boots (drawn before robe so the hem overlaps) ---
+        // --- Legs / boots ---
+        // Cols 1 / 2 are walk mid-steps with alternating feet. Cols
+        // 0 / 3 share the neutral stance (standing tall vs. breathing).
         ctx.fillStyle = BOOT;
         const legY = oy + 24;
         if (frame === 1) {
@@ -1192,7 +1215,11 @@
     // every entity has its own frame timer.
     function makePlayerAnimator() {
         return new Animator({
-            idle: new Animation([0], 1.0, true),
+            // Two-frame breath: neutral stand -> shoulders lift 1px.
+            // Slow tempo (~1.7s/cycle) reads as breathing, not fidgeting.
+            idle: new Animation([0, 3], 0.85, true),
+            // Classic step-return-step-return cycle. Frames 1 and 2
+            // are mid-step poses with a body bob; frame 0 is the plant.
             walk: new Animation([1, 0, 2, 0], 0.12, true),
         }, "idle");
     }
@@ -2325,8 +2352,12 @@
             const speed = Math.hypot(vx, vy);
             const moving = speed > 5;
 
+            // Shoulder anchor tracks the sprite's per-frame vertical
+            // bob so the cloak stays glued to the body through the
+            // walk / breath cycles instead of detaching by 1px.
+            const bob = playerFrameBob(player.animator.col);
             this.points[0].x = player.x + this.anchorOffsetX;
-            this.points[0].y = player.y + this.anchorOffsetY;
+            this.points[0].y = player.y + this.anchorOffsetY + bob;
 
             // Drag direction: opposite velocity when moving, else down.
             let dragX, dragY;
@@ -6401,9 +6432,16 @@
 
         // "Moving" for the animator is velocity-based so the walk
         // cycle keeps playing during the glide-to-stop deceleration.
+        // Walk cadence scales with actual speed so a slow creep
+        // animates slower than a full-speed run - clamped so it
+        // never grinds to a halt or blurs at max pace.
         const moving = Math.abs(player.vx) + Math.abs(player.vy) > 5;
         player.animator.setState(moving ? "walk" : "idle");
-        player.animator.update(dt);
+        const speed = Math.hypot(player.vx, player.vy);
+        const animScale = moving
+            ? Math.max(0.45, Math.min(1.3, speed / player.speed))
+            : 1;
+        player.animator.update(dt, animScale);
         cloak.update(dt);
         aura.update(dt);
 
