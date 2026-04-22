@@ -3925,6 +3925,62 @@
     const FOLLOW_SEPARATION  = 26;    // below this, followers repel
     const FOLLOW_MAX_SPEED_X = 2.2;   // speed multiplier cap when far
 
+    // Short window between any two squad attacks. Prevents multiple
+    // followers from resolving a strike on the exact same tick, which
+    // reads as a single chaotic burst rather than a coordinated squad.
+    // Hit at >10 attacks/s across the whole squad cap of 6; feels busy
+    // but readable.
+    let _squadBeatTimer = 0;
+    const SQUAD_BEAT_INTERVAL = 0.08;
+
+    // Squad attack VFX pool. Each entry is a short-lived world-space
+    // marker: an expanding ring for melee impact or a brief muzzle
+    // flash for ranged shots. The array is appended / spliced in
+    // place, so a frame of combat with 6 followers tops out at ~6
+    // entries - trivial for mobile.
+    const squadFx = [];
+    function spawnSquadFx(x, y, kind, color) {
+        squadFx.push({
+            x, y, kind,
+            color: color || "#ffffff",
+            timer: 0.18,
+            duration: 0.18,
+        });
+    }
+    function updateSquadFx(dt) {
+        for (let i = squadFx.length - 1; i >= 0; i--) {
+            const fx = squadFx[i];
+            fx.timer -= dt;
+            if (fx.timer <= 0) squadFx.splice(i, 1);
+        }
+    }
+    function drawSquadFx(ctx) {
+        for (const fx of squadFx) {
+            const t = 1 - fx.timer / fx.duration;  // 0..1 progress
+            ctx.save();
+            if (fx.kind === "slash") {
+                // Expanding ring around the impact point.
+                const r = 6 + t * 18;
+                ctx.globalAlpha = (1 - t) * 0.9;
+                ctx.strokeStyle = fx.color;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(fx.x, fx.y, r, 0, Math.PI * 2);
+                ctx.stroke();
+            } else {
+                // Muzzle flash - quick shrinking dot at the follower's
+                // firing point; reads as "something was shot from here".
+                const r = Math.max(1, 6 - t * 5);
+                ctx.globalAlpha = (1 - t) * 0.9;
+                ctx.fillStyle = fx.color;
+                ctx.beginPath();
+                ctx.arc(fx.x, fx.y, r, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.restore();
+        }
+    }
+
     // Remove a Npc instance from whichever level's npcs array it
     // currently lives in. Returns the level id it was plucked from,
     // or null if it wasn't found anywhere. Recorded on the NPC as
@@ -3973,6 +4029,10 @@
         const tcx = f.target.x + f.target.width / 2;
         const tcy = f.target.y + f.target.height / 2;
         f.attackFlashTimer = 0.12;
+        // Tiny shake on every squad swing - just enough to register
+        // impact without muddying up real threats. Clamps via the
+        // shake module's existing peak-preserve rule.
+        shake.trigger(role.kind === "ranged" ? 2 : 3, 0.08);
 
         if (role.kind === "ranged") {
             const dx = tcx - fcx;
@@ -3990,13 +4050,20 @@
                 age: 0,
                 alive: true,
             });
+            // Muzzle flash at the firing point, tinted with the
+            // role's accent color so shots are visually tagged to
+            // their shooter.
+            spawnSquadFx(fcx, fcy, "muzzle", role.accentColor);
             return;
         }
 
         // Melee / tank: single-target hit with the target's existing
         // hit-flash + knockback. Counts as a clean defeat like any
-        // other damage source.
+        // other damage source. Spawn an expanding slash ring at the
+        // impact point so the player sees WHICH enemy got hit by a
+        // squadmate - critical when multiple followers are engaged.
         f.target.takeHit(role.attackDamage, { x: fcx, y: fcy });
+        spawnSquadFx(tcx, tcy, "slash", role.accentColor);
         if (!f.target.alive) onEnemyDefeated(f.target);
     }
 
@@ -4028,6 +4095,13 @@
         const pcx = player.x + player.width / 2;
         const pcy = player.y + player.height / 2;
         const hostile = !isSafeZone();
+
+        // Tick the shared beat + the VFX pool alongside per-follower
+        // timers so combat effects decay even if no one is engaging.
+        if (_squadBeatTimer > 0) {
+            _squadBeatTimer = Math.max(0, _squadBeatTimer - dt);
+        }
+        updateSquadFx(dt);
 
         for (let i = 0; i < followers.length; i++) {
             const f = followers[i];
@@ -4098,10 +4172,15 @@
                 }
                 faceDir = dirFromVector(tdx, tdy);
 
+                // Beat gate: if another follower already fired this
+                // tiny window, hold the swing for a few frames so
+                // strikes space out instead of stacking on one beat.
                 if (tdist <= role.attackRange &&
-                    f.attackCooldownTimer <= 0) {
+                    f.attackCooldownTimer <= 0 &&
+                    _squadBeatTimer <= 0) {
                     performFollowerAttack(f);
                     f.attackCooldownTimer = role.attackCooldown;
+                    _squadBeatTimer = SQUAD_BEAT_INTERVAL;
                 }
             } else {
                 // follow or retreat: head to the formation slot.
@@ -6458,13 +6537,17 @@
     // up live NPC refs by id.
     const companions = {
         baseMax: 2,
+        hardCap: 6,
 
         maxSize() {
-            // chapterOrder indexOf: chapter1 = 0, chapter6 = 5. Cap
-            // is 2 at chapter1 (idx 0), +1 per chapter after, so
-            // chapter2 = 3, chapter3 = 4, ..., chapter6 = 7.
+            // Per-chapter growth: chapter1 (idx 0) = 2, +1 per
+            // advanced chapter. Hard-capped at 6 so the formation
+            // stays readable and enemies don't vanish under a mob.
+            //   chapter1 -> 2      chapter4 -> 5
+            //   chapter2 -> 3      chapter5 -> 6
+            //   chapter3 -> 4      chapter6 -> 6 (capped)
             const idx = Math.max(0, story.chapterOrder.indexOf(story.state));
-            return this.baseMax + idx;
+            return Math.min(this.hardCap, this.baseMax + idx);
         },
 
         has(npcId) {
@@ -6505,7 +6588,10 @@
             npc.iframes = 0;
             npc.fightState = "follow";
             npc.target = null;
-            npc.attackCooldownTimer = 0;
+            // Stagger initial cooldown so fresh recruits don't all
+            // wind up firing on the same tick the first time they
+            // engage a shared pack of enemies.
+            npc.attackCooldownTimer = Math.random() * 0.35;
             npc.attackFlashTimer = 0;  // brief on-strike hit-flash cue
 
             followers.push(npc);
@@ -8828,6 +8914,11 @@
         // Projectiles over everything else in the world layer.
         drawProjectiles(ctx);
 
+        // Squad attack VFX (slash rings on melee hits, muzzle flashes
+        // on ranged shots) sit above projectiles so they punctuate
+        // the shot visibly rather than getting washed out behind one.
+        drawSquadFx(ctx);
+
         ctx.restore();
 
         // --- Screen space (HUD) ---
@@ -8849,6 +8940,7 @@
         interactButton.draw(ctx);
         if (gameState === "playing") pauseButton.draw(ctx);
         drawQuestPanel();
+        drawSquadIndicator();
 
         if (stats.levelUpToast > 0) drawLevelUpToast();
         if (questLog.toastTimer > 0) drawQuestToast();
@@ -9098,6 +9190,44 @@
     // viewports and drops below the stats panel on narrow (portrait)
     // viewports so the two never overlap. Uses the same dark-glass +
     // shadowed-text style as the rest of the HUD.
+    // Small top-right squad readout. Lives below the pause button so
+    // touch taps on the pause icon don't graze this text. Hidden
+    // entirely when no one has been recruited yet, so normal-campaign
+    // players see no new clutter until they bring a warrior along.
+    function drawSquadIndicator() {
+        const max = companions.maxSize();
+        const n = player.squad.length;
+        if (n === 0 && max <= companions.baseMax) return;
+
+        const w = 84;
+        const h = 22;
+        // Pause button is at (VIEW_W - 48, 12) with w=36, h=36, so
+        // it ends near y=48. Tuck the readout just below.
+        const x = VIEW_W - w - 12;
+        const y = 54;
+
+        ctx.save();
+        ctx.globalAlpha = 0.78;
+        roundRectPath(ctx, x, y, w, h, 5);
+        ctx.fillStyle = "rgba(20, 20, 30, 0.82)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255, 209, 102, 0.32)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        drawShadowedText("SQD", x + 8, y + h / 2,
+            "#a0a0b8", "bold 10px system-ui, sans-serif");
+        ctx.textAlign = "right";
+        // Bright gold when you have room to recruit, dim when capped.
+        const color = n < max ? "#ffd166" : "#e0a050";
+        drawShadowedText(`${n}/${max}`, x + w - 8, y + h / 2,
+            color, "bold 13px system-ui, sans-serif");
+        ctx.restore();
+    }
+
     function drawQuestPanel() {
         const w = 240;
         const h = 64;
