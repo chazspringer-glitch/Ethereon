@@ -5772,7 +5772,7 @@
             // `e.bounds()` scratch rect so no allocation per hit.
             if (p.alive) {
                 for (const e of enemies) {
-                    if (!e.alive) continue;
+                    if (!e.alive || e.ally) continue;
                     const b = e.bounds();
                     if (
                         p.x < b.x + b.w && p.x + p.w > b.x &&
@@ -5955,7 +5955,7 @@
         const cy = player.y + player.height / 2;
         const r2 = swordSpin.radius * swordSpin.radius;
         for (const e of enemies) {
-            if (!e.alive || swordSpin.hitEnemies.has(e)) continue;
+            if (!e.alive || e.ally || swordSpin.hitEnemies.has(e)) continue;
             const ex = e.x + e.width / 2;
             const ey = e.y + e.height / 2;
             const dx = ex - cx;
@@ -6106,7 +6106,7 @@
         const PERP_PAD = 12;
 
         for (const e of enemies) {
-            if (!e.alive) continue;
+            if (!e.alive || e.ally) continue;
             // For one-shot mode (medium), bail if we already hit this
             // enemy this beam.
             if (!continuous && energyBeam.hitEnemies.has(e)) continue;
@@ -6289,7 +6289,7 @@
         const r2 = powerMove.radius * powerMove.radius;
 
         for (const e of enemies) {
-            if (!e.alive || powerMove.hitEnemies.has(e)) continue;
+            if (!e.alive || e.ally || powerMove.hitEnemies.has(e)) continue;
             const ex = e.x + e.width / 2;
             const ey = e.y + e.height / 2;
             const dx = ex - cx;
@@ -6422,7 +6422,7 @@
         const r2 = superPower.radius * superPower.radius;
 
         for (const e of enemies) {
-            if (!e.alive || superPower.hitEnemies.has(e)) continue;
+            if (!e.alive || e.ally || superPower.hitEnemies.has(e)) continue;
             const ex = e.x + e.width / 2;
             const ey = e.y + e.height / 2;
             const dx = ex - cx;
@@ -6588,7 +6588,7 @@
         const r2 = currentR * currentR;
 
         for (const e of enemies) {
-            if (!e.alive || specialAttack.hitEnemies.has(e)) continue;
+            if (!e.alive || e.ally || specialAttack.hitEnemies.has(e)) continue;
             const ex = e.x + e.width / 2;
             const ey = e.y + e.height / 2;
             const dx = ex - cx;
@@ -6744,6 +6744,157 @@
     // `alive` acts as a tombstone; the enemies array is compacted
     // once per frame so dead enemies don't linger in memory.
     // ---------------------------------------------------------------
+
+    // ---------------------------------------------------------------
+    // Enemy factions
+    //
+    // Each faction is a small preset layered over the Enemy's base
+    // opts at construction time: stat scales, tint, behavior flags.
+    // Enemy.update reads the flags to branch into faction-specific
+    // behavior each tick:
+    //   shadow   - teleport closer to target on a cooldown.
+    //   hunter   - pack bonus: speed boost when near other hunters.
+    //   sentinel - ranged + buff aura: fires a slow bolt at the
+    //              player, and any enemy within AURA_R gets a
+    //              per-frame speed boost.
+    //   guardian - heavy: slow + hard-hitting, starts neutral
+    //              (doesn't pursue until provoked); player can
+    //              press E next to one to offer alliance.
+    // ---------------------------------------------------------------
+    const FACTIONS = {
+        shadow: {
+            id: "shadow",
+            name: "Shadow Walker",
+            tint: "rgba(58, 26, 74, 0.5)",
+            teleport: true,
+            teleportMin: 2.0,
+            teleportMax: 3.5,
+            hpScale: 0.9,
+            speedScale: 1.05,
+        },
+        hunter: {
+            id: "hunter",
+            name: "Hunter",
+            tint: "rgba(140, 58, 26, 0.45)",
+            pack: true,
+            hpScale: 0.9,
+            speedScale: 1.0,
+        },
+        sentinel: {
+            id: "sentinel",
+            name: "Sentinel",
+            tint: "rgba(42, 90, 58, 0.45)",
+            ranged: true,
+            buffAura: true,
+            buffSpeedMult: 1.25,
+            preferredRange: 220,
+            hpScale: 1.3,
+            speedScale: 0.7,
+        },
+        guardian: {
+            id: "guardian",
+            name: "Forest Guardian",
+            tint: "rgba(85, 115, 74, 0.48)",
+            heavy: true,
+            neutral: true,
+            knockbackScale: 0.4,
+            hpScale: 2.0,
+            speedScale: 0.55,
+            damageScale: 1.6,
+        },
+    };
+
+    // Hostile projectiles owned by enemy factions (sentinel bolts).
+    // Kept separate from the player's `projectiles` array so the
+    // collision path can target the player exclusively.
+    const hostileProjectiles = [];
+
+    function spawnHostileProjectile(fromX, fromY, toX, toY, dmg, color) {
+        const dx = toX - fromX;
+        const dy = toY - fromY;
+        const mag = Math.hypot(dx, dy) || 1;
+        const speed = 240;
+        hostileProjectiles.push({
+            x: fromX - 5, y: fromY - 5,
+            w: 10, h: 10,
+            vx: (dx / mag) * speed,
+            vy: (dy / mag) * speed,
+            life: 1.6,
+            damage: Math.max(1, dmg | 0),
+            color: color || "#b9f0c9",
+            age: 0, alive: true,
+        });
+    }
+
+    function updateHostileProjectiles(dt) {
+        if (!hostileProjectiles.length) return;
+        for (let i = hostileProjectiles.length - 1; i >= 0; i--) {
+            const p = hostileProjectiles[i];
+            p.age += dt;
+            p.life -= dt;
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            if (p.life <= 0 ||
+                p.x < 0 || p.y < 0 ||
+                p.x > WORLD_W || p.y > WORLD_H) {
+                p.alive = false;
+            }
+            if (p.alive && player.alive) {
+                const px = player.x, py = player.y;
+                if (p.x < px + player.width && p.x + p.w > px &&
+                    p.y < py + player.height && p.y + p.h > py) {
+                    damagePlayer(p.damage);
+                    p.alive = false;
+                }
+            }
+            if (!p.alive) hostileProjectiles.splice(i, 1);
+        }
+    }
+
+    function drawHostileProjectiles(ctx) {
+        for (const p of hostileProjectiles) {
+            const cx = Math.round(p.x + p.w / 2);
+            const cy = Math.round(p.y + p.h / 2);
+            ctx.save();
+            ctx.globalAlpha = 0.55;
+            ctx.fillStyle = p.color;
+            ctx.beginPath();
+            ctx.arc(cx, cy, 8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = "#ffffff";
+            ctx.beginPath();
+            ctx.arc(cx, cy, 2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+    }
+
+    // Per-frame synergy pass. Zeroes buffMult on every enemy, then
+    // sentinel auras stack a speed multiplier onto any enemy within
+    // AURA_R. Compose by max() so stacked auras don't runaway-speed.
+    function applyFactionSynergies() {
+        const AURA_R_SQ = 120 * 120;
+        for (const e of enemies) {
+            if (!e.alive) continue;
+            e.buffMult = 1;
+        }
+        for (const s of enemies) {
+            if (!s.alive || !s.faction || !s.faction.buffAura) continue;
+            const scx = s.x + s.width / 2;
+            const scy = s.y + s.height / 2;
+            const mult = s.faction.buffSpeedMult || 1.2;
+            for (const e of enemies) {
+                if (e === s || !e.alive) continue;
+                const dx = (e.x + e.width / 2) - scx;
+                const dy = (e.y + e.height / 2) - scy;
+                if (dx * dx + dy * dy < AURA_R_SQ && mult > e.buffMult) {
+                    e.buffMult = mult;
+                }
+            }
+        }
+    }
+
     class Enemy {
         constructor(x, y, opts = {}) {
             this.x = x;
@@ -6791,6 +6942,34 @@
             this.kbVx = 0;
             this.kbVy = 0;
             this.knockbackScale = opts.knockbackScale ?? 1.0;
+
+            // Faction preset. Layered AFTER the base opts so per-
+            // zone base stats shine through when no faction is set.
+            this.factionId = opts.faction ?? null;
+            this.faction = this.factionId ? FACTIONS[this.factionId] : null;
+            if (this.faction) {
+                const f = this.faction;
+                this.hp = Math.max(1, Math.round(this.hp * (f.hpScale ?? 1)));
+                this.maxHp = this.hp;
+                this.speed = this.speed * (f.speedScale ?? 1);
+                if (f.damageScale) {
+                    this.contactDamage = Math.round(this.contactDamage * f.damageScale);
+                }
+                if (f.knockbackScale != null) this.knockbackScale = f.knockbackScale;
+                this.neutral = !!f.neutral;
+                this.ally = false;
+                this.buffMult = 1;
+                if (f.teleport) {
+                    this.teleportTimer =
+                        f.teleportMin + Math.random() * (f.teleportMax - f.teleportMin);
+                }
+                if (f.ranged) {
+                    this.rangedCd = 0.6 + Math.random() * 0.8;
+                    this.rangedCdMax = 1.8;
+                }
+            }
+            // Pack bonus accumulator (hunter).
+            this._packBonus = 1;
         }
 
         update(dt, target) {
@@ -6821,29 +7000,110 @@
                 return;
             }
 
+            // Faction target override. Allies attack nearest hostile
+            // enemy (not the player). Neutral guardians idle until
+            // provoked (they flip to hostile via takeHit).
+            let effectiveTarget = target;
+            if (this.ally) {
+                effectiveTarget = nearestHostileEnemy(this) || null;
+                if (!effectiveTarget) {
+                    // No one to fight; roam near home.
+                    this.animator.setState("idle");
+                    this.animator.update(dt);
+                    return;
+                }
+            } else if (this.neutral) {
+                // Neutral: stand still, animate idle, take no action.
+                this.animator.setState("idle");
+                this.animator.update(dt);
+                return;
+            }
+
             // Steer toward the target's center using a unit vector,
             // so diagonal approach isn't faster than cardinal approach.
             const cx = this.x + this.width / 2;
             const cy = this.y + this.height / 2;
-            const tx = target.x + target.width / 2;
-            const ty = target.y + target.height / 2;
+            const tx = effectiveTarget.x + effectiveTarget.width / 2;
+            const ty = effectiveTarget.y + effectiveTarget.height / 2;
 
             const dx = tx - cx;
             const dy = ty - cy;
             const dist = Math.hypot(dx, dy);
 
-            let moving = false;
-            if (dist > 0.5) {
-                const inv = 1 / dist;
-                this.x += dx * inv * this.speed * dt;
-                this.y += dy * inv * this.speed * dt;
-                moving = true;
+            // Shadow: periodically teleport closer to the target.
+            // Caps distance so it doesn't land on top of the player.
+            if (this.faction && this.faction.teleport && !this.ally) {
+                this.teleportTimer -= dt;
+                if (this.teleportTimer <= 0 && dist > 80) {
+                    const step = Math.max(80, dist * 0.5);
+                    this.x += (dx / (dist || 1)) * step;
+                    this.y += (dy / (dist || 1)) * step;
+                    this.hitFlash = 0.12;  // brief blink cue
+                    this.teleportTimer =
+                        this.faction.teleportMin +
+                        Math.random() *
+                        (this.faction.teleportMax - this.faction.teleportMin);
+                }
+            }
 
+            // Hunter pack bonus: proximity to other hunters boosts
+            // speed. Counted here instead of in synergies because
+            // the pack stat is intrinsic to the hunter's AI.
+            if (this.faction && this.faction.pack) {
+                let packmates = 0;
+                for (const e of enemies) {
+                    if (e === this || !e.alive) continue;
+                    if (!e.faction || !e.faction.pack) continue;
+                    const edx = (e.x + e.width / 2) - cx;
+                    const edy = (e.y + e.height / 2) - cy;
+                    if (edx * edx + edy * edy < 150 * 150) packmates++;
+                }
+                this._packBonus = 1 + Math.min(3, packmates) * 0.12;
+            } else {
+                this._packBonus = 1;
+            }
+
+            // Sentinel: hold preferred distance from the target +
+            // fire on cooldown when within line of sight range.
+            let moveStep = this.speed * (this.buffMult || 1) *
+                           (this._packBonus || 1) * dt;
+            let wantsMove = dist > 0.5;
+            if (this.faction && this.faction.ranged && !this.ally) {
+                const pref = this.faction.preferredRange || 200;
+                if (dist < pref - 30) {
+                    // Too close: back off instead of approaching.
+                    this.x -= (dx / dist) * moveStep;
+                    this.y -= (dy / dist) * moveStep;
+                    wantsMove = true;
+                } else if (dist > pref + 30) {
+                    this.x += (dx / dist) * moveStep;
+                    this.y += (dy / dist) * moveStep;
+                    wantsMove = true;
+                } else {
+                    wantsMove = false;
+                }
+                // Ranged fire.
+                this.rangedCd -= dt;
+                if (this.rangedCd <= 0 && dist < pref + 80) {
+                    this.rangedCd = this.rangedCdMax;
+                    spawnHostileProjectile(
+                        cx, cy, tx, ty,
+                        Math.max(1, Math.round(this.contactDamage * 0.6)),
+                        "#b9f0c9"
+                    );
+                }
+            } else if (wantsMove) {
+                const inv = 1 / dist;
+                this.x += dx * inv * moveStep;
+                this.y += dy * inv * moveStep;
+            }
+
+            if (wantsMove) {
                 const d = dirFromVector(dx, dy);
                 if (d !== null) this.animator.setDir(d);
             }
 
-            this.animator.setState(moving ? "walk" : "idle");
+            this.animator.setState(wantsMove ? "walk" : "idle");
             this.animator.update(dt);
         }
 
@@ -6852,6 +7112,30 @@
             const x = Math.round(this.x);
             const y = Math.round(this.y);
             this.sheet.draw(ctx, this.animator.col, this.animator.row, x, y);
+
+            // Faction tint - one source-atop fillRect per tinted
+            // enemy. Shadow / hunter / sentinel / guardian each
+            // carry a distinct color so the crowd reads as mixed.
+            if (this.faction) {
+                ctx.save();
+                ctx.globalCompositeOperation = "source-atop";
+                ctx.fillStyle = this.faction.tint;
+                ctx.fillRect(x, y, this.width, this.height);
+                ctx.restore();
+            }
+
+            // Allied guardian marker - a thin green ring so the
+            // player can tell at a glance which creature is with
+            // them instead of against them.
+            if (this.ally) {
+                ctx.save();
+                ctx.strokeStyle = "rgba(130, 220, 120, 0.8)";
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(x + this.width / 2, y + this.height - 2, 10, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.restore();
+            }
 
             // Hit flash - white tint composited only over the sprite's
             // opaque pixels via "source-atop". Cheap: one extra fillRect
@@ -6880,6 +7164,10 @@
             this.hp -= damage;
             this.hitFlash = this.hitFlashDuration;
             sound.play("enemyHit");
+            // Neutral guardian provoked: flips hostile and pursues
+            // the player from the next tick. Offering alliance (E)
+            // would have been the peaceful path.
+            if (this.neutral && !this.ally) this.neutral = false;
 
             // Small screen shake on impact; slightly bigger for
             // kill hits so the payoff reads.
@@ -7228,6 +7516,29 @@
     // opts, the wave index (0..total-1), and the player's current
     // strength. Keeps the math in one place so adaptive tuning is
     // easy to read + tweak.
+    // Strength-weighted faction mix. Weak players face mostly
+    // shadow + hunter; stronger players see sentinels and the
+    // occasional guardian. buildWave picks a faction for each
+    // spawn slot from this table.
+    function pickFactionForSlot(strength) {
+        // Weights sum to 100. Rebalanced by strength so late-game
+        // waves skew toward the harder factions without dropping
+        // variety completely.
+        let wShadow, wHunter, wSentinel, wGuardian;
+        if (strength < 2) {
+            wShadow = 55; wHunter = 35; wSentinel = 8;  wGuardian = 2;
+        } else if (strength < 5) {
+            wShadow = 40; wHunter = 35; wSentinel = 18; wGuardian = 7;
+        } else {
+            wShadow = 30; wHunter = 28; wSentinel = 28; wGuardian = 14;
+        }
+        let r = Math.random() * (wShadow + wHunter + wSentinel + wGuardian);
+        if ((r -= wShadow)   < 0) return "shadow";
+        if ((r -= wHunter)   < 0) return "hunter";
+        if ((r -= wSentinel) < 0) return "sentinel";
+        return "guardian";
+    }
+
     function buildWave(index, total, strength, baseOpts, perWaveBase) {
         // Wave count: base + index ramp + strength bump, hard-capped
         // so stronger players don't summon literal hordes. Larger
@@ -7252,6 +7563,14 @@
         if (baseOpts.reward != null)        opts.reward        = baseOpts.reward;
         if (baseOpts.xpReward != null)      opts.xpReward      = baseOpts.xpReward;
 
+        // Per-slot faction roll. Separated so rareOpts-composed
+        // elites still carry the faction flavor into their stats
+        // and synergies.
+        const factions = new Array(count);
+        for (let i = 0; i < count; i++) {
+            factions[i] = pickFactionForSlot(strength);
+        }
+
         // Rare slots: one elite per wave at ~35% chance once the
         // player has a little strength, adding variance without
         // telegraphing the exact spawn index.
@@ -7260,7 +7579,7 @@
         if (count > 0 && Math.random() < rareChance) {
             rareSlots.add(Math.floor(Math.random() * count));
         }
-        return { count, opts, rareSlots };
+        return { count, opts, rareSlots, factions };
     }
 
     function rareOpts(base) {
@@ -7347,6 +7666,7 @@
             this.spawnTimer = 0.15;     // small lead-in before the first spawn
             this.currentOpts = cfg.opts;
             this.rareSlots = cfg.rareSlots;
+            this.currentFactions = cfg.factions || [];
             this.waveState = "active";
             questLog.showToast(
                 `Wave ${this.waveIndex + 1} / ${this.totalWaves}`, 1.8
@@ -7416,9 +7736,15 @@
                     this.spawnTimer = 0.32;
                     const slotIdx = this.spawnIndex;
                     const isRare = this.rareSlots.has(slotIdx);
-                    const opts = isRare
+                    const base = isRare
                         ? rareOpts(this.currentOpts)
                         : this.currentOpts;
+                    // Attach the per-slot faction id so the Enemy
+                    // constructor can layer faction presets.
+                    const faction = this.currentFactions[slotIdx] || null;
+                    const opts = faction
+                        ? Object.assign({}, base, { faction })
+                        : base;
                     const spot = this.findSpot();
                     if (spot) spawnEnemy(spot.x, spot.y, opts);
                     this.spawnQueue--;
@@ -9563,12 +9889,67 @@
     // ---------------------------------------------------------------
     // Enemy update + collision with the player's attack
     // ---------------------------------------------------------------
+    // Nearest neutral Forest Guardian within a small interact
+    // radius. Used by the interact button to offer alliance.
+    function nearestNeutralGuardian() {
+        const pcx = player.x + player.width / 2;
+        const pcy = player.y + player.height / 2;
+        const R_SQ = 60 * 60;
+        let best = null;
+        let bestD = R_SQ;
+        for (const e of enemies) {
+            if (!e.alive || !e.neutral || e.ally) continue;
+            const dx = (e.x + e.width / 2) - pcx;
+            const dy = (e.y + e.height / 2) - pcy;
+            const d = dx * dx + dy * dy;
+            if (d < bestD) { best = e; bestD = d; }
+        }
+        return best;
+    }
+
+    // Convert a neutral guardian into an ally. Removes it from the
+    // wave kill count (it's no longer a hostile to clear) and flips
+    // AI to hunt other enemies.
+    function allyWithGuardian(e) {
+        if (!e || !e.neutral || e.ally) return;
+        e.neutral = false;
+        e.ally = true;
+        // The guardian no longer blocks wave clear - the spawner's
+        // remainingToKill should drop to reflect that.
+        spawner.onEnemyDefeated(e);
+        questLog.showToast("Forest Guardian stands with you.", 2.4);
+        sound.play("levelUp");
+    }
+
+    // Nearest live enemy that's hostile to an ally. Used by allied
+    // guardians to pick a target each tick.
+    function nearestHostileEnemy(from) {
+        const fcx = from.x + from.width / 2;
+        const fcy = from.y + from.height / 2;
+        let best = null;
+        let bestD = 360 * 360;
+        for (const e of enemies) {
+            if (e === from || !e.alive) continue;
+            if (e.ally || e.neutral) continue;
+            const dx = (e.x + e.width / 2) - fcx;
+            const dy = (e.y + e.height / 2) - fcy;
+            const d = dx * dx + dy * dy;
+            if (d < bestD) { best = e; bestD = d; }
+        }
+        return best;
+    }
+
     function updateEnemies(dt) {
         // Defense in depth: the main tick already gates this on
         // !isSafeZone, but leaving the check here means any future
         // caller (cutscene, debug tool) can't accidentally tick
         // enemy AI inside a safe zone.
         if (isSafeZone()) return;
+
+        // Apply per-frame faction synergies (sentinel aura) before
+        // any enemy steps, so the buffMult is fresh when each enemy
+        // reads it during its AI tick.
+        applyFactionSynergies();
 
         // Reverse iteration lets us splice dead enemies cheaply.
         for (let i = enemies.length - 1; i >= 0; i--) {
@@ -9589,7 +9970,7 @@
         const px = player.x + player.width / 2;
         const py = player.y + player.height / 2;
         for (const e of enemies) {
-            if (!e.alive || attack.hitEnemies.has(e)) continue;
+            if (!e.alive || e.ally || attack.hitEnemies.has(e)) continue;
             if (rectsOverlap(box, e.bounds())) {
                 e.takeHit(attack.damage, { x: px, y: py });
                 attack.hitEnemies.add(e);
@@ -9610,14 +9991,15 @@
     function updateEnemyContact() {
         if (isSafeZone()) return;
 
-        // Player contact.
+        // Player contact - allies and neutrals skip, only hostiles
+        // can damage on overlap.
         if (player.alive) {
             _playerBox.x = player.x;
             _playerBox.y = player.y;
             _playerBox.w = player.width;
             _playerBox.h = player.height;
             for (const e of enemies) {
-                if (!e.alive) continue;
+                if (!e.alive || e.ally || e.neutral) continue;
                 if (rectsOverlap(_playerBox, e.bounds())) {
                     damagePlayer(e.contactDamage);
                     break;
@@ -9625,18 +10007,37 @@
             }
         }
 
-        // Follower contact. Each follower takes at most one damage
-        // event per frame (matching the player rule). Iframes gate
-        // the next hit, so crowds of enemies can't rapid-fire a
-        // follower below zero in a single tick.
+        // Follower contact - same ally / neutral exclusion so a
+        // guardian on the squad's side isn't damaging them.
         for (const f of followers) {
             if (f.iframes > 0) continue;
             for (const e of enemies) {
-                if (!e.alive) continue;
+                if (!e.alive || e.ally || e.neutral) continue;
                 const b = e.bounds();
                 if (f.x < b.x + b.w && f.x + f.width > b.x &&
                     f.y < b.y + b.h && f.y + f.height > b.y) {
                     damageFollower(f, e.contactDamage);
+                    break;
+                }
+            }
+        }
+
+        // Allied-guardian contact: allies damage hostiles they touch,
+        // using their own contact damage with a small per-pair
+        // cooldown on the aggressor (stored on the ally) so the
+        // damage ticks once per ~0.5s instead of each frame.
+        const now = performance.now() / 1000;
+        for (const a of enemies) {
+            if (!a.alive || !a.ally) continue;
+            if ((a._nextSwingAt ?? 0) > now) continue;
+            const ab = a.bounds();
+            for (const h of enemies) {
+                if (h === a || !h.alive || h.ally || h.neutral) continue;
+                if (rectsOverlap(ab, h.bounds())) {
+                    h.takeHit(Math.max(1, a.contactDamage | 0),
+                              { x: a.x + a.width / 2, y: a.y + a.height / 2 });
+                    a._nextSwingAt = now + 0.5;
+                    if (!h.alive) onEnemyDefeated(h);
                     break;
                 }
             }
@@ -10271,14 +10672,20 @@
         const keyboardInteract = keysJustPressed["e"] || keysJustPressed["E"];
         const touchInteract = interactButton.consumeJustPressed();
         if (keyboardInteract || touchInteract) {
-            // Prefer NPCs (conversation), fall through to lore
-            // objects (discovery). Same key, one interact button.
+            // Prefer NPCs (conversation), then neutral creatures
+            // (offer alliance), then lore objects (discovery). Same
+            // key, one interact button.
             const npcTarget = nearestNpc();
             if (npcTarget) {
                 dialogue.open(npcTarget);
             } else {
-                const loreTarget = nearestLore();
-                if (loreTarget) openLore(loreTarget);
+                const neutral = nearestNeutralGuardian();
+                if (neutral) {
+                    allyWithGuardian(neutral);
+                } else {
+                    const loreTarget = nearestLore();
+                    if (loreTarget) openLore(loreTarget);
+                }
             }
         }
 
@@ -10325,6 +10732,7 @@
             spawner.update(enemyDt);
         }
         updateProjectiles(dt);
+        updateHostileProjectiles(dt);
         updatePlayerStatus(dt);
         updateDrops(dt);
         updateNpcs(dt);
@@ -10872,6 +11280,7 @@
 
         // Projectiles over everything else in the world layer.
         drawProjectiles(ctx);
+        drawHostileProjectiles(ctx);
 
         // Squad attack VFX (slash rings on melee hits, muzzle flashes
         // on ranged shots) sit above projectiles so they punctuate
