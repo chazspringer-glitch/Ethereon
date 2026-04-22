@@ -2893,6 +2893,14 @@
         // the `companions` module and grows per story chapter.
         squad: [],
 
+        // Charge-attack state. isCharging flips true on attack-press,
+        // accumulates chargeTime (clamped at maxCharge) while held,
+        // and fires the weapon on release with a damage multiplier
+        // proportional to how far past the charge threshold we got.
+        isCharging: false,
+        chargeTime: 0,
+        maxCharge: 2,  // seconds
+
         // Currently-equipped weapon index into `weapons[]`.
         // 0 = sword (melee), 1 = energy blast (projectile).
         weaponIndex: 0,
@@ -5089,11 +5097,12 @@
             if (attack.cooldownTimer <= 0) return 1;
             return 1 - attack.cooldownTimer / attack.cooldown;
         },
-        fire(player) {
+        fire(player, mult = 1) {
             // Latch this weapon's damage into the attack module so the
-            // collision path picks it up. Melee variants only need to
-            // ship a different `damage` value.
-            attack.damage = this.damage;
+            // collision path picks it up. Charge attacks multiply it
+            // for this swing only - attack.damage is re-latched every
+            // fire() so the mutation doesn't leak into the next one.
+            attack.damage = Math.max(1, Math.round(this.damage * mult));
             attack.tryStart(player);
         },
         update(_dt) { /* attack module ticks itself */ },
@@ -5116,10 +5125,17 @@
             if (this.cooldownTimer <= 0) return 1;
             return 1 - this.cooldownTimer / this.cooldownMax;
         },
-        fire(player) {
+        fire(player, mult = 1) {
             if (!this.ready) return;
             this.cooldownTimer = this.cooldownMax;
-            spawnProjectile(player, { color: this.color });
+            // Charged shots hit harder and travel a touch slower (bigger,
+            // beefier bolt). Damage defaults to 1 per shot when no mult
+            // is applied, matching the pre-charge baseline.
+            const base = this.damage ?? 1;
+            spawnProjectile(player, {
+                color: this.color,
+                damage: Math.max(1, Math.round(base * mult)),
+            });
             sound.play("attack");
         },
         update(dt) {
@@ -8565,18 +8581,51 @@
     // ---------------------------------------------------------------
     // Combat input - trigger attacks on SPACE, once per press.
     // ---------------------------------------------------------------
-    function updateCombatInput() {
-        if (!player.alive) return;
+    function updateCombatInput(dt) {
+        if (!player.alive) {
+            // Dying mid-charge shouldn't leak state into a respawn.
+            player.isCharging = false;
+            player.chargeTime = 0;
+            return;
+        }
 
-        // Primary attack (weapon)
-        const keyboardAttack = keysJustPressed[" "] || keysJustPressed["Spacebar"];
-        const touchAttack = attackButton.consumeJustPressed();
-        if (keyboardAttack || touchAttack) {
-            // Fires whichever weapon is equipped. Each weapon self-
-            // gates on its own `ready` check, so spam presses that
-            // land on cooldown quietly no-op.
-            currentWeapon().fire(player);
+        // Primary attack: hold to charge, release to fire. Keyboard
+        // space / spacebar and the mobile attack button share the
+        // same `held` signal so both input paths charge identically.
+        // The edge flag on attackButton is consumed regardless so it
+        // doesn't leak to other readers.
+        const keyHeld = !!(keys[" "] || keys["Spacebar"]);
+        const held = keyHeld || attackButton.pressed;
+        attackButton.consumeJustPressed();
+
+        if (held && !player.isCharging) {
+            // Press edge: begin charging. No shot yet - release fires.
+            player.isCharging = true;
+            player.chargeTime = 0;
+        } else if (held && player.isCharging) {
+            // Hold: accumulate up to maxCharge, then hold flat.
+            player.chargeTime = Math.min(
+                player.maxCharge,
+                player.chargeTime + dt
+            );
+        } else if (!held && player.isCharging) {
+            // Release: damage multiplier scales linearly past the
+            // 0.9s charge threshold - 1x for taps, 1.2x at 1.0s,
+            // ~3.2x at the 2.0s cap. Weapon.fire takes the multiplier
+            // so both sword + energy benefit uniformly.
+            const t = player.chargeTime;
+            const mult = 1 + Math.max(0, t - 0.9) * 2;
+            player.isCharging = false;
+            player.chargeTime = 0;
+            currentWeapon().fire(player, mult);
             tutorial.onAttack();
+            if (t >= 1) {
+                // Crossed the charge threshold - punch in a little
+                // extra impact so the charged release reads distinctly
+                // from a tap at the same weapon.
+                flash.trigger(0.35, 0.12);
+                shake.trigger(6, 0.15);
+            }
         }
 
         // Power move (shared across all weapons)
@@ -8764,7 +8813,7 @@
         }
 
         updateMovement(dt);
-        updateCombatInput();
+        updateCombatInput(dt);
         attack.update(dt);
         for (const w of weapons) w.update(dt);
         powerMove.update(dt);
@@ -9053,6 +9102,8 @@
         player.iframes = 0;
         player.vx = 0;
         player.vy = 0;
+        player.isCharging = false;
+        player.chargeTime = 0;
         player.facing.x = 0;
         player.facing.y = 1;
         player.facingDir = DIR_DOWN;
@@ -9990,6 +10041,47 @@
             Math.round(player.x),
             Math.round(player.y)
         );
+
+        // Charge ring - only drawn while actively charging. Thin
+        // circle beneath the sprite's feet that fills clockwise as
+        // charge grows. Turns gold past the charge threshold so the
+        // player sees the moment a tap becomes a charged shot.
+        if (player.isCharging && player.chargeTime > 0.05) {
+            const cx = Math.round(player.x + player.width / 2);
+            const cy = Math.round(player.y + player.height - 2);
+            const frac = Math.min(1, player.chargeTime / player.maxCharge);
+            const readyToRelease = player.chargeTime >= 1;
+            const r = 18;
+
+            ctx.save();
+            ctx.lineWidth = 3;
+            // Track (dim)
+            ctx.strokeStyle = "rgba(0, 0, 0, 0.35)";
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Fill arc
+            ctx.strokeStyle = readyToRelease ? "#ffd166" : "#8ad9ff";
+            ctx.beginPath();
+            ctx.arc(cx, cy, r,
+                -Math.PI / 2,
+                -Math.PI / 2 + frac * Math.PI * 2);
+            ctx.stroke();
+
+            // Pulse outline when fully charged so the player notices
+            // they can release for max damage.
+            if (readyToRelease) {
+                const pulse = 0.4 + 0.4 * Math.abs(Math.sin(performance.now() * 0.012));
+                ctx.globalAlpha = pulse;
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = "#fff6d6";
+                ctx.beginPath();
+                ctx.arc(cx, cy, r + 3, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+            ctx.restore();
+        }
     }
 
     function drawHealthBar() {
