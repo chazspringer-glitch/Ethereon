@@ -2471,6 +2471,106 @@
     };
 
     // ---------------------------------------------------------------
+    // Battlefield Nova button (touch / pointer)
+    //
+    // Stacked above the three-button POWER row so it sits a row by
+    // itself - keeps the default cluster uncrowded while giving the
+    // ultimate a clear home. Mirrors the SUPER button visuals: a
+    // cooldown pie-slice + magic-cost gate combined.
+    // ---------------------------------------------------------------
+    const novaButton = {
+        x: 0, y: 0,
+        radius: 38,
+
+        layout() {
+            // Right-aligned, stacked above the POWER button's row.
+            this.x = VIEW_W - 80;
+            this.y = VIEW_H - 260;
+        },
+
+        pressed: false,
+        pointerId: null,
+        justPressed: false,
+
+        contains(x, y) {
+            const dx = x - this.x;
+            const dy = y - this.y;
+            return dx * dx + dy * dy <= this.radius * this.radius;
+        },
+
+        onDown(x, y, pointerId) {
+            if (this.pressed) return false;
+            if (!this.contains(x, y)) return false;
+            this.pressed = true;
+            this.pointerId = pointerId;
+            this.justPressed = true;
+            return true;
+        },
+
+        onUp(pointerId) {
+            if (this.pointerId !== pointerId) return;
+            this.pressed = false;
+            this.pointerId = null;
+        },
+
+        consumeJustPressed() {
+            const v = this.justPressed;
+            this.justPressed = false;
+            return v;
+        },
+
+        draw(ctx) {
+            const cy = this.y + (this.pressed ? 2 : 0);
+            const ready = battlefieldNova.ready;
+            // Dual fill: magic progress + cooldown progress. Show
+            // the more-restrictive one so the player sees which gate
+            // is still closed. Cooldown typically dominates.
+            const magicFrac = Math.min(1, player.magic / battlefieldNova.magicCost);
+            const cdFrac = battlefieldNova.cooldownFrac();
+            const frac = Math.min(magicFrac, cdFrac);
+
+            ctx.save();
+            ctx.globalAlpha = this.pressed ? 0.95 : 0.62;
+            ctx.fillStyle = ready ? "#ff7f3a" : "#5a2f1a";
+            ctx.beginPath();
+            ctx.arc(this.x, cy, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+
+            if (!ready) {
+                ctx.globalAlpha = 0.85;
+                ctx.fillStyle = "rgba(0, 0, 0, 0.58)";
+                ctx.beginPath();
+                ctx.moveTo(this.x, cy);
+                ctx.arc(
+                    this.x, cy, this.radius - 2,
+                    -Math.PI / 2 + frac * Math.PI * 2,
+                    Math.PI * 1.5
+                );
+                ctx.closePath();
+                ctx.fill();
+            }
+
+            ctx.globalAlpha = 0.95;
+            ctx.strokeStyle = ready ? "#ffe1c6" : "#888";
+            ctx.lineWidth = this.pressed ? 4 : 3;
+            ctx.beginPath();
+            ctx.arc(this.x, cy, this.radius, 0, Math.PI * 2);
+            ctx.stroke();
+
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = "#1a1a24";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.font = "bold 17px system-ui, sans-serif";
+            ctx.fillText("◎", this.x, cy - 7);
+            ctx.font = "bold 10px system-ui, sans-serif";
+            ctx.fillText("NOVA", this.x, cy + 8);
+
+            ctx.restore();
+        },
+    };
+
+    // ---------------------------------------------------------------
     // Pause button (touch / pointer)
     //
     // Tiny top-right square. Toggles the paused flag when tapped.
@@ -2625,6 +2725,7 @@
         powerButton.layout();
         superPowerButton.layout();
         specialButton.layout();
+        novaButton.layout();
         interactButton.layout();
         pauseButton.layout();
     });
@@ -2636,6 +2737,7 @@
     superPowerButton.layout();
     powerButton.layout();
     specialButton.layout();
+    novaButton.layout();
     interactButton.layout();
     pauseButton.layout();
 
@@ -2842,6 +2944,11 @@
             e.preventDefault();
             return;
         }
+        if (novaButton.onDown(x, y, e.pointerId)) {
+            canvas.setPointerCapture(e.pointerId);
+            e.preventDefault();
+            return;
+        }
         if (specialButton.onDown(x, y, e.pointerId)) {
             canvas.setPointerCapture(e.pointerId);
             e.preventDefault();
@@ -2876,6 +2983,7 @@
         powerButton.onUp(e.pointerId);
         superPowerButton.onUp(e.pointerId);
         specialButton.onUp(e.pointerId);
+        novaButton.onUp(e.pointerId);
         interactButton.onUp(e.pointerId);
         restartButton.onUp(e.pointerId);
         pauseButton.onUp(e.pointerId);
@@ -6839,6 +6947,154 @@
     }
 
     // ---------------------------------------------------------------
+    // Battlefield Nova
+    //
+    // Top-tier panic button: a screen-wide radial shockwave that
+    // strikes every enemy once. Paired gates (high magic cost +
+    // long cooldown) keep it rare; the cinematic activation + three
+    // staggered expanding rings make the cast feel like a proper
+    // "payoff" beat rather than a fourth AoE.
+    //
+    // Radius: 520px (typically covers the full viewport on mobile
+    // and most of a desktop screen). Damage: 25. Cost: 80 magic +
+    // 25s cooldown, enforced together so full-magic spam still
+    // waits for the timer.
+    // ---------------------------------------------------------------
+    const battlefieldNova = {
+        magicCost: 80,
+        cooldownMax: 25,
+        activeDuration: 1.1,     // visual + hit window
+        slowMoDuration: 0.5,     // dramatic hang when it lands
+        radius: 520,
+        damage: 25,
+
+        cooldownTimer: 0,
+        activeTimer: 0,
+        hitEnemies: new Set(),
+
+        get ready() {
+            return this.cooldownTimer <= 0 &&
+                   this.activeTimer <= 0 &&
+                   player.magic >= this.magicCost;
+        },
+
+        cooldownFrac() {
+            if (this.cooldownTimer <= 0) return 1;
+            return 1 - this.cooldownTimer / this.cooldownMax;
+        },
+
+        activate() {
+            if (!this.ready) return false;
+            player.magic -= this.magicCost;
+            this.cooldownTimer = this.cooldownMax;
+            this.activeTimer = this.activeDuration;
+            this.hitEnemies.clear();
+
+            // Cinematic: heavy flash, big shake, brief zoom, 0.5s
+            // slow-mo via the shared specialAttack.slowMoTimer so
+            // the enemy tick scale reuses the existing plumbing.
+            flash.trigger(0.95, 0.4);
+            shake.trigger(26, 0.6);
+            camera.zoomPulse(1.15, 0.3);
+            specialAttack.slowMoTimer = Math.max(
+                specialAttack.slowMoTimer, this.slowMoDuration
+            );
+            sound.play("super");
+            return true;
+        },
+
+        update(dt) {
+            if (this.activeTimer > 0)
+                this.activeTimer = Math.max(0, this.activeTimer - dt);
+            if (this.cooldownTimer > 0)
+                this.cooldownTimer = Math.max(0, this.cooldownTimer - dt);
+        },
+
+        reset() {
+            this.cooldownTimer = 0;
+            this.activeTimer = 0;
+            this.hitEnemies.clear();
+        },
+
+        draw(ctx, entity) {
+            if (this.activeTimer <= 0) return;
+            const t = 1 - this.activeTimer / this.activeDuration;
+            const cx = Math.round(entity.x + entity.width / 2);
+            const cy = Math.round(entity.y + entity.height / 2);
+
+            ctx.save();
+
+            // Central bright disc that fades quickly - the "core".
+            if (t < 0.3) {
+                const flashA = 1 - t / 0.3;
+                ctx.globalAlpha = flashA;
+                ctx.fillStyle = "#fff6d6";
+                ctx.beginPath();
+                ctx.arc(cx, cy, 140 - t * 120, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Three staggered shockwave rings in white / gold / red,
+            // each starting at a different phase so they sweep out
+            // one after the other rather than layering flat.
+            const rings = [
+                { start: 0.00, color: "#ffffff", width: 18 },
+                { start: 0.15, color: "#ffd166", width: 12 },
+                { start: 0.32, color: "#ff8e3a", width: 8  },
+            ];
+            for (const r of rings) {
+                const localT = (t - r.start) / (1 - r.start);
+                if (localT <= 0 || localT >= 1) continue;
+                const radius = this.radius * localT;
+                const alpha = (1 - localT) * 0.9;
+                ctx.globalAlpha = alpha;
+                ctx.strokeStyle = r.color;
+                ctx.lineWidth = r.width * (1 - localT) + 2;
+                ctx.beginPath();
+                ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+
+            // Trailing gold halo at the very edge of the blast radius
+            // so the damage footprint stays readable until the end.
+            if (t > 0.45 && t < 0.9) {
+                const ht = (t - 0.45) / 0.45;
+                ctx.globalAlpha = (1 - ht) * 0.22;
+                ctx.fillStyle = "#ffd166";
+                ctx.beginPath();
+                ctx.arc(cx, cy, this.radius * (0.85 + ht * 0.15), 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.restore();
+        },
+    };
+
+    // Radial sweep damage - each enemy takes the strike exactly once
+    // as the outermost ring passes them. Uses the same expanding-hit
+    // pattern as the special attack so high-radius enemies only get
+    // hit when the wave actually reaches them.
+    function updateBattlefieldNovaCollision() {
+        if (battlefieldNova.activeTimer <= 0) return;
+        const cx = player.x + player.width / 2;
+        const cy = player.y + player.height / 2;
+        const t = 1 - battlefieldNova.activeTimer / battlefieldNova.activeDuration;
+        const currentR = battlefieldNova.radius * Math.min(1, t + 0.1);
+        const r2 = currentR * currentR;
+        for (const e of enemies) {
+            if (!e.alive || e.ally || battlefieldNova.hitEnemies.has(e)) continue;
+            const ex = e.x + e.width / 2;
+            const ey = e.y + e.height / 2;
+            const dx = ex - cx;
+            const dy = ey - cy;
+            if (dx * dx + dy * dy < r2) {
+                e.takeHit(battlefieldNova.damage, { x: cx, y: cy });
+                battlefieldNova.hitEnemies.add(e);
+                if (!e.alive) onEnemyDefeated(e);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
     // Attack module
     //
     // A single, self-contained piece of state describing the player's
@@ -10750,6 +11006,16 @@
             player.specialChargeTime = 0;
             specialAttack.activate(specialLevel);
         }
+
+        // Battlefield Nova - top-tier screen-wide shockwave. Edge-
+        // triggered (no charge) since its cost + cooldown are the
+        // gate, not hold duration. V on keyboard, NOVA button on
+        // touch.
+        const keyboardNova = keysJustPressed["v"] || keysJustPressed["V"];
+        const touchNova = novaButton.consumeJustPressed();
+        if (keyboardNova || touchNova) {
+            battlefieldNova.activate();
+        }
     }
 
     // ---------------------------------------------------------------
@@ -10841,6 +11107,7 @@
             superPowerButton.consumeJustPressed();
             powerButton.consumeJustPressed();
             specialButton.consumeJustPressed();
+            novaButton.consumeJustPressed();
             newMissionBanner.update(dt);
             questLog.update(dt);
             clearJustPressed();
@@ -10866,6 +11133,7 @@
             superPowerButton.consumeJustPressed();
             powerButton.consumeJustPressed();
             specialButton.consumeJustPressed();
+            novaButton.consumeJustPressed();
             newMissionBanner.update(dt);
             questLog.update(dt);
             clearJustPressed();
@@ -10956,6 +11224,7 @@
         powerMove.update(dt);
         superPower.update(dt);
         specialAttack.update(dt);
+        battlefieldNova.update(dt);
         swordSpin.update(dt);
         energyBeam.update(dt);
         chargeFx.update(dt);
@@ -10979,6 +11248,7 @@
             updatePowerMoveCollision();
             updateSuperPowerCollision();
             updateSpecialAttackCollision();
+            updateBattlefieldNovaCollision();
             updateSwordSpinCollision();
             updateEnergyBeamCollision();
             updateEnemyContact();
@@ -11218,6 +11488,7 @@
         attack.hitEnemies.clear();
         powerMove.reset();
         specialAttack.reset();
+        battlefieldNova.reset();
         swordSpin.reset();
         energyBeam.reset();
         chargeFx.reset();
@@ -11389,6 +11660,7 @@
         // Special attack - clear cast / slow-mo / hit-set so a new
         // run doesn't open mid-animation.
         specialAttack.reset();
+        battlefieldNova.reset();
 
         // Sword spin - belongs to the previous run's mid-swing state.
         swordSpin.reset();
@@ -11429,6 +11701,9 @@
         specialButton.pressed = false;
         specialButton.pointerId = null;
         specialButton.justPressed = false;
+        novaButton.pressed = false;
+        novaButton.pointerId = null;
+        novaButton.justPressed = false;
         interactButton.pressed = false;
         interactButton.pointerId = null;
         interactButton.justPressed = false;
@@ -11533,6 +11808,7 @@
         // Special attack - crimson magic wave. Drawn after super so
         // when both fire near each other the special reads on top.
         specialAttack.draw(ctx, player);
+        battlefieldNova.draw(ctx, player);
 
         // Projectiles over everything else in the world layer.
         drawProjectiles(ctx);
@@ -11564,6 +11840,7 @@
         powerButton.draw(ctx);
         superPowerButton.draw(ctx);
         specialButton.draw(ctx);
+        novaButton.draw(ctx);
         interactButton.draw(ctx);
         if (gameState === "playing") pauseButton.draw(ctx);
         drawQuestPanel();
