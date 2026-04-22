@@ -5109,6 +5109,116 @@
         reset() { /* attack state is reset elsewhere */ },
     };
 
+    // ---------------------------------------------------------------
+    // Charged sword spin
+    //
+    // Fires on a sword-weapon charge-release past the 1s threshold.
+    // A single 360-degree AoE with a circular slash VFX and a brief
+    // sprite-rotation on the player - the "payoff" of holding the
+    // charge on the melee weapon.
+    //
+    // Damage is passed in from the charge-release code so the same
+    // multiplier math drives tap, charged shot, and spin uniformly.
+    // Each enemy is hit once per spin via the shared hitEnemies set.
+    // ---------------------------------------------------------------
+    const swordSpin = {
+        radius: 92,
+        duration: 0.45,         // total animation + hit window
+        activeTimer: 0,
+        damage: 1,
+        hitEnemies: new Set(),
+
+        isActive() { return this.activeTimer > 0; },
+
+        activate(dmg) {
+            this.damage = Math.max(1, dmg | 0);
+            this.activeTimer = this.duration;
+            this.hitEnemies.clear();
+            sound.play("attack");
+        },
+
+        update(dt) {
+            if (this.activeTimer > 0) {
+                this.activeTimer = Math.max(0, this.activeTimer - dt);
+            }
+        },
+
+        reset() {
+            this.activeTimer = 0;
+            this.hitEnemies.clear();
+        },
+
+        // Progress 0..1 across the visual window, used by both draw
+        // and the player sprite rotation in drawPlayer.
+        progress() {
+            if (this.activeTimer <= 0) return 0;
+            return 1 - this.activeTimer / this.duration;
+        },
+
+        draw(ctx, entity) {
+            if (this.activeTimer <= 0) return;
+            const t = this.progress();
+            const cx = Math.round(entity.x + entity.width / 2);
+            const cy = Math.round(entity.y + entity.height / 2);
+
+            // Sweep arc - a bright gold 3/4 circle that rotates as the
+            // animation progresses, reading as a spinning blade trail.
+            const sweepStart = -Math.PI / 2 + t * Math.PI * 3;
+            const sweepArc = Math.PI * 1.5;
+            const r = this.radius * Math.min(1, t + 0.15);
+            const alpha = 1 - t;
+
+            ctx.save();
+            ctx.strokeStyle = "#ffd166";
+            ctx.lineWidth = 6 * (1 - t) + 2;
+            ctx.globalAlpha = alpha * 0.9;
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, sweepStart, sweepStart + sweepArc);
+            ctx.stroke();
+
+            // Inner highlight sweep on a slightly smaller ring, offset
+            // so the two arcs read as depth rather than a flat line.
+            ctx.strokeStyle = "#fff6d6";
+            ctx.lineWidth = 3 * (1 - t) + 1;
+            ctx.globalAlpha = alpha * 0.7;
+            ctx.beginPath();
+            ctx.arc(cx, cy, r * 0.85,
+                sweepStart + 0.3, sweepStart + sweepArc - 0.3);
+            ctx.stroke();
+
+            // Ghost outline at max radius - marks the edge of the
+            // damage zone so the player understands the AoE reach.
+            if (t > 0.25) {
+                ctx.strokeStyle = "rgba(255, 246, 214, 0.55)";
+                ctx.lineWidth = 1.5;
+                ctx.globalAlpha = (1 - t) * 0.55;
+                ctx.beginPath();
+                ctx.arc(cx, cy, this.radius, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+            ctx.restore();
+        },
+    };
+
+    function updateSwordSpinCollision() {
+        if (!swordSpin.isActive()) return;
+        const cx = player.x + player.width / 2;
+        const cy = player.y + player.height / 2;
+        const r2 = swordSpin.radius * swordSpin.radius;
+        for (const e of enemies) {
+            if (!e.alive || swordSpin.hitEnemies.has(e)) continue;
+            const ex = e.x + e.width / 2;
+            const ey = e.y + e.height / 2;
+            const dx = ex - cx;
+            const dy = ey - cy;
+            if (dx * dx + dy * dy < r2) {
+                e.takeHit(swordSpin.damage, { x: cx, y: cy });
+                swordSpin.hitEnemies.add(e);
+                if (!e.alive) onEnemyDefeated(e);
+            }
+        }
+    }
+
     // Energy blast: owns its own cooldown and spawns a projectile on
     // fire. Uses the same `sound.play("attack")` cue for now so the
     // existing spam guard applies.
@@ -8611,21 +8721,34 @@
         } else if (!held && player.isCharging) {
             // Release: damage multiplier scales linearly past the
             // 0.9s charge threshold - 1x for taps, 1.2x at 1.0s,
-            // ~3.2x at the 2.0s cap. Weapon.fire takes the multiplier
-            // so both sword + energy benefit uniformly.
+            // ~3.2x at the 2.0s cap.
             const t = player.chargeTime;
             const mult = 1 + Math.max(0, t - 0.9) * 2;
             player.isCharging = false;
             player.chargeTime = 0;
-            currentWeapon().fire(player, mult);
-            tutorial.onAttack();
-            if (t >= 1) {
-                // Crossed the charge threshold - punch in a little
-                // extra impact so the charged release reads distinctly
-                // from a tap at the same weapon.
-                flash.trigger(0.35, 0.12);
-                shake.trigger(6, 0.15);
+
+            // Sword + full charge -> 360-degree spin instead of the
+            // regular directional swing. Energy weapon continues to
+            // benefit from the multiplier on a normal charged shot.
+            const wpn = currentWeapon();
+            const spinSword = wpn === swordWeapon && t >= 1;
+            if (spinSword) {
+                swordSpin.activate(swordWeapon.damage * mult);
+                // Share the sword's cooldown so spins can't stack
+                // back-to-back - the attack module's cooldown is the
+                // single source of truth for melee pacing.
+                attack.cooldownTimer = attack.cooldown;
+                flash.trigger(0.5, 0.18);
+                shake.trigger(10, 0.25);
+            } else {
+                wpn.fire(player, mult);
+                if (t >= 1) {
+                    // Non-spin charged release: lighter impact feel.
+                    flash.trigger(0.35, 0.12);
+                    shake.trigger(6, 0.15);
+                }
             }
+            tutorial.onAttack();
         }
 
         // Power move (shared across all weapons)
@@ -8819,6 +8942,7 @@
         powerMove.update(dt);
         superPower.update(dt);
         specialAttack.update(dt);
+        swordSpin.update(dt);
         shake.update(dt);
         flash.update(dt);
         corruption.update(dt);
@@ -8838,6 +8962,7 @@
             updatePowerMoveCollision();
             updateSuperPowerCollision();
             updateSpecialAttackCollision();
+            updateSwordSpinCollision();
             updateEnemyContact();
             spawner.update(enemyDt);
         }
@@ -9047,6 +9172,7 @@
         attack.hitEnemies.clear();
         powerMove.reset();
         specialAttack.reset();
+        swordSpin.reset();
         flash.reset();
         camera.resetZoom();
 
@@ -9199,6 +9325,9 @@
         // Special attack - clear cast / slow-mo / hit-set so a new
         // run doesn't open mid-animation.
         specialAttack.reset();
+
+        // Sword spin - belongs to the previous run's mid-swing state.
+        swordSpin.reset();
 
         // Screen shake - any mid-cast impulses clear so respawn
         // isn't still rattling.
@@ -10030,17 +10159,45 @@
         aura.draw();
         cloak.draw();
 
+        // Charged-sword spin slash - drawn under the sprite so the
+        // blade trail reads as swung from the player's hand rather
+        // than floating above the head.
+        swordSpin.draw(ctx, player);
+
         const blinking = player.iframes > 0 &&
             Math.floor(player.iframes * 20) % 2 === 0;
         if (blinking) return;
 
-        player.sheet.draw(
-            ctx,
-            player.animator.col,
-            player.animator.row,
-            Math.round(player.x),
-            Math.round(player.y)
-        );
+        const px = Math.round(player.x);
+        const py = Math.round(player.y);
+        if (swordSpin.isActive()) {
+            // Rotate the sprite through ~1.5 revolutions across the
+            // spin's 0.45s window - feels like the player body
+            // whipping around with the slash. Transform is local,
+            // one save/restore, zero allocations.
+            const t = swordSpin.progress();
+            const angle = t * Math.PI * 2 * 1.5;
+            const cx = px + 16;
+            const cy = py + 16;
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate(angle);
+            ctx.translate(-cx, -cy);
+            player.sheet.draw(
+                ctx,
+                player.animator.col,
+                player.animator.row,
+                px, py
+            );
+            ctx.restore();
+        } else {
+            player.sheet.draw(
+                ctx,
+                player.animator.col,
+                player.animator.row,
+                px, py
+            );
+        }
 
         // Charge ring - only drawn while actively charging. Thin
         // circle beneath the sprite's feet that fills clockwise as
