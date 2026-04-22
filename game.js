@@ -3501,6 +3501,233 @@
     player.damageModifiers.push((dmg) => dmg * corruption.damageMultiplier());
 
     // ---------------------------------------------------------------
+    // Crown
+    //
+    // A cosmetic-plus-ability overlay that rides on top of the
+    // existing attack systems:
+    //
+    //   energy      0..max, builds from kills + magic orbs
+    //   level       derived from story chapter (1..4+)
+    //   active      true during the short "Crown Mode" window
+    //   activeTimer seconds remaining on Crown Mode
+    //
+    // When energy hits max, Crown Mode auto-activates for ~8s with a
+    // brief cinematic (flash + zoom + shake). While active, the
+    // existing charged / special attacks get a size + damage boost
+    // via a shared crown.attackMult / crown.sizeMult pair so the
+    // integration is one-line in each activate call.
+    //
+    // Visual: a small 3-pronged gold crown drawn above the player's
+    // sprite, with a pre-baked glow and a preallocated 6-sparkle pool
+    // that pulses around it. Level steps up the glow alpha and
+    // sparkle count so the crown visibly evolves per chapter.
+    // ---------------------------------------------------------------
+    const crown = (function () {
+        const GLOW_SIZE = 48;
+        // One pre-baked glow canvas (gold radial gradient), reused
+        // every frame via drawImage with a size + alpha from the
+        // active level + mode. Zero per-frame gradient allocation.
+        const glow = document.createElement("canvas");
+        glow.width = glow.height = GLOW_SIZE;
+        (function () {
+            const g = glow.getContext("2d");
+            const c = GLOW_SIZE / 2;
+            const grad = g.createRadialGradient(c, c, 0, c, c, GLOW_SIZE / 2);
+            grad.addColorStop(0,   "rgba(255, 235, 140, 0.55)");
+            grad.addColorStop(0.5, "rgba(255, 220, 130, 0.18)");
+            grad.addColorStop(1,   "rgba(255, 220, 130, 0)");
+            g.fillStyle = grad;
+            g.fillRect(0, 0, GLOW_SIZE, GLOW_SIZE);
+        })();
+
+        // Preallocated sparkle pool. `count` active sparkles is
+        // chosen from level each frame; the rest idle.
+        const SPARKLE_CAP = 6;
+        const sparkles = new Array(SPARKLE_CAP);
+        for (let i = 0; i < SPARKLE_CAP; i++) {
+            sparkles[i] = { angle: 0, radius: 0, phase: 0, life: 0, alive: false };
+        }
+        function respawnSparkle(s) {
+            s.angle = Math.random() * Math.PI * 2;
+            s.radius = 10 + Math.random() * 12;
+            s.phase = Math.random() * Math.PI * 2;
+            s.life = 0;
+            s.maxLife = 0.8 + Math.random() * 0.6;
+            s.alive = true;
+        }
+
+        return {
+            energy: 0,
+            max: 100,
+            level: 1,
+            active: false,
+            activeTimer: 0,
+            activeDuration: 8.0,
+            pulsePhase: 0,
+
+            // Per-frame multipliers consumed by the attack systems.
+            // 1.0 when Crown Mode is dormant; 1.4x damage + 1.3x
+            // size when active.
+            attackMult: 1,
+            sizeMult: 1,
+
+            hasFullEnergy() { return this.energy >= this.max; },
+
+            // Adds energy from any gameplay source (kills, orbs).
+            // No-op while Crown Mode is burning down - the boost
+            // comes free during those 8s.
+            add(amount) {
+                if (this.active) return;
+                this.energy = Math.min(this.max, this.energy + amount);
+                if (this.energy >= this.max) this.activate();
+            },
+
+            // Triggers Crown Mode with the small cinematic. Always
+            // consumes the full energy pool even if the player had
+            // "overshot" on the final pickup.
+            activate() {
+                if (this.active) return false;
+                this.energy = 0;
+                this.active = true;
+                this.activeTimer = this.activeDuration;
+                // Brief cinematic - shake + flash + camera punch.
+                // Slow-mo hijacks the specialAttack slowMoTimer (the
+                // enemy-dt scale already reads from it), so enemies
+                // pause for a beat without a new timing system.
+                shake.trigger(10, 0.28);
+                flash.trigger(0.6, 0.28);
+                camera.zoomPulse(1.08, 0.35);
+                specialAttack.slowMoTimer = Math.max(
+                    specialAttack.slowMoTimer, 0.35
+                );
+                sound.play("levelUp");
+                questLog.showToast("Crown Mode!", 2.2);
+                return true;
+            },
+
+            // Resolve level from story chapter. Runs every update -
+            // cheap, and it keeps the crown synced to chapter
+            // advances without a separate event hook.
+            _refreshLevel() {
+                const idx = Math.max(0, story.chapterOrder.indexOf(story.state));
+                // chapter1 -> 1, chapter3 -> 2, chapter5 -> 3,
+                // chapter6 -> 4 so each stage steps the visuals up.
+                this.level = idx < 2 ? 1
+                           : idx < 4 ? 2
+                           : idx < 5 ? 3
+                           : 4;
+            },
+
+            update(dt) {
+                this._refreshLevel();
+                this.pulsePhase += dt;
+
+                if (this.active) {
+                    this.activeTimer = Math.max(0, this.activeTimer - dt);
+                    if (this.activeTimer === 0) this.active = false;
+                }
+
+                // Dynamic attack / size multipliers that the weapon
+                // dispatch reads at activation time.
+                this.attackMult = this.active ? 1.4 : 1;
+                this.sizeMult   = this.active ? 1.3 : 1;
+
+                // Sparkle pool: the number of live sparkles steps
+                // with level, so level 4 has twice the shimmer as
+                // level 1. Active Crown Mode spawns a fresh one
+                // every tick if slots are free.
+                const want = 2 + this.level;
+                let liveCount = 0;
+                for (const s of sparkles) if (s.alive) liveCount++;
+                if (liveCount < want) {
+                    for (const s of sparkles) {
+                        if (!s.alive) { respawnSparkle(s); break; }
+                    }
+                }
+                for (const s of sparkles) {
+                    if (!s.alive) continue;
+                    s.life += dt;
+                    s.phase += dt * 3;
+                    if (s.life >= s.maxLife) s.alive = false;
+                }
+            },
+
+            draw(ctx) {
+                const cx = player.x + player.width / 2;
+                const cy = player.y - 8;  // just above the sprite's head
+                const lvl = this.level;
+
+                // Glow halo, scaled by level + pulse + active state.
+                const basePulse = 0.9 + 0.1 * Math.sin(this.pulsePhase * 2);
+                const lvlGlow = 0.35 + lvl * 0.12;
+                const activeBoost = this.active ? 1.5 : 1;
+                const glowR = (18 + lvl * 4) * basePulse * activeBoost;
+                ctx.save();
+                ctx.globalAlpha = Math.min(1, lvlGlow * activeBoost);
+                ctx.drawImage(glow,
+                    cx - glowR, cy - glowR + 8,
+                    glowR * 2, glowR * 2);
+                ctx.globalAlpha = 1;
+
+                // Crown sprite. A gold trapezoid base + three
+                // pointed prongs each tipped with a coloured gem.
+                // Position nudges up 1px when Crown Mode is active
+                // so the cinematic reads immediately.
+                const crownY = cy - 2 - (this.active ? 1 : 0);
+                const baseY = crownY;
+                const baseW = 14;
+                // Band
+                ctx.fillStyle = "#ffd166";
+                ctx.fillRect(cx - baseW / 2, baseY, baseW, 4);
+                ctx.fillStyle = "#c9963a";
+                ctx.fillRect(cx - baseW / 2, baseY + 3, baseW, 1);
+                // Three prongs
+                ctx.fillStyle = "#ffd166";
+                ctx.fillRect(cx - 6, baseY - 4, 3, 4);
+                ctx.fillRect(cx - 1, baseY - 6, 3, 6);
+                ctx.fillRect(cx + 3, baseY - 4, 3, 4);
+                // Prong tips - gems, coloured by level for a visible
+                // evolution each chapter step.
+                const gem = lvl >= 4 ? ["#ff8ec6", "#b06bff", "#ff8ec6"]
+                          : lvl >= 3 ? ["#8ad9ff", "#b06bff", "#8ad9ff"]
+                          : lvl >= 2 ? ["#8ad9ff", "#ffd166", "#8ad9ff"]
+                          :            ["#c5c5d0", "#ffd166", "#c5c5d0"];
+                ctx.fillStyle = gem[0]; ctx.fillRect(cx - 5, baseY - 5, 1, 1);
+                ctx.fillStyle = gem[1]; ctx.fillRect(cx, baseY - 7, 1, 1);
+                ctx.fillStyle = gem[2]; ctx.fillRect(cx + 4, baseY - 5, 1, 1);
+
+                // Sparkles - tiny gold pixels orbiting at offset
+                // angles around the crown. Alpha eases in + out
+                // over each sparkle's short life.
+                for (const s of sparkles) {
+                    if (!s.alive) continue;
+                    const t = s.life / s.maxLife;
+                    const fade = t < 0.3 ? t / 0.3
+                               : t > 0.6 ? 1 - (t - 0.6) / 0.4
+                               : 1;
+                    const sx = cx + Math.cos(s.angle + s.phase * 0.5) * s.radius;
+                    const sy = crownY + Math.sin(s.angle + s.phase * 0.5) * 6
+                        - Math.abs(Math.sin(s.phase)) * s.radius * 0.5;
+                    ctx.fillStyle = `rgba(255, 240, 160, ${(fade * 0.9).toFixed(3)})`;
+                    ctx.fillRect(Math.round(sx), Math.round(sy), 2, 2);
+                }
+                ctx.restore();
+            },
+
+            reset() {
+                this.energy = 0;
+                this.active = false;
+                this.activeTimer = 0;
+                this.attackMult = 1;
+                this.sizeMult = 1;
+                for (const s of sparkles) s.alive = false;
+            },
+        };
+    })();
+
+    player.crown = crown;
+
+    // ---------------------------------------------------------------
     // Stats helpers - the single place damage / healing flows through.
     // Future items ("Leather Vest: -2 damage taken") plug in here
     // rather than scattering HP math around the codebase.
@@ -5240,6 +5467,10 @@
         corruption.onKill();
         noteKillTimestamp();
         spawner.onEnemyDefeated(enemy);
+        // Crown energy drips in from every kill - a full 100-kill
+        // pool, so around 20 kills fills Crown Mode at baseline.
+        // Boss kills push the crown harder as a reward beat.
+        crown.add(enemy && enemy.isBoss ? 40 : 5);
         if (enemy.isBoss && enemy.levelId) {
             defeatedBosses.add(enemy.levelId);
             questLog.showToast(`${enemy.name} defeated!`, 2.6);
@@ -5340,6 +5571,9 @@
                     );
                     sound.play("coin");
                     tutorial.onPickup();
+                    // Orbs charge the crown too - small add so the
+                    // primary feeder is still kills.
+                    crown.add(4);
                 } else {
                     addToInventory(d.itemId);
                 }
@@ -6497,8 +6731,11 @@
             this.level = level;
             const radiusScale = 1 + level * 0.18;   // 1.0 / 1.18 / 1.36
             const damageScale = 1 + level * 0.35;   // 1.0 / 1.35 / 1.70
-            this.radius = this.baseRadius * radiusScale;
-            this.damage = Math.round(this.baseDamage * damageScale);
+            // Crown Mode multiplies radius + damage on top of the
+            // hold-tier, so a charged special under Crown reaches
+            // further and hits harder.
+            this.radius = this.baseRadius * radiusScale * crown.sizeMult;
+            this.damage = Math.round(this.baseDamage * damageScale * crown.attackMult);
             this.castTimer    = this.castDuration;
             this.activeTimer  = this.activeDuration;
             this.slowMoTimer  = this.slowMoDuration;
@@ -10424,9 +10661,19 @@
             player.isCharging = false;
             player.chargeTime = 0;
 
+            // Crown Mode multiplies damage and the spin / beam
+            // footprint. Applied here in the dispatch so the crown
+            // integration is one place, not threaded through each
+            // attack module.
+            const crownDmg  = crown.attackMult;
+            const crownSize = crown.sizeMult;
+
             const wpn = currentWeapon();
             if (wpn === swordWeapon && level >= 1) {
-                swordSpin.activate(swordWeapon.damage * mult, level);
+                swordSpin.activate(swordWeapon.damage * mult * crownDmg, level);
+                // Expand radius when Crown Mode is active - the spin
+                // footprint visibly grows to match the damage boost.
+                if (crownSize !== 1) swordSpin.radius *= crownSize;
                 // Sword cooldown pacing is the single source of truth
                 // for melee, so all charged sword payoffs latch it.
                 attack.cooldownTimer = attack.cooldown;
@@ -10439,9 +10686,13 @@
                 }
             } else if (wpn === energyWeapon && level >= 1) {
                 energyBeam.activate(
-                    energyWeapon.damage * mult * (level >= 2 ? 1.6 : 1.1),
+                    energyWeapon.damage * mult * (level >= 2 ? 1.6 : 1.1) * crownDmg,
                     player, level
                 );
+                if (crownSize !== 1) {
+                    energyBeam.length *= crownSize;
+                    energyBeam.width  *= crownSize;
+                }
                 energyWeapon.cooldownTimer = energyWeapon.cooldownMax;
                 if (level >= 2) {
                     flash.trigger(0.7, 0.22);
@@ -10452,8 +10703,9 @@
                 }
             } else {
                 // Tap (level 0) or unhandled weapon - normal fire
-                // with the charge multiplier applied uniformly.
-                wpn.fire(player, mult);
+                // with the charge multiplier applied uniformly. Crown
+                // still boosts tap damage so the mode is always felt.
+                wpn.fire(player, mult * crownDmg);
             }
             tutorial.onAttack();
         }
@@ -10710,6 +10962,7 @@
         shake.update(dt);
         flash.update(dt);
         corruption.update(dt);
+        crown.update(dt);
         updateMusicState(dt);
 
         // Combat systems only tick in hostile zones. In safe zones
@@ -11081,6 +11334,9 @@
         // modifier stays on player.damageModifiers (was pushed once
         // at boot) and returns to x1 automatically once value is 0.
         corruption.reset();
+        // Crown energy + mode state rewinds on respawn; level will
+        // resync to the current story chapter on the next update.
+        crown.reset();
 
         // Story progression - death ends the current campaign run;
         // localStorage is also cleared so the next page load opens
@@ -11294,6 +11550,7 @@
         drawScore();
         drawHealthBar();
         drawMagicBar();
+        drawCrownBar();
         drawXpBar();
         drawCorruptionBar();
         drawCooldownBar();
@@ -11385,7 +11642,7 @@
     // the readouts don't compete with the terrain behind them.
     function drawStatsPanel() {
         ctx.save();
-        roundRectPath(ctx, 8, 8, 280, 82, 8);
+        roundRectPath(ctx, 8, 8, 280, 92, 8);
         ctx.fillStyle = "rgba(12, 12, 22, 0.62)";
         ctx.fill();
         ctx.strokeStyle = "rgba(255, 209, 102, 0.28)";
@@ -11879,7 +12136,9 @@
         // before placing the quest panel alongside.
         const canFitRight = VIEW_W >= 288 + w + 16;
         const x = canFitRight ? VIEW_W - w - 8 : 8;
-        const y = canFitRight ? 8 : 98;
+        // Fallback y below stats panel (y=8, h=92 -> ends 100) with
+        // a small gap so they don't visually overlap on portrait.
+        const y = canFitRight ? 8 : 108;
 
         ctx.save();
         roundRectPath(ctx, x, y, w, h, 8);
@@ -12264,6 +12523,12 @@
             }
             ctx.restore();
         }
+
+        // Crown - last thing drawn so it sits on top of the
+        // sprite + charge FX. Its own update clock drives glow /
+        // sparkle animation; drawing is cheap (one drawImage + a
+        // handful of fillRects).
+        crown.draw(ctx);
     }
 
     function drawHealthBar() {
@@ -12319,7 +12584,65 @@
     // Magic meter - red bar below HP. Always visible: magic is a
     // core resource and the empty bar cues players to go hunt for
     // red orbs. Same dimensions as HP would make it read as a
-    // duplicate; a slightly shorter bar keeps HP visually primary.
+    // Slim gold crown bar under the XP track. Hidden unless the
+    // player has gained any crown energy yet, so campaign-newcomers
+    // don't see an empty meter before they understand the system.
+    // Turns pulsing bright when Crown Mode is burning, so the player
+    // always knows the ability is live.
+    function drawCrownBar() {
+        // Skip if the player has never gained energy (first minutes
+        // of the game). Once crown.level > 1 it's always shown, so
+        // chapter progression surfaces the bar regardless.
+        if (crown.energy <= 0 && !crown.active && crown.level <= 1) return;
+
+        const barW = 180;
+        const barH = 6;
+        const x = 16;
+        const y = 82;  // under the XP bar (y=74, h=6)
+
+        const frac = crown.active
+            ? 1
+            : Math.max(0, Math.min(1, crown.energy / crown.max));
+
+        ctx.save();
+        roundRectPath(ctx, x, y, barW, barH, 3);
+        ctx.fillStyle = "#13131c";
+        ctx.fill();
+
+        if (frac > 0) {
+            // During Crown Mode the bar pulses so the player notices
+            // the active window draining down.
+            const pulse = crown.active
+                ? 0.75 + 0.25 * Math.sin(performance.now() * 0.012)
+                : 1;
+            const remain = crown.active
+                ? crown.activeTimer / crown.activeDuration
+                : 1;
+            ctx.save();
+            ctx.clip();
+            ctx.globalAlpha = pulse;
+            ctx.fillStyle = crown.active ? "#fff6d6" : "#ffd166";
+            ctx.fillRect(x, y, barW * frac * remain, barH);
+            ctx.globalAlpha = 1;
+            ctx.restore();
+        }
+        ctx.strokeStyle = "rgba(255, 209, 102, 0.45)";
+        ctx.lineWidth = 1;
+        roundRectPath(ctx, x + 0.5, y + 0.5, barW - 1, barH - 1, 3);
+        ctx.stroke();
+
+        ctx.textBaseline = "middle";
+        drawShadowedText(
+            crown.active
+                ? `CROWN  ACTIVE  L${crown.level}`
+                : `CROWN  ${Math.floor(frac * 100)}%  L${crown.level}`,
+            x + barW + 10, y + barH / 2,
+            crown.active ? "#fff6d6" : "#e0c878",
+            "bold 10px system-ui, sans-serif"
+        );
+        ctx.restore();
+    }
+
     function drawMagicBar() {
         const barW = 180;
         const barH = 10;
@@ -12378,7 +12701,8 @@
         const barW = 180;
         const barH = 8;
         const x = 16;
-        const y = 86;  // below XP (74+6) + 6px gap - conditional row
+        // below XP (74+6) + CROWN (82+6) + 6px gap - conditional row.
+        const y = 96;
         const r = 4;
 
         const frac = Math.max(0, Math.min(1, corruption.value / corruption.max));
