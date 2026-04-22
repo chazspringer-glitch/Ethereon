@@ -11311,6 +11311,7 @@
         if (gameState === "playing") pauseButton.draw(ctx);
         drawQuestPanel();
         drawSquadIndicator();
+        drawMinimap();
         drawTutorial();
         drawRecruitHint();
 
@@ -11695,6 +11696,147 @@
         ctx.restore();
     }
 
+    // Compact top-right minimap. Shows the world at a fixed scale
+    // with player / followers / hostiles / buildings plotted as
+    // coloured dots. Cheap: a few dozen fillRects per frame, all
+    // bounded by the screen-size of the map itself.
+    //
+    // Positioned under the pause button so it doesn't fight any
+    // other top-right HUD element. Hidden on the intro + game-
+    // over screens to keep those overlays clean.
+    function drawMinimap() {
+        if (gameState !== "playing") return;
+        // Skip tiny interiors - a 15x10 tile shop isn't helpful
+        // to map, and the player already sees the whole room.
+        if (currentLevel && currentLevel.isInterior) return;
+
+        const mw = 110;
+        const mh = 74;
+        const mx = VIEW_W - mw - 12;
+        // Below the pause button + SQD indicator stack:
+        //   pause button y=12 h=36  -> ends 48
+        //   SQD          y=54 h=22  -> ends 76
+        //   minimap at 82
+        const my = 82;
+
+        const scaleX = mw / WORLD_W;
+        const scaleY = mh / WORLD_H;
+
+        ctx.save();
+        ctx.globalAlpha = 0.86;
+        roundRectPath(ctx, mx, my, mw, mh, 5);
+        ctx.fillStyle = "rgba(14, 14, 22, 0.88)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(138, 217, 255, 0.42)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Clip all dot draws to the map rect so anything near the
+        // map border doesn't spill onto surrounding HUD.
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(mx, my, mw, mh);
+        ctx.clip();
+
+        // Buildings as soft rectangles - structural anchors first.
+        const buildings = currentLevel.buildings || [];
+        ctx.fillStyle = "rgba(180, 180, 200, 0.55)";
+        for (const b of buildings) {
+            ctx.fillRect(
+                mx + b.x * scaleX,
+                my + b.y * scaleY,
+                Math.max(1, b.w * scaleX),
+                Math.max(1, b.h * scaleY)
+            );
+        }
+
+        // Exits as faint cyan ticks on the matching edge - shows the
+        // player which way they can transition out of the level.
+        const exits = currentLevel.exits || {};
+        ctx.fillStyle = "rgba(138, 217, 255, 0.85)";
+        if (exits.west)  ctx.fillRect(mx + 1, my + mh / 2 - 3, 2, 6);
+        if (exits.east)  ctx.fillRect(mx + mw - 3, my + mh / 2 - 3, 2, 6);
+        if (exits.north) ctx.fillRect(mx + mw / 2 - 3, my + 1, 6, 2);
+        if (exits.south) ctx.fillRect(mx + mw / 2 - 3, my + mh - 3, 6, 2);
+
+        // Drops as small yellow pips - useful on a hostile floor.
+        ctx.fillStyle = "rgba(255, 209, 102, 0.9)";
+        for (const d of drops) {
+            ctx.fillRect(
+                mx + d.x * scaleX - 1,
+                my + d.y * scaleY - 1,
+                2, 2
+            );
+        }
+
+        // Hostile enemies red. Ally / neutral skipped so the map
+        // never misreads a friendly creature as a threat.
+        ctx.fillStyle = "#e06666";
+        for (const e of enemies) {
+            if (!e.alive || e.ally || e.neutral) continue;
+            ctx.fillRect(
+                mx + (e.x + e.width / 2) * scaleX - 1,
+                my + (e.y + e.height / 2) * scaleY - 1,
+                2, 2
+            );
+        }
+        // Neutral creatures get a pale green dot to tell them apart.
+        ctx.fillStyle = "rgba(180, 220, 160, 0.9)";
+        for (const e of enemies) {
+            if (!e.alive || !e.neutral || e.ally) continue;
+            ctx.fillRect(
+                mx + (e.x + e.width / 2) * scaleX - 1,
+                my + (e.y + e.height / 2) * scaleY - 1,
+                2, 2
+            );
+        }
+
+        // Followers + allied guardians as brighter green.
+        ctx.fillStyle = "#7ad17a";
+        for (const f of followers) {
+            ctx.fillRect(
+                mx + (f.x + f.width / 2) * scaleX - 1,
+                my + (f.y + f.height / 2) * scaleY - 1,
+                2, 2
+            );
+        }
+        for (const e of enemies) {
+            if (!e.alive || !e.ally) continue;
+            ctx.fillRect(
+                mx + (e.x + e.width / 2) * scaleX - 1,
+                my + (e.y + e.height / 2) * scaleY - 1,
+                2, 2
+            );
+        }
+
+        // Player as a bright gold dot on top so it reads first.
+        const pcx = mx + (player.x + player.width / 2) * scaleX;
+        const pcy = my + (player.y + player.height / 2) * scaleY;
+        ctx.fillStyle = "#ffd166";
+        ctx.fillRect(pcx - 2, pcy - 2, 4, 4);
+        // Small "breadcrumb" pulse ring around the player so even a
+        // crowded map keeps them findable.
+        const pulse = 0.5 + 0.5 * Math.abs(Math.sin(performance.now() * 0.004));
+        ctx.globalAlpha = 0.55 * pulse;
+        ctx.strokeStyle = "#fff6d6";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(pcx, pcy, 4, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.restore();   // drop clip
+
+        // Label above the map rect.
+        ctx.textAlign = "center";
+        ctx.textBaseline = "bottom";
+        ctx.globalAlpha = 0.82;
+        drawShadowedText("MAP",
+            mx + mw / 2, my - 2,
+            "#a0a0b8",
+            "bold 9px system-ui, sans-serif");
+        ctx.restore();
+    }
+
     function drawSquadIndicator() {
         const max = companions.maxSize();
         const n = player.squad.length;
@@ -11731,7 +11873,7 @@
 
     function drawQuestPanel() {
         const w = 240;
-        const h = 64;
+        const h = 84;  // taller to fit MISSION row cleanly
 
         // Stats panel occupies x 8..288 at top. Give it 8px of gap
         // before placing the quest panel alongside.
@@ -11741,7 +11883,7 @@
 
         ctx.save();
         roundRectPath(ctx, x, y, w, h, 8);
-        ctx.fillStyle = "rgba(12, 12, 22, 0.62)";
+        ctx.fillStyle = "rgba(12, 12, 22, 0.72)";
         ctx.fill();
         ctx.strokeStyle = "rgba(138, 217, 255, 0.32)";
         ctx.lineWidth = 1;
@@ -11749,8 +11891,7 @@
 
         ctx.textBaseline = "top";
 
-        // Chapter header - always visible, drives the "where am I in
-        // the campaign?" question even when there's no active quest.
+        // Row 1 - chapter header + lore counter.
         const chapterIdx = story.chapterOrder.indexOf(story.state) + 1;
         drawShadowedText(
             `CH ${chapterIdx}`,
@@ -11758,15 +11899,16 @@
             "#b06bff",
             "bold 10px system-ui, sans-serif"
         );
-        drawShadowedText(
-            story.title(),
-            x + 38, y + 7,
+        // Chapter title gets clipped so it never runs under the
+        // LORE counter. Width budget = panel minus label + lore.
+        const chapterTitle = story.title();
+        const chapterTitleMax = w - 140;
+        drawClippedText(
+            chapterTitle,
+            x + 38, y + 7, chapterTitleMax,
             "#e8e8f0",
             "bold 11px system-ui, sans-serif"
         );
-
-        // Lore counter pinned to the right of the chapter header
-        // so the player can see how much history they've uncovered.
         const loreTotal = loreLog.total();
         if (loreTotal > 0) {
             ctx.textAlign = "right";
@@ -11779,7 +11921,6 @@
             ctx.textAlign = "start";
         }
 
-        // Hairline divider between chapter header and quest body.
         ctx.strokeStyle = "rgba(138, 217, 255, 0.18)";
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -11787,37 +11928,77 @@
         ctx.lineTo(x + w - 10, y + 22);
         ctx.stroke();
 
-        // Quest row - moved 16px down to make room for chapter line.
+        // Row 2 - current mission. Shows the one canonical "what
+        // are you doing right now?" step from the missions module,
+        // above the finer-grained quest row.
         drawShadowedText(
-            "QUEST",
+            "MISSION",
             x + 12, y + 26,
             "#a0a0b8",
-            "11px system-ui, sans-serif"
+            "10px system-ui, sans-serif"
+        );
+        const curMission = missions.getCurrentMission();
+        if (curMission) {
+            drawClippedText(
+                curMission.name,
+                x + 64, y + 26, w - 76,
+                "#8ad9ff",
+                "bold 11px system-ui, sans-serif"
+            );
+        } else {
+            drawClippedText(
+                "(campaign complete)",
+                x + 64, y + 26, w - 76,
+                "#a0a0b8",
+                "bold 11px system-ui, sans-serif"
+            );
+        }
+
+        // Row 3 - active quest + progress numbers.
+        drawShadowedText(
+            "QUEST",
+            x + 12, y + 44,
+            "#a0a0b8",
+            "10px system-ui, sans-serif"
         );
 
         if (!questLog.active) {
-            drawShadowedText(
+            drawClippedText(
                 "(none)  talk to the Elder",
-                x + 58, y + 26,
+                x + 64, y + 44, w - 76,
                 "#a0a0b8",
-                "bold 12px system-ui, sans-serif"
+                "bold 11px system-ui, sans-serif"
             );
         } else {
             const tmpl = QUESTS[questLog.active.id];
             const prog = questLog.active.progress;
             const goal = tmpl.target;
 
-            // Title
-            drawShadowedText(
+            // Reserve room on the right for the "N / M" counter so
+            // the title never overlaps it on long names.
+            const countText = `${prog} / ${goal}`;
+            ctx.font = "bold 11px system-ui, sans-serif";
+            const countW = ctx.measureText(countText).width;
+            const titleMax = w - 76 - countW - 12;
+            drawClippedText(
                 tmpl.title,
-                x + 58, y + 26,
+                x + 64, y + 44, titleMax,
                 "#ffd166",
-                "bold 13px system-ui, sans-serif"
+                "bold 11px system-ui, sans-serif"
             );
 
-            // Progress bar below the title.
+            ctx.textAlign = "right";
+            drawShadowedText(
+                countText,
+                x + w - 12, y + 45,
+                "#8ad9ff",
+                "bold 11px system-ui, sans-serif"
+            );
+            ctx.textAlign = "start";
+
+            // Progress bar along the bottom of the panel.
             const barX = x + 12;
-            const barY = y + 46;
+            const barY = y + 66;
             const barW = w - 24;
             const barH = 8;
             const frac = Math.max(0, Math.min(1, prog / goal));
@@ -11838,19 +12019,21 @@
             ctx.lineWidth = 1;
             roundRectPath(ctx, barX + 0.5, barY + 0.5, barW - 1, barH - 1, 4);
             ctx.stroke();
-
-            // Progress numbers aligned to the right of the quest
-            // title row.
-            ctx.textAlign = "right";
-            drawShadowedText(
-                `${prog} / ${goal}`,
-                x + w - 12, y + 27,
-                "#8ad9ff",
-                "bold 12px system-ui, sans-serif"
-            );
-            ctx.textAlign = "start";
         }
 
+        ctx.restore();
+    }
+
+    // Draws text clipped to a maximum pixel width. Used by the
+    // quest panel rows so long titles never leak past their slot
+    // into the progress counter / lore counter alongside them.
+    function drawClippedText(text, x, y, maxW, color, font) {
+        if (!text) return;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x, y - 2, maxW, 20);
+        ctx.clip();
+        drawShadowedText(text, x, y, color, font);
         ctx.restore();
     }
 
