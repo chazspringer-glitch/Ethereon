@@ -134,6 +134,18 @@
     let gameState = "intro";
     const introStart = performance.now();
 
+    // Start-screen "Tap to Start" button. Rect is recomputed every
+    // frame drawIntro() runs (so resize follows automatically) and
+    // read by the pointerdown handler for precise hit-testing.
+    const startButton = {
+        rect: { x: 0, y: 0, w: 0, h: 0 },
+        contains(x, y) {
+            const r = this.rect;
+            return x >= r.x && x <= r.x + r.w &&
+                   y >= r.y && y <= r.y + r.h;
+        },
+    };
+
     // ---------------------------------------------------------------
     // World - tile-based map, larger than the viewport.
     //
@@ -9637,11 +9649,11 @@
     function drawIntro() {
         const now = performance.now();
         const elapsed = (now - introStart) / 1000;
-        const titleFade = Math.min(1, elapsed / 1.6);
-        const showPrompt = elapsed >= 1.6;
+        const titleFade = Math.min(1, elapsed / 1.2);
+        const showPrompt = elapsed >= 1.2;
 
         // Full-screen dim so the world reads as "not playing yet".
-        ctx.fillStyle = "rgba(10, 10, 20, 0.88)";
+        ctx.fillStyle = "rgba(10, 10, 20, 0.92)";
         ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
         ctx.save();
@@ -9649,42 +9661,74 @@
         ctx.textBaseline = "middle";
 
         // Title - slides up slightly as it fades in.
-        const titleY = VIEW_H / 2 - 40 + (1 - titleFade) * 20;
+        const titleY = VIEW_H / 2 - 100 + (1 - titleFade) * 20;
         ctx.globalAlpha = titleFade;
         drawShadowedText(
             "ETHEREON",
             VIEW_W / 2, titleY,
             "#ffd166",
-            "bold 68px system-ui, sans-serif"
+            "bold 64px system-ui, sans-serif"
         );
 
-        // Tagline
-        ctx.globalAlpha = titleFade * 0.85;
+        // Tagline just below the title.
+        ctx.globalAlpha = titleFade * 0.8;
         drawShadowedText(
             "a small action-RPG",
-            VIEW_W / 2, titleY + 54,
+            VIEW_W / 2, titleY + 50,
             "#a0a0b8",
-            "15px system-ui, sans-serif"
+            "14px system-ui, sans-serif"
         );
 
-        // Press / tap prompt - pulses gently after title resolves.
+        // Three-line instruction block - the core controls in plain
+        // language, readable on both mobile and desktop since each
+        // verb maps to both input modes.
         if (showPrompt) {
-            const pulse = 0.55 + 0.45 * Math.abs(Math.sin(now * 0.004));
-            ctx.globalAlpha = pulse;
-            drawShadowedText(
-                "Press any key  or  tap to begin",
-                VIEW_W / 2, VIEW_H / 2 + 90,
-                "#e8e8f0",
-                "bold 16px system-ui, sans-serif"
-            );
+            ctx.globalAlpha = Math.min(1, (elapsed - 1.2) / 0.5);
+            const instructY = VIEW_H / 2 - 10;
+            const lineGap = 22;
+            const lines = [
+                "Move with joystick or arrows",
+                "Attack with button or SPACE",
+                "Build your squad and survive",
+            ];
+            for (let i = 0; i < lines.length; i++) {
+                drawShadowedText(
+                    lines[i],
+                    VIEW_W / 2, instructY + i * lineGap,
+                    "#e8e8f0",
+                    "15px system-ui, sans-serif"
+                );
+            }
 
-            // Small hint line with the controls.
-            ctx.globalAlpha = pulse * 0.7;
+            // "Tap to Start" button - rounded rect centered below
+            // the instructions, gently pulsing so it reads as the
+            // primary target. Rect is cached on startButton so the
+            // pointer handler can hit-test it precisely; any tap
+            // outside still starts the game too for forgiving input.
+            const pulse = 0.78 + 0.22 * Math.abs(Math.sin(now * 0.004));
+            const btnW = 180;
+            const btnH = 48;
+            const btnX = Math.round((VIEW_W - btnW) / 2);
+            const btnY = Math.round(instructY + lines.length * lineGap + 24);
+            startButton.rect.x = btnX;
+            startButton.rect.y = btnY;
+            startButton.rect.w = btnW;
+            startButton.rect.h = btnH;
+
+            ctx.globalAlpha = pulse;
+            roundRectPath(ctx, btnX, btnY, btnW, btnH, 10);
+            ctx.fillStyle = "#ffd166";
+            ctx.fill();
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            ctx.globalAlpha = 1;
             drawShadowedText(
-                "Arrows / joystick to move  ·  SPACE / ATK to attack  ·  Q / ★ for power",
-                VIEW_W / 2, VIEW_H / 2 + 120,
-                "#a0a0b8",
-                "11px system-ui, sans-serif"
+                "TAP TO START",
+                btnX + btnW / 2, btnY + btnH / 2,
+                "#1a1a24",
+                "bold 18px system-ui, sans-serif"
             );
         }
 
