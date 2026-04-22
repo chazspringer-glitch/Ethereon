@@ -7388,6 +7388,81 @@
         }
     }
 
+    // ---------------------------------------------------------------
+    // Enemy variants
+    //
+    // Size / stat band layered on top of any faction preset. Each
+    // spawn rolls a variant (small / medium / large) weighted so
+    // mediums are the baseline and the extremes stay rare. Size
+    // only scales the sprite draw - the collision / knockback box
+    // stays at the standard 32x32 so hitreg stays consistent.
+    // ---------------------------------------------------------------
+    const VARIANTS = {
+        small:  { sizeScale: 0.72, hpScale: 0.6, speedScale: 1.30 },
+        medium: { sizeScale: 1.00, hpScale: 1.0, speedScale: 1.00 },
+        large:  { sizeScale: 1.35, hpScale: 1.8, speedScale: 0.72 },
+    };
+    // Strength-weighted variant roll. Early-game almost-always
+    // medium; stronger players start seeing more smalls (pests) and
+    // larges (tanks) for variety.
+    function pickVariant(strength) {
+        const rS = 0.10 + Math.min(0.18, strength * 0.02);
+        const rL = 0.08 + Math.min(0.22, strength * 0.03);
+        const r = Math.random();
+        if (r < rS) return "small";
+        if (r < rS + rL) return "large";
+        return "medium";
+    }
+
+    // Color-tint palette used for subtle per-spawn visual variety.
+    // Applied via source-atop so only the sprite's opaque pixels
+    // get tinted, on top of any faction tint (which has its own
+    // source-atop pass).
+    const ENEMY_TINTS = [
+        null,                            // untinted - most common
+        "rgba(210, 90, 90, 0.28)",       // rust
+        "rgba(90, 180, 110, 0.28)",      // moss
+        "rgba(110, 140, 220, 0.28)",     // cold
+        "rgba(190, 140, 210, 0.28)",     // violet
+    ];
+    function pickEnemyTint() {
+        // 55% untinted, 45% randomly from the 4 tints.
+        if (Math.random() < 0.55) return null;
+        return ENEMY_TINTS[1 + Math.floor(Math.random() * (ENEMY_TINTS.length - 1))];
+    }
+
+    // Movement styles - four patterns that cover the spec.
+    // "direct" is the existing behavior; the others wrap the step
+    // with style-specific modifiers in Enemy.update.
+    const MOVE_STYLES = ["direct", "zigzag", "heavy", "burst"];
+    function pickMoveStyle(faction) {
+        // Heavy sits naturally on guardians; sentinels stay direct
+        // since their AI already manages preferred range.
+        if (faction === "sentinel") return "direct";
+        if (faction === "guardian") return Math.random() < 0.6 ? "heavy" : "direct";
+        if (faction === "shadow")   return Math.random() < 0.4 ? "burst" : "direct";
+        if (faction === "hunter")   return Math.random() < 0.35 ? "zigzag" : "direct";
+        const r = Math.random();
+        if (r < 0.25) return "zigzag";
+        if (r < 0.40) return "burst";
+        if (r < 0.50) return "heavy";
+        return "direct";
+    }
+
+    // Attack types. Ranged is authoritative on sentinel; quick /
+    // heavy scale contactDamage + attack cooldown for non-ranged
+    // enemies so melee variants feel distinct.
+    const ATTACK_TYPES = {
+        quick: { damageMult: 0.7,  cdMin: 0.35 },
+        heavy: { damageMult: 1.6,  cdMin: 1.10 },
+    };
+    function pickAttackType(variant, faction) {
+        if (faction === "sentinel") return "ranged";
+        if (variant === "large")    return "heavy";
+        if (variant === "small")    return "quick";
+        return Math.random() < 0.5 ? "quick" : "heavy";
+    }
+
     class Enemy {
         constructor(x, y, opts = {}) {
             this.x = x;
@@ -7463,12 +7538,67 @@
             }
             // Pack bonus accumulator (hunter).
             this._packBonus = 1;
+
+            // --- Variant / visual / behavior layer ---
+            // Variants scale stats on top of whatever faction already
+            // set. Roll if the caller didn't pass one explicitly.
+            this.variant = opts.variant || pickVariant(playerStrength());
+            const vCfg = VARIANTS[this.variant] || VARIANTS.medium;
+            this.sizeScale = vCfg.sizeScale;
+            this.hp = Math.max(1, Math.round(this.hp * vCfg.hpScale));
+            this.maxHp = this.hp;
+            this.speed = this.speed * vCfg.speedScale;
+
+            // Movement style + attack type. Caller can override via
+            // opts; otherwise roll by faction + variant so the crowd
+            // is varied without being incoherent.
+            this.moveStyle = opts.moveStyle || pickMoveStyle(this.factionId);
+            this.attackType = opts.attackType
+                ?? pickAttackType(this.variant, this.factionId);
+            if (this.attackType && ATTACK_TYPES[this.attackType]) {
+                const a = ATTACK_TYPES[this.attackType];
+                this.contactDamage = Math.max(
+                    1, Math.round(this.contactDamage * a.damageMult)
+                );
+                this.attackCdMin = a.cdMin;
+            } else {
+                this.attackCdMin = 0.6;
+            }
+
+            // Color tint layered on top of faction tint for subtle
+            // per-spawn visual variety. Null = untinted.
+            this.colorTint = opts.colorTint ?? pickEnemyTint();
+
+            // Movement-style runtime state.
+            this._zigPhase = Math.random() * Math.PI * 2;
+            this._burstTimer = 0.5 + Math.random() * 0.8;
+            this._burstDashing = false;
+
+            // Contact attack cue - set on overlap, fades out
+            // drives the brief lunge offset in draw().
+            this.attackTimer = 0;
+            this.attackNextAt = 0;
+
+            // Elite promotion - bigger, stronger, glowing. Caller
+            // sets opts.isElite (rareOpts does this already) or it
+            // rolls from the rareSlots path in the spawner. Applied
+            // LAST so it compounds on the variant + faction stats.
+            this.isElite = !!opts.isElite;
+            if (this.isElite) {
+                this.hp = Math.max(1, Math.round(this.hp * 1.4));
+                this.maxHp = this.hp;
+                this.contactDamage = Math.round(this.contactDamage * 1.35);
+                this.sizeScale *= 1.12;
+                this.knockbackScale *= 0.8;
+            }
         }
 
         update(dt, target) {
             if (!this.alive) return;
 
             if (this.hitFlash > 0) this.hitFlash = Math.max(0, this.hitFlash - dt);
+            if (this.attackTimer > 0)
+                this.attackTimer = Math.max(0, this.attackTimer - dt);
 
             // Knockback integration: while the impulse is alive the
             // enemy slides away from the hit source and their AI
@@ -7587,8 +7717,40 @@
                 }
             } else if (wantsMove) {
                 const inv = 1 / dist;
-                this.x += dx * inv * moveStep;
-                this.y += dy * inv * moveStep;
+                // Movement-style modifier: zigzag adds perpendicular
+                // sway, burst alternates pause / dash, heavy slows.
+                let stepX = dx * inv * moveStep;
+                let stepY = dy * inv * moveStep;
+                const style = this.moveStyle;
+                if (style === "zigzag") {
+                    this._zigPhase += dt * 5;
+                    const perpX = -dy * inv;
+                    const perpY =  dx * inv;
+                    const sway = Math.sin(this._zigPhase) * moveStep * 0.7;
+                    stepX += perpX * sway;
+                    stepY += perpY * sway;
+                } else if (style === "heavy") {
+                    stepX *= 0.75;
+                    stepY *= 0.75;
+                } else if (style === "burst") {
+                    this._burstTimer -= dt;
+                    if (this._burstTimer <= 0) {
+                        this._burstDashing = !this._burstDashing;
+                        this._burstTimer = this._burstDashing
+                            ? 0.35
+                            : 0.7 + Math.random() * 0.5;
+                    }
+                    if (this._burstDashing) {
+                        stepX *= 2.2;
+                        stepY *= 2.2;
+                    } else {
+                        stepX = 0;
+                        stepY = 0;
+                    }
+                }
+                this.x += stepX;
+                this.y += stepY;
+                wantsMove = Math.abs(stepX) > 0.01 || Math.abs(stepY) > 0.01;
             }
 
             if (wantsMove) {
@@ -7604,7 +7766,36 @@
             if (!this.alive) return;
             const x = Math.round(this.x);
             const y = Math.round(this.y);
-            this.sheet.draw(ctx, this.animator.col, this.animator.row, x, y);
+
+            // Attack-state lunge: a 2px nudge toward the target for
+            // the brief attackTimer window. Simulates an attack frame
+            // without new sprite art.
+            let lungeX = 0, lungeY = 0;
+            if (this.attackTimer > 0 && player.alive) {
+                const pcx = player.x + player.width / 2;
+                const pcy = player.y + player.height / 2;
+                const ldx = pcx - (x + this.width / 2);
+                const ldy = pcy - (y + this.height / 2);
+                const lmag = Math.hypot(ldx, ldy) || 1;
+                lungeX = (ldx / lmag) * 2;
+                lungeY = (ldy / lmag) * 2;
+            }
+
+            // Size-scaled sprite draw. When sizeScale != 1 we call
+            // drawImage directly so the sprite can stretch; collision
+            // stays at the unscaled 32x32 box so hitreg is consistent.
+            const scale = this.sizeScale || 1;
+            const dw = this.width * scale;
+            const dh = this.height * scale;
+            const drawX = x + lungeX - (dw - this.width) / 2;
+            const drawY = y + lungeY - (dh - this.height) / 2;
+            ctx.drawImage(
+                this.sheet.image,
+                this.animator.col * this.sheet.frameW,
+                this.animator.row * this.sheet.frameH,
+                this.sheet.frameW, this.sheet.frameH,
+                drawX, drawY, dw, dh
+            );
 
             // Faction tint - one source-atop fillRect per tinted
             // enemy. Shadow / hunter / sentinel / guardian each
@@ -7613,8 +7804,39 @@
                 ctx.save();
                 ctx.globalCompositeOperation = "source-atop";
                 ctx.fillStyle = this.faction.tint;
-                ctx.fillRect(x, y, this.width, this.height);
+                ctx.fillRect(drawX, drawY, dw, dh);
                 ctx.restore();
+            }
+            // Per-spawn color tint layered on top for subtle variety.
+            if (this.colorTint) {
+                ctx.save();
+                ctx.globalCompositeOperation = "source-atop";
+                ctx.fillStyle = this.colorTint;
+                ctx.fillRect(drawX, drawY, dw, dh);
+                ctx.restore();
+            }
+
+            // Elite halo - thin gold ring around the sprite plus a
+            // soft additive glow so the player can pick elites out
+            // of a crowd at a glance.
+            if (this.isElite) {
+                const cx = drawX + dw / 2;
+                const cy = drawY + dh / 2;
+                const r = Math.max(dw, dh) * 0.6;
+                ctx.save();
+                ctx.globalCompositeOperation = "lighter";
+                const pulse = 0.5 + 0.25 * Math.sin(performance.now() * 0.006);
+                ctx.globalAlpha = 0.35 + pulse * 0.15;
+                ctx.fillStyle = "#ffd166";
+                ctx.beginPath();
+                ctx.arc(cx, cy, r, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+                ctx.strokeStyle = "rgba(255, 230, 130, 0.8)";
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.arc(cx, cy, r * 0.88, 0, Math.PI * 2);
+                ctx.stroke();
             }
 
             // Allied guardian marker - a thin green ring so the
@@ -8083,6 +8305,13 @@
             reward: Math.round((base.reward ?? 10) * 3),
             xpReward: Math.round((base.xpReward ?? 10) * 2),
             isElite: true,
+            // Elites lean into the "large, heavy hitter" read -
+            // variant + move style are pinned so the elite always
+            // feels like a distinct threat rather than a random
+            // reshuffle.
+            variant: "large",
+            moveStyle: "heavy",
+            attackType: "heavy",
         };
     }
 
@@ -10491,9 +10720,17 @@
             _playerBox.y = player.y;
             _playerBox.w = player.width;
             _playerBox.h = player.height;
+            const now = performance.now() / 1000;
             for (const e of enemies) {
                 if (!e.alive || e.ally || e.neutral) continue;
                 if (rectsOverlap(_playerBox, e.bounds())) {
+                    // Respect per-enemy attack cooldown. attackCdMin
+                    // is set from the attack type (quick / heavy /
+                    // default), so heavy attackers damage less often
+                    // than quick ones on the same contact frame.
+                    if ((e.attackNextAt ?? 0) > now) { break; }
+                    e.attackNextAt = now + (e.attackCdMin || 0.6);
+                    e.attackTimer = 0.18;  // drives the lunge in draw
                     damagePlayer(e.contactDamage);
                     break;
                 }
