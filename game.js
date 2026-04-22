@@ -3613,6 +3613,11 @@
 
     const story = {
         state: "chapter1",
+        // Fine-grained mission tag (e.g. "first_hunt_complete") set
+        // by the missions module on each completion. Lives alongside
+        // `state` so debug overlays and downstream conditionals can
+        // read either the chapter or the last mission outcome.
+        missionTag: null,
         // Ordered list drives `atLeast` and enforces one-way advance.
         chapterOrder: [
             "chapter1", "chapter2", "chapter3", "chapter4", "chapter5", "chapter6",
@@ -3685,6 +3690,119 @@
 
     // Pull any persisted chapter from a previous session.
     story.load();
+
+    // ---------------------------------------------------------------
+    // Mission manager
+    //
+    // Linear, single-active-mission progression layer that sits on
+    // top of the chapter / quest systems. Existing chapter advances
+    // and quest completions still work; missions hook into the same
+    // beats so the player sees one canonical "current objective" at
+    // any time, with an enforced sequential gate.
+    //
+    // Public API (matches the spec):
+    //   missions.list[]
+    //   missions.currentMissionIndex
+    //   missions.startMission(index)
+    //   missions.completeMission(index)
+    //   missions.getCurrentMission()
+    //
+    // Plus convenience helpers:
+    //   completeById(id)       - the typical caller, since hooks
+    //                            know the mission id, not its slot.
+    //   canTrigger(id)         - guard for mission-gated events.
+    //   reset()                - rewinds for a fresh run.
+    //
+    // Each mission carries an optional `chapter` (advances story to
+    // that chapter on complete) and a `tag` (sets story.missionTag
+    // to "<tag>_complete") so downstream NPC dialogue and event
+    // checks can branch on either.
+    // ---------------------------------------------------------------
+    const missions = {
+        list: [
+            { id: 1, name: "Speak with the Village Elder",
+              completed: false, chapter: null,       tag: "intro" },
+            { id: 2, name: "Accept the Elder's first hunt",
+              completed: false, chapter: null,       tag: "first_hunt_start" },
+            { id: 3, name: "Cull three beasts in the caverns",
+              completed: false, chapter: "chapter2", tag: "first_hunt" },
+            { id: 4, name: "Earn the Golden Key",
+              completed: false, chapter: "chapter3", tag: "key_earned" },
+            { id: 5, name: "Enter the Ethereon Shrine",
+              completed: false, chapter: "chapter4", tag: "shrine_entered" },
+            { id: 6, name: "Defeat the Shrine Keeper",
+              completed: false, chapter: "chapter5", tag: "keeper_fallen" },
+            { id: 7, name: "Descend into the Abyss",
+              completed: false, chapter: "chapter6", tag: "abyss_entered" },
+        ],
+        currentMissionIndex: 0,
+
+        getCurrentMission() {
+            return this.list[this.currentMissionIndex] ?? null;
+        },
+
+        // Spec-named alias for callers that want the natural API.
+        startMission(index) {
+            if (index < 0 || index >= this.list.length) return false;
+            // Sequential gate: cannot start mission N+1 until N is
+            // completed. This is the rule that prevents two missions
+            // running at once.
+            if (index > 0 && !this.list[index - 1].completed) return false;
+            // Don't restart an already-completed mission.
+            if (this.list[index].completed) return false;
+            this.currentMissionIndex = index;
+            return true;
+        },
+
+        completeMission(index) {
+            // Trigger guard: the only mission a caller can complete
+            // is the active one. Out-of-order completes are dropped
+            // silently so a stale event hook can't skip the chain.
+            if (index !== this.currentMissionIndex) return false;
+            const m = this.list[index];
+            if (!m || m.completed) return false;
+            m.completed = true;
+
+            // Story sync. `chapter` advances the story module (which
+            // in turn fires its cinematic / toast); `tag` sets the
+            // fine-grained missionTag for debug + dialogue branches.
+            if (m.chapter) story.advance(m.chapter);
+            story.missionTag = `${m.tag}_complete`;
+
+            questLog.showToast(`Mission complete: ${m.name}`, 2.6);
+            sound.play("levelUp");
+
+            // Auto-advance the cursor onto the next mission so the
+            // next event hook can complete it (no separate startMission
+            // call required for the linear flow). startMission stays
+            // available for callers that want explicit control.
+            if (index + 1 < this.list.length) {
+                this.currentMissionIndex = index + 1;
+            }
+            return true;
+        },
+
+        completeById(id) {
+            const cur = this.getCurrentMission();
+            if (!cur || cur.id !== id) return false;
+            return this.completeMission(this.currentMissionIndex);
+        },
+
+        // Trigger-time guard. Event handlers call this before firing
+        // mission-specific work so they don't double-trigger or run
+        // out of order:
+        //   if (missions.canTrigger(3)) { ... }
+        canTrigger(id) {
+            const cur = this.getCurrentMission();
+            return !!(cur && cur.id === id);
+        },
+
+        reset() {
+            for (const m of this.list) m.completed = false;
+            this.currentMissionIndex = 0;
+            story.missionTag = null;
+        },
+    };
 
     // ---------------------------------------------------------------
     // Chapter-staged text picker
@@ -4090,6 +4208,9 @@
             if (this.active || this.hasCompleted(id)) return false;
             this.active = { id, progress: 0 };
             this.showToast(`New quest: ${tmpl.title}`);
+            // Mission 2: accepting the Elder's first hunt closes the
+            // "Accept the brief" beat. No-op if mission 2 isn't current.
+            if (id === "slay3") missions.completeById(2);
             return true;
         },
 
@@ -4127,6 +4248,10 @@
             // no-op, so it's safe to call blindly here.
             if (tmpl.id === "slay3")  story.advance("chapter2");
             if (tmpl.id === "slay10") story.advance("chapter3");
+            // Mission sync. completeById's id-must-match-current rule
+            // means stale quest events never skip ahead.
+            if (tmpl.id === "slay3")  missions.completeById(3);
+            if (tmpl.id === "slay10") missions.completeById(4);
         },
 
         showToast(msg, duration = 2.5) {
@@ -4723,6 +4848,8 @@
             // Victory chapter - the Shrine Keeper's fall closes the
             // main campaign beat.
             story.advance("chapter5");
+            // Mission 6: Shrine Keeper falls.
+            if (enemy.levelId === "shrine") missions.completeById(6);
             // Shrine specifically unlocks the Abyss. A second toast
             // queues after the defeat banner so the player knows a
             // new path just opened behind them.
@@ -4853,6 +4980,12 @@
     // keeps running so the overlay renders; the last frame stays
     // visible behind it.
     let paused = false;
+
+    // Debug overlay toggle (D key). Surfaces mission progression,
+    // story state, active quest, and squad cap so it's easy to
+    // spot mission overlap or off-by-one chapter advances during
+    // playtests. Off by default; not persisted.
+    let debugOverlay = false;
 
     // ---------------------------------------------------------------
     // Tutorial
@@ -5014,6 +5147,11 @@
                     attackCooldown: attack.cooldown,
                 },
                 story: story.state,
+                missionTag: story.missionTag,
+                missions: {
+                    currentMissionIndex: missions.currentMissionIndex,
+                    completed: missions.list.map(m => !!m.completed),
+                },
                 quest: {
                     active: questLog.active ? { ...questLog.active } : null,
                     completedIds: [...questLog.completedIds],
@@ -5045,6 +5183,22 @@
             stats.xp        = data.stats.xp;
             stats.xpForNext = data.stats.xpForNext;
             story.state     = data.story;
+            story.missionTag = data.missionTag ?? null;
+            // Mission roster restore. Older saves without the field
+            // fall through to a fresh roster (reset()), so loading a
+            // pre-mission save doesn't crash.
+            if (data.missions) {
+                missions.currentMissionIndex = Math.min(
+                    data.missions.currentMissionIndex ?? 0,
+                    missions.list.length - 1
+                );
+                const flags = data.missions.completed ?? [];
+                for (let i = 0; i < missions.list.length; i++) {
+                    missions.list[i].completed = !!flags[i];
+                }
+            } else {
+                missions.reset();
+            }
             questLog.active = data.quest.active
                 ? { ...data.quest.active }
                 : null;
@@ -7949,6 +8103,11 @@
                 mode: "menu",
             };
             this.optionRects = [];
+
+            // Mission 1: speaking with the Elder is the opening
+            // beat. completeById is a no-op if mission 1 isn't
+            // current, so re-talking later is safe.
+            if (npc.id === "elder") missions.completeById(1);
         },
 
         close() {
@@ -9356,6 +9515,11 @@
             inventoryOpen = !inventoryOpen;
         }
 
+        // Debug overlay toggle.
+        if (keysJustPressed["d"] || keysJustPressed["D"]) {
+            debugOverlay = !debugOverlay;
+        }
+
         // Weapon switching - edge-triggered, alive-only.
         if (keysJustPressed["1"]) player.weaponIndex = 0;
         if (keysJustPressed["2"]) player.weaponIndex = 1;
@@ -9574,6 +9738,11 @@
         // a spoiler on first shrine entry.
         if (id === "abyss")   story.advance("chapter6");
 
+        // Mission sync. completeById no-ops if the indexed mission
+        // isn't current, so re-entering a zone later won't re-fire.
+        if (id === "shrine") missions.completeById(5);
+        if (id === "abyss")  missions.completeById(7);
+
         currentLevel = level;
         world.load(level);
 
@@ -9740,6 +9909,9 @@
         // localStorage is also cleared so the next page load opens
         // on chapter 1, not wherever we died.
         story.reset();
+        // Missions track the same campaign beats as story chapters,
+        // so a fresh run rewinds them too.
+        missions.reset();
 
         // Lore discoveries - same persistence contract as story.
         loreLog.reset();
@@ -9929,6 +10101,7 @@
         drawCooldownBar();
         drawEnemyCounter();
         drawWaveIndicator();
+        if (debugOverlay) drawDebugOverlay();
         drawBossHealth();
         joystick.draw(ctx);
         attackButton.draw(ctx);
@@ -11401,6 +11574,73 @@
     // Wave readout - only shows in hostile zones when a wave campaign
     // is active or just finished. Hidden in safe zones so the HUD
     // stays clean in the grove / interiors.
+    // Debug overlay - press D in gameplay to toggle. Surfaces the
+    // mission roster (current vs done), story chapter + missionTag,
+    // active quest progress, and squad cap so mission overlap or
+    // off-by-one chapter advances are obvious at a glance.
+    function drawDebugOverlay() {
+        const w = Math.min(360, VIEW_W - 24);
+        const lineH = 14;
+        const padX = 12;
+        const padY = 10;
+        const cur = missions.getCurrentMission();
+        const aq = questLog.active ? QUESTS[questLog.active.id] : null;
+
+        const lines = [];
+        lines.push("--- DEBUG (D to hide) ---");
+        lines.push(`Story: ${story.state}`
+            + (story.missionTag ? `  tag=${story.missionTag}` : ""));
+        lines.push(`Mission: ${cur
+            ? `${cur.id} - ${cur.name}`
+            : "(all complete)"}`);
+        lines.push(`Quest: ${aq
+            ? `${aq.title}  ${questLog.active.progress}/${aq.target}`
+            : "(none)"}`);
+        lines.push(
+            `Squad: ${player.squad.length}/${companions.maxSize()}` +
+            `   Wave: ${spawner.waveState === "idle"
+                ? "-" : `${Math.min(spawner.waveIndex + 1, spawner.totalWaves)}/${spawner.totalWaves}`}`
+        );
+        lines.push("Missions:");
+        for (let i = 0; i < missions.list.length; i++) {
+            const m = missions.list[i];
+            const mark = m.completed ? "[x]"
+                       : i === missions.currentMissionIndex ? "[>]"
+                       : "[ ]";
+            lines.push(`  ${mark} ${m.id}. ${m.name}`);
+        }
+
+        const h = padY * 2 + lines.length * lineH;
+        // Sit just under the score panel's right edge to leave the
+        // gameplay HUD untouched. Width caps so it fits in portrait.
+        const x = 8;
+        const y = 100;
+
+        ctx.save();
+        ctx.globalAlpha = 0.92;
+        roundRectPath(ctx, x, y, w, h, 6);
+        ctx.fillStyle = "rgba(8, 10, 16, 0.88)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(138, 217, 255, 0.55)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        let ly = y + padY;
+        for (const line of lines) {
+            const isHeader = line.startsWith("---") || line.endsWith(":");
+            drawShadowedText(
+                line, x + padX, ly,
+                isHeader ? "#8ad9ff" : "#e8e8f0",
+                "12px ui-monospace, Menlo, monospace"
+            );
+            ly += lineH;
+        }
+        ctx.restore();
+    }
+
     function drawWaveIndicator() {
         if (isSafeZone()) return;
         if (spawner.waveState === "idle") return;
