@@ -2219,6 +2219,73 @@
     };
 
     // ---------------------------------------------------------------
+    // Pause button (touch / pointer)
+    //
+    // Tiny top-right square. Toggles the paused flag when tapped.
+    // While paused, the on-screen menu takes over, so tapping the
+    // same icon during pause is a no-op (menu handles resume).
+    // ---------------------------------------------------------------
+    const pauseButton = {
+        x: 0, y: 0,
+        w: 36, h: 36,
+
+        layout() {
+            this.x = VIEW_W - this.w - 12;
+            this.y = 12;
+        },
+
+        pressed: false,
+        pointerId: null,
+        justPressed: false,
+
+        contains(x, y) {
+            return x >= this.x && x <= this.x + this.w &&
+                   y >= this.y && y <= this.y + this.h;
+        },
+
+        onDown(x, y, pointerId) {
+            if (this.pressed) return false;
+            if (!this.contains(x, y)) return false;
+            this.pressed = true;
+            this.pointerId = pointerId;
+            this.justPressed = true;
+            return true;
+        },
+
+        onUp(pointerId) {
+            if (this.pointerId !== pointerId) return;
+            this.pressed = false;
+            this.pointerId = null;
+        },
+
+        consumeJustPressed() {
+            const v = this.justPressed;
+            this.justPressed = false;
+            return v;
+        },
+
+        draw(ctx) {
+            ctx.save();
+            const y = this.y + (this.pressed ? 1 : 0);
+            ctx.globalAlpha = 0.75;
+            ctx.fillStyle = "rgba(20, 20, 30, 0.85)";
+            roundRectPath(ctx, this.x, y, this.w, this.h, 6);
+            ctx.fill();
+            ctx.strokeStyle = "rgba(255, 209, 102, 0.45)";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            // Two vertical bars = classic pause icon.
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = "#e8e8f0";
+            const cx = this.x + this.w / 2;
+            const cy = y + this.h / 2;
+            ctx.fillRect(cx - 6, cy - 8, 4, 16);
+            ctx.fillRect(cx + 2, cy - 8, 4, 16);
+            ctx.restore();
+        },
+    };
+
+    // ---------------------------------------------------------------
     // Interact button (touch / pointer)
     //
     // Appears bottom-center only when the player is standing near an
@@ -2307,6 +2374,7 @@
         superPowerButton.layout();
         specialButton.layout();
         interactButton.layout();
+        pauseButton.layout();
     });
     // Button layouts need to be valid before the first frame, but
     // resizeDisplay() runs before any of these objects exist. Kick
@@ -2317,6 +2385,7 @@
     powerButton.layout();
     specialButton.layout();
     interactButton.layout();
+    pauseButton.layout();
 
     // ---------------------------------------------------------------
     // Restart button (game-over only)
@@ -2433,6 +2502,23 @@
             return;
         }
 
+        // Pause: routes all taps to the pause-menu row rects. The
+        // pause button itself is tappable too (to resume), but it's
+        // easier to consume it here than reason about re-entry.
+        if (paused) {
+            if (pauseMenu.handlePointer(x, y)) {
+                e.preventDefault();
+                return;
+            }
+            if (pauseButton.contains(x, y)) {
+                paused = false;
+                e.preventDefault();
+                return;
+            }
+            e.preventDefault();
+            return;
+        }
+
         // Shop is modal - taps only hit item rows or the close button.
         if (shop.isOpen()) {
             handleShopPointer(x, y);
@@ -2454,6 +2540,16 @@
                 canvas.setPointerCapture(e.pointerId);
                 e.preventDefault();
             }
+            return;
+        }
+
+        // Pause button sits in the top-right corner, well clear of
+        // the joystick region. Tapping toggles into the pause menu.
+        if (pauseButton.onDown(x, y, e.pointerId)) {
+            canvas.setPointerCapture(e.pointerId);
+            paused = true;
+            pauseButton.consumeJustPressed();  // consume so update() doesn't retoggle
+            e.preventDefault();
             return;
         }
 
@@ -2517,6 +2613,7 @@
         specialButton.onUp(e.pointerId);
         interactButton.onUp(e.pointerId);
         restartButton.onUp(e.pointerId);
+        pauseButton.onUp(e.pointerId);
     }
     canvas.addEventListener("pointerup", endPointer);
     canvas.addEventListener("pointercancel", endPointer);
@@ -3866,6 +3963,211 @@
 
     // Inventory UI toggle state. Set from the `I` key in update().
     let inventoryOpen = false;
+
+    // Pause flag. When true, update() short-circuits before ticking
+    // any gameplay subsystem, so the world visibly freezes. draw()
+    // keeps running so the overlay renders; the last frame stays
+    // visible behind it.
+    let paused = false;
+
+    // ---------------------------------------------------------------
+    // Save / load
+    //
+    // Persists a focused slice of run state to localStorage:
+    //   - player pose + resources + inventory + squad
+    //   - stats (score, kills, level, xp)
+    //   - baseline mutations from shop upgrades (so reloads keep
+    //     purchased damage / HP / cooldown bumps)
+    //   - story chapter + quest progress + defeated bosses +
+    //     unlocked doors + current level id
+    //
+    // What's intentionally dropped: live enemy positions, in-flight
+    // projectiles, scatter tile scatter. On load we transitionTo the
+    // saved level which reseeds enemies - accept that as the cost of
+    // a simple save format.
+    //
+    // Versioned so future schema changes can reject old blobs
+    // cleanly instead of corrupting a run.
+    // ---------------------------------------------------------------
+    const SAVE_KEY = "ethereon.save";
+    const SAVE_VERSION = 1;
+
+    const saveGame = {
+        exists() {
+            try { return localStorage.getItem(SAVE_KEY) !== null; }
+            catch { return false; }
+        },
+
+        read() {
+            try {
+                const raw = localStorage.getItem(SAVE_KEY);
+                if (!raw) return null;
+                const data = JSON.parse(raw);
+                if (data.version !== SAVE_VERSION) return null;
+                return data;
+            } catch { return null; }
+        },
+
+        write() {
+            const data = {
+                version: SAVE_VERSION,
+                savedAt: Date.now(),
+                levelId: currentLevel.id,
+                player: {
+                    x: player.x, y: player.y,
+                    hp: player.hp, maxHp: player.maxHp,
+                    magic: player.magic, maxMagic: player.maxMagic,
+                    coins: player.coins,
+                    inventory: [...player.inventory],
+                    squad: player.squad.map(m => ({ ...m })),
+                    weaponIndex: player.weaponIndex,
+                },
+                stats: {
+                    score: stats.score, kills: stats.kills,
+                    level: stats.level, xp: stats.xp,
+                    xpForNext: stats.xpForNext,
+                },
+                weapons: {
+                    swordDamage:    swordWeapon.damage,
+                    energyDamage:   energyWeapon.damage,
+                    energyCooldown: energyWeapon.cooldownMax,
+                    powerDamage:    powerMove.damage,
+                    attackCooldown: attack.cooldown,
+                },
+                story: story.state,
+                quest: {
+                    active: questLog.active ? { ...questLog.active } : null,
+                    completedIds: [...questLog.completedIds],
+                },
+                defeatedBosses: [...defeatedBosses],
+                unlockedDoors:  [...unlockedDoors],
+            };
+            try {
+                localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+                return true;
+            } catch { return false; }
+        },
+
+        apply(data) {
+            if (!data) return false;
+
+            // Baseline weapon tunables first, so any further damage
+            // math (on enemy contact, etc.) reads the restored vals.
+            swordWeapon.damage    = data.weapons.swordDamage;
+            energyWeapon.damage   = data.weapons.energyDamage;
+            energyWeapon.cooldownMax = data.weapons.energyCooldown;
+            powerMove.damage      = data.weapons.powerDamage;
+            attack.cooldown       = data.weapons.attackCooldown;
+
+            // Stats + story + quest log
+            stats.score     = data.stats.score;
+            stats.kills     = data.stats.kills;
+            stats.level     = data.stats.level;
+            stats.xp        = data.stats.xp;
+            stats.xpForNext = data.stats.xpForNext;
+            story.state     = data.story;
+            questLog.active = data.quest.active
+                ? { ...data.quest.active }
+                : null;
+            questLog.completedIds = new Set(data.quest.completedIds);
+
+            // Sets
+            defeatedBosses.clear();
+            for (const id of data.defeatedBosses) defeatedBosses.add(id);
+            unlockedDoors.clear();
+            for (const k of data.unlockedDoors) unlockedDoors.add(k);
+
+            // Transition to the saved level. This reseeds enemies,
+            // clears projectiles/drops, and runs the chapter-entry
+            // advance (which is a no-op if we're already past it).
+            const target = LEVELS[data.levelId] || LEVELS.grove;
+            transitionTo(target.id, null, { x: data.player.x, y: data.player.y });
+
+            // Restore player resources after transitionTo has reset
+            // velocity / position to its defaults.
+            player.x = data.player.x;
+            player.y = data.player.y;
+            player.hp = data.player.hp;
+            player.maxHp = data.player.maxHp;
+            player.magic = data.player.magic;
+            player.maxMagic = data.player.maxMagic;
+            player.coins = data.player.coins;
+            player.inventory.length = 0;
+            for (const id of data.player.inventory) player.inventory.push(id);
+            player.squad.length = 0;
+            for (const m of data.player.squad) player.squad.push({ ...m });
+            player.weaponIndex = data.player.weaponIndex;
+
+            camera.snap(player);
+            cloak.snap();
+            aura.snap();
+            return true;
+        },
+
+        load() { return this.apply(this.read()); },
+
+        clear() {
+            try { localStorage.removeItem(SAVE_KEY); } catch {}
+        },
+    };
+
+    // Pause-menu state. Rects are screen-space and refreshed each
+    // draw so they automatically follow resize without a layout
+    // callback. Touch + keyboard both route here via handleAction.
+    const pauseMenu = {
+        rects: {
+            resume: { x: 0, y: 0, w: 0, h: 0 },
+            save:   { x: 0, y: 0, w: 0, h: 0 },
+            load:   { x: 0, y: 0, w: 0, h: 0 },
+        },
+        // Brief on-screen toast inside the pause panel - "Saved.",
+        // "No save found.", etc. Ticks from update() while paused.
+        statusText: "",
+        statusTimer: 0,
+
+        setStatus(msg) {
+            this.statusText = msg;
+            this.statusTimer = 2.2;
+        },
+
+        handleAction(name) {
+            if (name === "resume") {
+                paused = false;
+                return;
+            }
+            if (name === "save") {
+                this.setStatus(saveGame.write() ? "Saved." : "Save failed.");
+                return;
+            }
+            if (name === "load") {
+                if (!saveGame.exists()) { this.setStatus("No save found."); return; }
+                if (saveGame.load()) {
+                    this.setStatus("Loaded.");
+                    paused = false;
+                } else {
+                    this.setStatus("Load failed.");
+                }
+            }
+        },
+
+        handlePointer(x, y) {
+            for (const [name, r] of Object.entries(this.rects)) {
+                if (x >= r.x && x <= r.x + r.w &&
+                    y >= r.y && y <= r.y + r.h) {
+                    this.handleAction(name);
+                    return true;
+                }
+            }
+            return false;
+        },
+
+        tick(dt) {
+            if (this.statusTimer > 0) {
+                this.statusTimer = Math.max(0, this.statusTimer - dt);
+                if (this.statusTimer === 0) this.statusText = "";
+            }
+        },
+    };
 
     // ---------------------------------------------------------------
     // Weapons
@@ -7376,6 +7678,44 @@
             return;
         }
 
+        // Pause: routes only pause-menu inputs. Toggling is allowed
+        // from here (P / Escape) so the player can resume with the
+        // same key that opened the menu. Gameplay ticks are skipped
+        // entirely while paused.
+        if (paused) {
+            if (keysJustPressed["p"] || keysJustPressed["P"] ||
+                keysJustPressed["Escape"]) {
+                pauseMenu.handleAction("resume");
+            } else if (keysJustPressed["s"] || keysJustPressed["S"]) {
+                pauseMenu.handleAction("save");
+            } else if (keysJustPressed["l"] || keysJustPressed["L"]) {
+                pauseMenu.handleAction("load");
+            }
+            // Mobile: tapping the pause icon again resumes.
+            if (pauseButton.consumeJustPressed()) {
+                pauseMenu.handleAction("resume");
+            }
+            pauseMenu.tick(dt);
+            clearJustPressed();
+            return;
+        }
+
+        // Enter pause: P key toggles, only in live gameplay. Other
+        // modals (cinematic/shop/dialogue) suppress the toggle so
+        // typing a P in an input doesn't pause mid-question.
+        if (gameState === "playing" &&
+            (keysJustPressed["p"] || keysJustPressed["P"]) &&
+            !cinematic.isOpen() && !shop.isOpen() && !dialogue.isOpen()) {
+            paused = true;
+            clearJustPressed();
+            return;
+        }
+        if (gameState === "playing" && pauseButton.consumeJustPressed()) {
+            paused = true;
+            clearJustPressed();
+            return;
+        }
+
         // Game over: frozen. The R key (and restart button, handled in
         // pointer events) are the only live inputs. The level-up
         // toast is left decaying so it can fade out gracefully.
@@ -7737,6 +8077,14 @@
     // ---------------------------------------------------------------
     function restartGame() {
         gameState = "playing";
+        // Pause shouldn't bleed from a previous session into a fresh
+        // run (e.g. if the player paused, died, then hit restart).
+        paused = false;
+        pauseMenu.statusText = "";
+        pauseMenu.statusTimer = 0;
+        pauseButton.pressed = false;
+        pauseButton.pointerId = null;
+        pauseButton.justPressed = false;
 
         // Stats (score, kills, level, xp)
         stats.reset();
@@ -7995,6 +8343,7 @@
         superPowerButton.draw(ctx);
         specialButton.draw(ctx);
         interactButton.draw(ctx);
+        if (gameState === "playing") pauseButton.draw(ctx);
         drawQuestPanel();
 
         if (stats.levelUpToast > 0) drawLevelUpToast();
@@ -8009,6 +8358,11 @@
             restartButton.draw(ctx);
         }
         if (gameState === "intro") drawIntro();
+
+        // Pause overlay - drawn above every gameplay layer but below
+        // the flash + cinematic so a special-attack freeze-frame +
+        // pause still reads correctly.
+        if (paused) drawPauseMenu();
 
         // Full-screen flash overlay - drawn above the HUD so the
         // impact frame briefly whites out everything. Idle frames
@@ -8651,6 +9005,85 @@
     // with name, effect, and price. Each row is tappable (stored in
     // `shop.itemRects`) and the panel header carries a close button
     // whose hitbox is stashed in `shop.closeRect`.
+    // Pause overlay. Dims the world, draws three stacked tap rows
+    // (Resume / Save / Load) with keyboard hints, and a small status
+    // line fed by pauseMenu.setStatus. Rects are stored on pauseMenu
+    // so tap hit-testing can run against the same coords.
+    function drawPauseMenu() {
+        const w = Math.min(340, VIEW_W - 40);
+        const h = 240;
+        const x = Math.floor((VIEW_W - w) / 2);
+        const y = Math.floor((VIEW_H - h) / 2);
+
+        ctx.fillStyle = "rgba(0, 0, 0, 0.62)";
+        ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+        ctx.save();
+        roundRectPath(ctx, x, y, w, h, 12);
+        ctx.fillStyle = "rgba(18, 18, 30, 0.95)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255, 209, 102, 0.55)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        drawShadowedText("PAUSED", x + w / 2, y + 16, "#ffd166",
+            "bold 20px system-ui, sans-serif");
+
+        // Row layout: three evenly-spaced buttons.
+        const rowW = w - 40;
+        const rowH = 38;
+        const rowX = x + 20;
+        let rowY = y + 58;
+        const gap = 10;
+
+        const hasSave = saveGame.exists();
+        const rows = [
+            { id: "resume", label: "Resume",  hint: "P / Esc", enabled: true },
+            { id: "save",   label: "Save",    hint: "S",       enabled: true },
+            { id: "load",   label: "Load",    hint: "L",       enabled: hasSave },
+        ];
+
+        for (const row of rows) {
+            const r = pauseMenu.rects[row.id];
+            r.x = rowX; r.y = rowY; r.w = rowW; r.h = rowH;
+
+            ctx.globalAlpha = row.enabled ? 1 : 0.45;
+            roundRectPath(ctx, rowX, rowY, rowW, rowH, 6);
+            ctx.fillStyle = "#2a2a38";
+            ctx.fill();
+            ctx.strokeStyle = "rgba(255, 209, 102, 0.38)";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            ctx.textAlign = "left";
+            ctx.textBaseline = "middle";
+            drawShadowedText(row.label, rowX + 14, rowY + rowH / 2,
+                "#e8e8f0", "bold 15px system-ui, sans-serif");
+            ctx.textAlign = "right";
+            drawShadowedText(row.hint, rowX + rowW - 14, rowY + rowH / 2,
+                "#a0a0b8", "12px system-ui, sans-serif");
+
+            rowY += rowH + gap;
+        }
+        ctx.globalAlpha = 1;
+
+        // Status line at the bottom - fades in/out via statusTimer.
+        if (pauseMenu.statusText) {
+            ctx.textAlign = "center";
+            ctx.textBaseline = "bottom";
+            ctx.globalAlpha = Math.min(1, pauseMenu.statusTimer / 0.5);
+            drawShadowedText(pauseMenu.statusText,
+                x + w / 2, y + h - 14,
+                "#8ad9ff",
+                "13px system-ui, sans-serif");
+            ctx.globalAlpha = 1;
+        }
+
+        ctx.restore();
+    }
+
     function drawShop() {
         const w = Math.min(420, VIEW_W - 40);
         const h = Math.min(380, VIEW_H - 60);
