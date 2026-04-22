@@ -7017,7 +7017,7 @@
         if (res.reason === "already") {
             msg = `${npc.name} is already at your side.`;
         } else if (res.reason === "full") {
-            msg = `Squad full (${player.squad.length}/${companions.maxSize()}). Finish a chapter to lead more.`;
+            msg = `Your squad is full (max ${companions.hardCap})`;
         } else if (res.reason === "early") {
             msg = `${npc.name}: "Not yet. Earn your name first."`;
         } else {
@@ -9305,6 +9305,7 @@
         drawQuestPanel();
         drawSquadIndicator();
         drawTutorial();
+        drawRecruitHint();
 
         if (stats.levelUpToast > 0) drawLevelUpToast();
         if (questLog.toastTimer > 0) drawQuestToast();
@@ -9629,6 +9630,54 @@
             "bold 12px system-ui, sans-serif"
         );
 
+        ctx.restore();
+    }
+
+    // Contextual recruit hint. Shows a small chip when the nearest
+    // NPC is an unrecruited warrior and the player hasn't learned
+    // recruitment yet (squad still empty). Auto-hides once the
+    // player has any squadmate, so it never nags the second time.
+    // Hidden during modals and game-over so it doesn't stack.
+    function drawRecruitHint() {
+        if (gameState !== "playing") return;
+        if (paused || dialogue.isOpen() || shop.isOpen() ||
+            cinematic.isOpen()) return;
+        // Stop hinting once the player has recruited anyone - the
+        // mechanic is learned, continued chips would be clutter.
+        if (player.squad.length > 0) return;
+
+        const npc = nearestNpc();
+        if (!npc || npc.role !== "warrior") return;
+        if (companions.has(npc.id)) return;
+
+        const text = "Press E to speak";
+        ctx.save();
+        ctx.font = "bold 13px system-ui, sans-serif";
+        const padX = 14;
+        const tw = ctx.measureText(text).width;
+        const w = Math.ceil(tw + padX * 2);
+        const h = 30;
+        // Sit above the tutorial banner (or alone if tutorial is
+        // done). Both are clearly stacked near the bottom center.
+        const yBase = tutorial.isActive() ? VIEW_H - 240 : VIEW_H - 200;
+        const x = Math.floor((VIEW_W - w) / 2);
+        const y = yBase;
+
+        ctx.globalAlpha = 0.92;
+        roundRectPath(ctx, x, y, w, h, 6);
+        ctx.fillStyle = "rgba(18, 18, 30, 0.92)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(138, 217, 255, 0.55)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.globalAlpha = 1;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        drawShadowedText(
+            text, x + w / 2, y + h / 2,
+            "#e8e8f0", "bold 13px system-ui, sans-serif"
+        );
         ctx.restore();
     }
 
@@ -10383,6 +10432,23 @@
         if (d.mode === "menu") {
             // Options start below the body text, each clickable.
             const optionsTop = Math.max(lineY + 10, y + boxH - 10 - d.options.length * 26);
+
+            // Recruitment hint - only shown to first-time recruiters,
+            // pointing at the Fight-with-me option. Auto-hides once
+            // the player already has any squadmate so it doesn't nag
+            // on subsequent conversations.
+            if (d.npc && d.npc.role === "warrior" &&
+                !companions.has(d.npc.id) &&
+                player.squad.length === 0) {
+                ctx.textAlign = "left";
+                drawShadowedText(
+                    "Select 'Fight with me' to recruit",
+                    x + 18, optionsTop - 18,
+                    "#8ad9ff",
+                    "italic 12px system-ui, sans-serif"
+                );
+            }
+
             for (let i = 0; i < d.options.length; i++) {
                 const opt = d.options[i];
                 const oy = optionsTop + i * 26;
