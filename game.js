@@ -4714,6 +4714,8 @@
         stats.addKill(enemy);
         rollEnemyDrop(enemy);
         corruption.onKill();
+        noteKillTimestamp();
+        spawner.onEnemyDefeated(enemy);
         if (enemy.isBoss && enemy.levelId) {
             defeatedBosses.add(enemy.levelId);
             questLog.showToast(`${enemy.name} defeated!`, 2.6);
@@ -6578,124 +6580,247 @@
     //   All the knobs sit at the top of the object so tuning is a
     //   single-line change.
     // ---------------------------------------------------------------
+    // Rolling kill-rate tracker. Timestamps of enemy defeats in the
+    // last 30s, popped as they age out. Drives one factor of the
+    // player-strength heuristic below without scanning every enemy
+    // per frame.
+    const killHistory = [];
+    function noteKillTimestamp() {
+        const now = performance.now() / 1000;
+        killHistory.push(now);
+        // Drop old entries so the array can't grow unbounded.
+        while (killHistory.length && killHistory[0] < now - 30) {
+            killHistory.shift();
+        }
+    }
+    function recentKillsPerMin() {
+        const now = performance.now() / 1000;
+        while (killHistory.length && killHistory[0] < now - 30) {
+            killHistory.shift();
+        }
+        // Kills over 30s -> kills per minute.
+        return killHistory.length * 2;
+    }
+
+    // Lightweight composite of offensive progression. Used by the
+    // wave builder to nudge count + enemy stats so a leveled-up
+    // player with a sharpened sword sees denser / tougher waves than
+    // a fresh run. Clamped at the top so it can't cascade into a
+    // kill-in-one-hit meta.
+    function playerStrength() {
+        const levelScore = stats.level;
+        const sword = swordWeapon.damage ?? 1;
+        const energy = energyWeapon.damage ?? 1;
+        const dmgScore = Math.max(sword, energy) - 1;  // bonus over baseline
+        const killScore = Math.min(6, recentKillsPerMin() / 10);
+        return levelScore + dmgScore + killScore;
+    }
+
+    // Builds the configuration for wave N based on the level's base
+    // opts, the wave index (0..total-1), and the player's current
+    // strength. Keeps the math in one place so adaptive tuning is
+    // easy to read + tweak.
+    function buildWave(index, total, strength, baseOpts, perWaveBase) {
+        // Wave count: base + index ramp + strength bump, hard-capped
+        // so stronger players don't summon literal hordes.
+        const count = Math.min(
+            12,
+            perWaveBase + index + Math.floor(strength * 0.6)
+        );
+        // Stat scale: gentle per-wave ramp plus strength add. Enemies
+        // never exceed 2.5x their base stats even at max strength +
+        // final wave, so the curve is firm but fair.
+        const hpScale = Math.min(2.5, 1 + index * 0.15 + strength * 0.08);
+        const spdScale = Math.min(1.6, 1 + index * 0.05 + strength * 0.03);
+        const opts = {
+            hp: Math.max(1, Math.round((baseOpts.hp ?? 3) * hpScale)),
+            speed: Math.round((baseOpts.speed ?? 100) * spdScale),
+        };
+        // Preserve passthrough fields (contactDamage, reward, xpReward)
+        // so zone-specific tuning survives the scale pass.
+        if (baseOpts.contactDamage != null) opts.contactDamage = baseOpts.contactDamage;
+        if (baseOpts.reward != null)        opts.reward        = baseOpts.reward;
+        if (baseOpts.xpReward != null)      opts.xpReward      = baseOpts.xpReward;
+
+        // Rare slots: one elite per wave at ~35% chance once the
+        // player has a little strength, adding variance without
+        // telegraphing the exact spawn index.
+        const rareSlots = new Set();
+        const rareChance = 0.20 + Math.min(0.25, strength * 0.04);
+        if (count > 0 && Math.random() < rareChance) {
+            rareSlots.add(Math.floor(Math.random() * count));
+        }
+        return { count, opts, rareSlots };
+    }
+
+    function rareOpts(base) {
+        return {
+            hp: Math.max(1, Math.round((base.hp ?? 3) * 2)),
+            speed: Math.round((base.speed ?? 100) * 1.1 + 10),
+            contactDamage: base.contactDamage,
+            reward: Math.round((base.reward ?? 10) * 3),
+            xpReward: Math.round((base.xpReward ?? 10) * 2),
+            isElite: true,
+        };
+    }
+
     const spawner = {
-        // --- Difficulty ramp (tunable) ---
-        startMaxActive: 5,           // opening population target
-        endMaxActive: MAX_ENEMIES,   // fully-ramped target (hard cap)
-        startInterval: 2.5,          // seconds between spawns at start
-        endInterval: 0.6,            // seconds between spawns at peak
-        rampSeconds: 120,            // time to reach full difficulty
-
         // --- Placement constraints ---
-        minDistFromPlayer: 200,      // don't spawn right on top of the player
-        margin: 64,                  // keep clear of the stone border
+        minDistFromPlayer: 200,
+        margin: 64,
 
-        // --- Runtime state ---
-        maxActive: 5,
-        interval: 2.5,
-        timer: 0,
-        elapsed: 0,
+        // --- Per-level config (set by configure) ---
+        baseOpts: {},
+        baseWaveCount: 3,
+        perWaveBase: 5,
 
-        // Per-level Enemy opts. Populated by `configure(level)` and
-        // passed to every spawnEnemy call so each zone can ship its
-        // own hp / speed / reward.
-        enemyOpts: {},
+        // --- Wave runtime ---
+        waveIndex: 0,         // 1-based externally, 0-based internally
+        totalWaves: 3,
+        waveState: "idle",    // "active" | "intermission" | "complete"
+        intermissionTimer: 0,
+        spawnQueue: 0,        // enemies left to spawn in this wave
+        spawnTimer: 0,        // seconds until next stagger-spawn
+        spawnIndex: 0,        // cursor into rareSlots (which indexes are elite)
+        remainingToKill: 0,   // alive + unspawned wave members
+        currentOpts: {},
+        rareSlots: new Set(),
 
-        // Recompute maxActive / interval from the current `elapsed`.
-        // Cheap (a few arithmetic ops), and once the ramp peaks we
-        // pin the values and skip the math entirely each tick.
-        refresh() {
-            if (this.elapsed >= this.rampSeconds) {
-                this.interval = this.endInterval;
-                this.maxActive = this.endMaxActive;
-                return;
-            }
-            const t = this.elapsed / this.rampSeconds;
-            this.interval =
-                this.startInterval + (this.endInterval - this.startInterval) * t;
-            this.maxActive = Math.floor(
-                this.startMaxActive +
-                    (this.endMaxActive - this.startMaxActive) * t
-            );
-        },
-
-        // Try random candidate positions until one meets our rules.
-        // Caps attempts so a bad config (e.g. margins that leave no
-        // valid area) can't freeze the frame.
         findSpot() {
             const minDistSq = this.minDistFromPlayer * this.minDistFromPlayer;
             const px = player.x + player.width / 2;
             const py = player.y + player.height / 2;
-
             for (let i = 0; i < 24; i++) {
                 const x = this.margin + Math.random() * (WORLD_W - 2 * this.margin);
                 const y = this.margin + Math.random() * (WORLD_H - 2 * this.margin);
-
                 const dx = x - px;
                 const dy = y - py;
                 if (dx * dx + dy * dy < minDistSq) continue;
-
-                // Reserved for when world.isSolid does something.
                 const col = Math.floor(x / TILE);
                 const row = Math.floor(y / TILE);
                 if (world.isSolid(col, row)) continue;
-
                 return { x, y };
             }
             return null;
         },
 
-        // Populate the world at boot / on level entry. Seeds to the
-        // *starting* cap so the opening reads as calm; the ramp grows
-        // it from there. Each spawn uses the current level's
-        // enemyOpts so caverns get tougher enemies than the grove.
-        // The level's boss (if any and still undefeated this run) is
-        // dropped into place after the mob group.
+        configure(level) {
+            this.baseOpts = level.enemyOpts ?? {};
+            // Per-zone tuning: caverns 3, shrine 4, abyss 5 - tougher
+            // zones fight through more waves before opening up.
+            const map = { caverns: 3, shrine: 4, abyss: 5 };
+            this.baseWaveCount = level.waveCount ?? map[level.id] ?? 3;
+            this.perWaveBase = Math.max(3, level.enemyCount ?? 5);
+        },
+
+        // Seed the first wave on level entry. Boss (if any) is spawned
+        // alongside so shrine's Keeper still appears immediately.
         seed() {
-            const n = this.maxActive;
-            for (let i = 0; i < n; i++) {
-                const spot = this.findSpot();
-                if (spot) spawnEnemy(spot.x, spot.y, this.enemyOpts);
-            }
+            if (isSafeZone()) return;
+            const strength = playerStrength();
+            this.totalWaves = this.baseWaveCount + Math.min(2, Math.floor(strength / 4));
+            this.waveIndex = 0;
+            this.startWave();
             if (currentLevel.boss) {
                 spawnBoss(currentLevel.boss, currentLevel.id);
             }
         },
 
-        // Point the spawner at a new level. Caller follows with
-        // reset() + seed() when loading the room fresh.
-        configure(level) {
-            this.startMaxActive = level.enemyCount;
-            this.enemyOpts = level.enemyOpts;
+        startWave() {
+            const cfg = buildWave(
+                this.waveIndex, this.totalWaves,
+                playerStrength(), this.baseOpts, this.perWaveBase
+            );
+            this.spawnQueue = cfg.count;
+            this.remainingToKill = cfg.count;
+            this.spawnIndex = 0;
+            this.spawnTimer = 0.15;     // small lead-in before the first spawn
+            this.currentOpts = cfg.opts;
+            this.rareSlots = cfg.rareSlots;
+            this.waveState = "active";
+            questLog.showToast(
+                `Wave ${this.waveIndex + 1} / ${this.totalWaves}`, 1.8
+            );
         },
 
-        // Called each tick. Advances the difficulty clock, then
-        // trickles new enemies in when the world drops below target.
-        // Short-circuits in safe zones so the clock doesn't advance
-        // while the player is wandering an NPC city.
+        onEnemyDefeated(enemy) {
+            // Bosses don't count toward wave clear - they're their
+            // own encounter beat on top of the wave pacing.
+            if (enemy && enemy.isBoss) return;
+            if (this.waveState !== "active") return;
+            if (this.remainingToKill > 0) this.remainingToKill--;
+            if (this.remainingToKill === 0 && this.spawnQueue === 0) {
+                this.onWaveCleared();
+            }
+        },
+
+        onWaveCleared() {
+            this.waveIndex++;
+            if (this.waveIndex >= this.totalWaves) {
+                this.waveState = "complete";
+                this.onAllWavesCleared();
+            } else {
+                this.waveState = "intermission";
+                this.intermissionTimer = 2.5;
+                questLog.showToast(
+                    `Wave ${this.waveIndex} cleared!`, 1.4
+                );
+                sound.play("levelUp");
+            }
+        },
+
+        // Final wave reward: drops a small loot burst in front of
+        // the player - a potion + two magic orbs to refill resources
+        // ahead of the next zone.
+        onAllWavesCleared() {
+            const pcx = player.x + player.width / 2;
+            const pcy = player.y + player.height / 2;
+            spawnDrop(pcx, pcy + 36, "potion");
+            spawnDrop(pcx - 24, pcy + 36, "magic_orb");
+            spawnDrop(pcx + 24, pcy + 36, "magic_orb");
+            questLog.showToast(
+                "All waves cleared! The path ahead opens.", 3.0
+            );
+            sound.play("levelUp");
+        },
+
         update(dt) {
             if (isSafeZone()) return;
+            if (this.waveState === "complete" || this.waveState === "idle") return;
 
-            this.elapsed += dt;
-            this.refresh();
-
-            if (enemies.length >= this.maxActive) {
-                this.timer = 0;
+            if (this.waveState === "intermission") {
+                this.intermissionTimer -= dt;
+                if (this.intermissionTimer <= 0) this.startWave();
                 return;
             }
-            this.timer -= dt;
-            if (this.timer > 0) return;
-            this.timer = this.interval;
 
-            const spot = this.findSpot();
-            if (spot) spawnEnemy(spot.x, spot.y, this.enemyOpts);
+            // active: stagger-spawn the remaining queue.
+            if (this.spawnQueue > 0) {
+                this.spawnTimer -= dt;
+                if (this.spawnTimer <= 0) {
+                    this.spawnTimer = 0.32;
+                    const slotIdx = this.spawnIndex;
+                    const isRare = this.rareSlots.has(slotIdx);
+                    const opts = isRare
+                        ? rareOpts(this.currentOpts)
+                        : this.currentOpts;
+                    const spot = this.findSpot();
+                    if (spot) spawnEnemy(spot.x, spot.y, opts);
+                    this.spawnQueue--;
+                    this.spawnIndex++;
+                }
+            }
         },
 
-        // Rewind to the opening difficulty. Called by restartGame.
         reset() {
-            this.elapsed = 0;
-            this.timer = 0;
-            this.refresh();
+            this.waveIndex = 0;
+            this.waveState = "idle";
+            this.intermissionTimer = 0;
+            this.spawnQueue = 0;
+            this.spawnTimer = 0;
+            this.spawnIndex = 0;
+            this.remainingToKill = 0;
+            this.rareSlots = new Set();
         },
     };
 
@@ -9803,6 +9928,7 @@
         drawCorruptionBar();
         drawCooldownBar();
         drawEnemyCounter();
+        drawWaveIndicator();
         drawBossHealth();
         joystick.draw(ctx);
         attackButton.draw(ctx);
@@ -11270,6 +11396,42 @@
         ctx.fillStyle = "#a0a0b8";
         ctx.font = "12px system-ui, sans-serif";
         ctx.fillText(`Enemies: ${enemies.length}`, VIEW_W - 96, VIEW_H - 16);
+    }
+
+    // Wave readout - only shows in hostile zones when a wave campaign
+    // is active or just finished. Hidden in safe zones so the HUD
+    // stays clean in the grove / interiors.
+    function drawWaveIndicator() {
+        if (isSafeZone()) return;
+        if (spawner.waveState === "idle") return;
+        const w = 110;
+        const h = 26;
+        const x = VIEW_W - w - 12;
+        const y = VIEW_H - h - 38;  // just above the Enemies counter line
+
+        ctx.save();
+        ctx.globalAlpha = 0.82;
+        roundRectPath(ctx, x, y, w, h, 5);
+        ctx.fillStyle = "rgba(20, 20, 30, 0.85)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255, 209, 102, 0.38)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        drawShadowedText("WAVE", x + 10, y + h / 2,
+            "#a0a0b8", "bold 10px system-ui, sans-serif");
+
+        ctx.textAlign = "right";
+        const label = spawner.waveState === "complete"
+            ? "DONE"
+            : `${Math.min(spawner.waveIndex + 1, spawner.totalWaves)}/${spawner.totalWaves}`;
+        const color = spawner.waveState === "complete" ? "#7ad17a" : "#ffd166";
+        drawShadowedText(label, x + w - 10, y + h / 2,
+            color, "bold 14px system-ui, sans-serif");
+        ctx.restore();
     }
 
     function drawCooldownBar() {
