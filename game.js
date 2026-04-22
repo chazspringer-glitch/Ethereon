@@ -2206,6 +2206,151 @@
     };
 
     // ---------------------------------------------------------------
+    // Cloak
+    //
+    // 4-point follow-chain rendered behind the player sprite. Point 0
+    // is pinned to the shoulders; each subsequent point lags behind
+    // its predecessor along the current drag direction with a frame-
+    // rate-independent smoothing step. Drag is opposite to velocity
+    // when moving and straight down when idle, so the cloak settles
+    // naturally at rest.
+    //
+    // A perpendicular sine sway scaled by move speed gives it a
+    // flowing motion without needing physics. All buffers are
+    // preallocated - zero per-frame allocations for mobile GC.
+    // ---------------------------------------------------------------
+    const cloak = {
+        points: [
+            { x: 0, y: 0 },
+            { x: 0, y: 0 },
+            { x: 0, y: 0 },
+            { x: 0, y: 0 },
+        ],
+        widths: [11, 9, 6, 2],  // taper from shoulder to tail tip
+        segLen: 8,              // rest length between adjacent points
+        stiffness: 14,          // chain catch-up rate (higher = stiffer)
+        color: "#7a1120",       // deep red
+        wavePhase: 0,
+
+        // Anchor offset from the player sprite's top-left origin.
+        // Shoulders sit ~12px below the sprite top on a 32px sprite.
+        anchorOffsetX: 16,
+        anchorOffsetY: 12,
+
+        // Preallocated rim buffers for draw().
+        _left: [
+            { x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 },
+        ],
+        _right: [
+            { x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 },
+        ],
+
+        // Snap every point onto the anchor. Called on respawn and
+        // zone transitions so the cloak doesn't stretch across the
+        // world when the player teleports.
+        snap() {
+            const ax = player.x + this.anchorOffsetX;
+            const ay = player.y + this.anchorOffsetY;
+            for (const p of this.points) {
+                p.x = ax;
+                p.y = ay;
+            }
+            this.wavePhase = 0;
+        },
+
+        update(dt) {
+            const vx = player.vx;
+            const vy = player.vy;
+            const speed = Math.hypot(vx, vy);
+            const moving = speed > 5;
+
+            this.points[0].x = player.x + this.anchorOffsetX;
+            this.points[0].y = player.y + this.anchorOffsetY;
+
+            // Drag direction: opposite velocity when moving, else down.
+            let dragX, dragY;
+            if (moving) {
+                dragX = -vx / speed;
+                dragY = -vy / speed;
+            } else {
+                dragX = 0;
+                dragY = 1;
+            }
+
+            // Perpendicular unit vector for the sway wave.
+            const perpX = -dragY;
+            const perpY =  dragX;
+
+            // Wave advances faster at higher speed; amplitude scales
+            // with speed so idle still has a subtle shimmer.
+            this.wavePhase += dt * (2 + speed * 0.03);
+            const speedFactor = Math.min(1, speed / 140);
+            const baseAmp = moving ? 0.35 : 0.08;
+
+            const k = 1 - Math.exp(-this.stiffness * dt);
+
+            for (let i = 1; i < this.points.length; i++) {
+                const prev = this.points[i - 1];
+                const p = this.points[i];
+                const wave = Math.sin(this.wavePhase + i * 0.9) *
+                    baseAmp * speedFactor * i;
+                const tx = prev.x + (dragX + perpX * wave) * this.segLen;
+                const ty = prev.y + (dragY + perpY * wave) * this.segLen;
+                p.x += (tx - p.x) * k;
+                p.y += (ty - p.y) * k;
+            }
+        },
+
+        draw() {
+            const pts = this.points;
+            const ws  = this.widths;
+            const n   = pts.length;
+
+            // Build tapered outline: for each node compute a unit
+            // normal from its segment direction, then push left/right
+            // rim points by the width at that node.
+            for (let i = 0; i < n; i++) {
+                let dx, dy;
+                if (i === 0) {
+                    dx = pts[1].x - pts[0].x;
+                    dy = pts[1].y - pts[0].y;
+                } else if (i === n - 1) {
+                    dx = pts[i].x - pts[i - 1].x;
+                    dy = pts[i].y - pts[i - 1].y;
+                } else {
+                    dx = pts[i + 1].x - pts[i - 1].x;
+                    dy = pts[i + 1].y - pts[i - 1].y;
+                }
+                const len = Math.hypot(dx, dy) || 1;
+                const nx = -dy / len;
+                const ny =  dx / len;
+                const w  = ws[i];
+                this._left[i].x  = pts[i].x + nx * w;
+                this._left[i].y  = pts[i].y + ny * w;
+                this._right[i].x = pts[i].x - nx * w;
+                this._right[i].y = pts[i].y - ny * w;
+            }
+
+            ctx.beginPath();
+            ctx.moveTo(this._left[0].x, this._left[0].y);
+            for (let i = 1; i < n; i++) {
+                ctx.lineTo(this._left[i].x, this._left[i].y);
+            }
+            for (let i = n - 1; i >= 0; i--) {
+                ctx.lineTo(this._right[i].x, this._right[i].y);
+            }
+            ctx.closePath();
+            ctx.fillStyle = this.color;
+            ctx.fill();
+
+            // Subtle dark rim for depth.
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = "rgba(0, 0, 0, 0.35)";
+            ctx.stroke();
+        },
+    };
+
+    // ---------------------------------------------------------------
     // Stats helpers - the single place damage / healing flows through.
     // Future items ("Leather Vest: -2 damage taken") plug in here
     // rather than scattering HP math around the codebase.
@@ -4227,6 +4372,10 @@
     spawner.reset();
     spawner.seed();
 
+    // Collapse the cloak onto the player's starting position so the
+    // first drawn frame doesn't show a tail stretched from (0,0).
+    cloak.snap();
+
     // ---------------------------------------------------------------
     // NPCs - per-zone friendly characters.
     //
@@ -6073,6 +6222,7 @@
         const moving = Math.abs(player.vx) + Math.abs(player.vy) > 5;
         player.animator.setState(moving ? "walk" : "idle");
         player.animator.update(dt);
+        cloak.update(dt);
 
         const nextX = player.x + player.vx * dt;
         const nextY = player.y + player.vy * dt;
@@ -6586,6 +6736,10 @@
         player.vx = 0;
         player.vy = 0;
 
+        // Snap the cloak onto the new anchor so it doesn't stretch
+        // across the screen from the previous room's exit.
+        cloak.snap();
+
         // Transient combat state - belongs to the previous room.
         enemies.length = 0;
         projectiles.length = 0;
@@ -6666,6 +6820,10 @@
         // grove's center (the main plaza tile).
         player.x = WORLD_W / 2 - player.width / 2;
         player.y = WORLD_H / 2 - player.height / 2;
+
+        // Collapse the cloak onto the new anchor - otherwise it
+        // stretches from the death point to the plaza on respawn.
+        cloak.snap();
 
         // Inventory / drops / UI state - fresh run has no loot.
         player.inventory.length = 0;
@@ -7297,10 +7455,14 @@
     }
 
     function drawPlayer() {
-        // Blink at ~10Hz while invulnerable.
+        // Blink at ~10Hz while invulnerable. Cloak blinks with the
+        // sprite so the player doesn't split into two visible pieces.
         if (player.iframes > 0 && Math.floor(player.iframes * 20) % 2 === 0) {
             return;
         }
+        // Cloak renders first so the player sprite sits on top,
+        // occluding the anchor points at the shoulders.
+        cloak.draw();
         player.sheet.draw(
             ctx,
             player.animator.col,
