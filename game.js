@@ -3195,6 +3195,188 @@
     })();
 
     // ---------------------------------------------------------------
+    // Charge attack VFX
+    //
+    // Visual + audio feedback for the charge-attack buildup. Three
+    // strands of feedback that all intensify with chargeTime:
+    //   - Halo   : a small bright disc around the player, tinted
+    //              cyan below the 1s threshold and gold past it.
+    //   - Motes  : a tiny particle pool that spawns out at a radius
+    //              and converges on the player. Preallocated - zero
+    //              per-frame allocation even at peak emission.
+    //   - Rising : a single sine oscillator whose pitch + gain ramp
+    //              with chargeTime. Started on charge begin, gently
+    //              faded out on release.
+    //
+    // Particle count is capped at MAX_PARTICLES (12) so even at full
+    // emission it's trivial on mobile: ~12 arc calls per frame.
+    // ---------------------------------------------------------------
+    const chargeFx = (function () {
+        const MAX_PARTICLES = 12;
+        const particles = new Array(MAX_PARTICLES);
+        for (let i = 0; i < MAX_PARTICLES; i++) {
+            particles[i] = {
+                x: 0, y: 0, vx: 0, vy: 0,
+                life: 0, maxLife: 1, size: 1,
+                alive: false,
+            };
+        }
+
+        let spawnAccum = 0;
+        let rising = null;   // { osc, g } while charging
+
+        function findIdle() {
+            for (const p of particles) if (!p.alive) return p;
+            return null;
+        }
+
+        function spawnOne() {
+            const p = findIdle();
+            if (!p) return;
+            const pcx = player.x + player.width / 2;
+            const pcy = player.y + player.height / 2;
+            const angle = Math.random() * Math.PI * 2;
+            const radius = 58 + Math.random() * 28;
+            const px = pcx + Math.cos(angle) * radius;
+            const py = pcy + Math.sin(angle) * radius;
+            const lifespan = 0.45 + Math.random() * 0.2;
+            // Converge: sized so the particle reaches the center by
+            // the time its life runs out.
+            p.x = px;
+            p.y = py;
+            p.vx = (pcx - px) / lifespan;
+            p.vy = (pcy - py) / lifespan;
+            p.life = 0;
+            p.maxLife = lifespan;
+            p.size = 1 + Math.random() * 1.4;
+            p.alive = true;
+        }
+
+        function tickSound(active, t) {
+            if (!sound.ctx) return;
+            if (active) {
+                if (!rising) {
+                    const ctx = sound.ctx;
+                    const osc = ctx.createOscillator();
+                    const g = ctx.createGain();
+                    osc.type = "sine";
+                    osc.frequency.setValueAtTime(180, ctx.currentTime);
+                    g.gain.setValueAtTime(0.0001, ctx.currentTime);
+                    osc.connect(g).connect(sound.master);
+                    try { osc.start(); } catch (_e) {}
+                    rising = { osc, g };
+                }
+                const ctx = sound.ctx;
+                const now = ctx.currentTime;
+                // 180 Hz idle -> ~680 Hz at full charge.
+                const pitch = 180 + t * 500;
+                // Peak around 0.10 so it doesn't drown out sfx.
+                const vol = 0.02 + t * 0.08;
+                try {
+                    rising.osc.frequency.cancelScheduledValues(now);
+                    rising.osc.frequency.setValueAtTime(pitch, now);
+                    rising.g.gain.cancelScheduledValues(now);
+                    rising.g.gain.setValueAtTime(vol, now);
+                } catch (_e) { /* node gone */ }
+            } else if (rising) {
+                const ctx = sound.ctx;
+                const now = ctx.currentTime;
+                const node = rising;
+                rising = null;
+                try {
+                    node.g.gain.cancelScheduledValues(now);
+                    const v = Math.max(0.0001, node.g.gain.value);
+                    node.g.gain.setValueAtTime(v, now);
+                    node.g.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
+                } catch (_e) {}
+                setTimeout(() => {
+                    try { node.osc.stop(); } catch (_e) {}
+                    try { node.osc.disconnect(); node.g.disconnect(); } catch (_e) {}
+                }, 140);
+            }
+        }
+
+        return {
+            update(dt) {
+                // Age existing particles regardless of charge state
+                // so strays finish naturally after a release.
+                for (const p of particles) {
+                    if (!p.alive) continue;
+                    p.life += dt;
+                    if (p.life >= p.maxLife) { p.alive = false; continue; }
+                    p.x += p.vx * dt;
+                    p.y += p.vy * dt;
+                }
+
+                if (player.isCharging) {
+                    const t = Math.min(1, player.chargeTime / player.maxCharge);
+                    // 3/s at the start, 14/s at full charge.
+                    spawnAccum += (3 + t * 11) * dt;
+                    while (spawnAccum >= 1) {
+                        spawnOne();
+                        spawnAccum -= 1;
+                    }
+                    tickSound(true, t);
+                } else {
+                    spawnAccum = 0;
+                    tickSound(false, 0);
+                }
+            },
+
+            draw(ctx) {
+                if (!player.isCharging) {
+                    // Still draw stray particles so they finish out
+                    // their converge after a release.
+                    let any = false;
+                    for (const p of particles) if (p.alive) { any = true; break; }
+                    if (!any) return;
+                }
+
+                const pcx = player.x + player.width / 2;
+                const pcy = player.y + player.height / 2;
+                const t = Math.min(1, player.chargeTime / player.maxCharge);
+                const ready = player.chargeTime >= 1;
+                const color = ready ? "#ffd166" : "#8ad9ff";
+
+                // Halo around the player - grows + brightens with
+                // chargeTime. Drawn additively so it brightens the
+                // sprite underneath rather than flat-tinting it.
+                if (player.isCharging) {
+                    ctx.save();
+                    ctx.globalCompositeOperation = "lighter";
+                    const r = 20 + t * 16;
+                    ctx.globalAlpha = 0.18 + t * 0.35;
+                    ctx.fillStyle = color;
+                    ctx.beginPath();
+                    ctx.arc(pcx, pcy, r, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.restore();
+                }
+
+                // Converging motes.
+                ctx.save();
+                ctx.fillStyle = color;
+                for (const p of particles) {
+                    if (!p.alive) continue;
+                    const frac = p.life / p.maxLife;
+                    const alpha = (1 - frac) * (0.5 + t * 0.45);
+                    ctx.globalAlpha = alpha;
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, p.size * (1 - frac * 0.3), 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.restore();
+            },
+
+            reset() {
+                for (const p of particles) p.alive = false;
+                spawnAccum = 0;
+                tickSound(false, 0);
+            },
+        };
+    })();
+
+    // ---------------------------------------------------------------
     // Corruption
     //
     // A normalized 0..1 value that rises while the player lingers in
@@ -9085,6 +9267,7 @@
         specialAttack.update(dt);
         swordSpin.update(dt);
         energyBeam.update(dt);
+        chargeFx.update(dt);
         shake.update(dt);
         flash.update(dt);
         corruption.update(dt);
@@ -9317,6 +9500,7 @@
         specialAttack.reset();
         swordSpin.reset();
         energyBeam.reset();
+        chargeFx.reset();
         flash.reset();
         camera.resetZoom();
 
@@ -9473,6 +9657,7 @@
         // Sword spin - belongs to the previous run's mid-swing state.
         swordSpin.reset();
         energyBeam.reset();
+        chargeFx.reset();
 
         // Screen shake - any mid-cast impulses clear so respawn
         // isn't still rattling.
@@ -10312,6 +10497,10 @@
         // Drawn under the sprite so the player's silhouette reads on
         // top of the beam, selling it as emitted from the character.
         energyBeam.draw(ctx);
+        // Charge buildup halo + converging motes. Halo composites
+        // with "lighter" so it brightens the sprite underneath rather
+        // than obscuring it.
+        chargeFx.draw(ctx);
 
         const blinking = player.iframes > 0 &&
             Math.floor(player.iframes * 20) % 2 === 0;
