@@ -2571,9 +2571,9 @@
         chapter2: {
             title: "Chapter 2 - The Hunt Begins",
             lines: [
-                "The air drops colder the moment you cross the threshold.",
-                "Caverns that once carried caravans now echo with other footsteps.",
-                "Something in the dark has learned to listen.",
+                "Three beasts fall. Their echoes drain into the cavern floor.",
+                "The grove will sleep easier tonight - but the deep does not.",
+                "Something older has noticed you now. And it is counting.",
             ],
         },
         chapter3: {
@@ -2783,8 +2783,13 @@
     const QUESTS = {
         slay3: {
             id: "slay3",
-            title: "First Hunt",
-            description: "Defeat 3 enemies.",
+            title: "Chapter 1 - First Hunt",
+            // Written as the Elder's actual voice - the quest IS
+            // the story beat. elderInteract wraps this in Elder: "..."
+            // and appends the progress counter.
+            description:
+                "Three beasts have crept up from the caverns. " +
+                "Cull them, and the grove can breathe again.",
             kind: "kill",
             target: 3,
             rewardXp: 30,
@@ -2793,8 +2798,10 @@
         },
         slay10: {
             id: "slay10",
-            title: "Experienced Hunter",
-            description: "Defeat 10 more enemies.",
+            title: "Chapter 2 - The Deeper Dark",
+            description:
+                "Press on into the caverns. Ten more, and I will trust " +
+                "you with the Golden Key.",
             kind: "kill",
             target: 10,
             rewardXp: 80,
@@ -2857,8 +2864,12 @@
             this.showToast(`Quest complete: ${tmpl.title}!${itemSuffix}`);
             this.active = null;
 
-            // Story beat on the capstone quest - handing off the
-            // Golden Key opens the shrine chapter.
+            // Story beats driven by quest completion. Each quest is
+            // a deliberate milestone - finishing one earns the next
+            // chapter. If the advance is a real step forward, it
+            // will play a cinematic; otherwise story.advance is a
+            // no-op, so it's safe to call blindly here.
+            if (tmpl.id === "slay3")  story.advance("chapter2");
             if (tmpl.id === "slay10") story.advance("chapter3");
         },
 
@@ -6539,8 +6550,10 @@
         if (!level) return;
 
         // Story beats tied to zone entries. Advances no-op if the
-        // player already progressed past that chapter.
-        if (id === "caverns") story.advance("chapter2");
+        // player already progressed past that chapter. Chapter2 is
+        // NOT triggered here - it's driven by quest completion so
+        // the "first hunt" beat only fires once the player has
+        // actually earned it, not just by walking into the caverns.
         if (id === "shrine")  story.advance("chapter4");
 
         currentLevel = level;
