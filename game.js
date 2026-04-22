@@ -1647,6 +1647,204 @@
     };
 
     // ---------------------------------------------------------------
+    // Background music
+    //
+    // Procedurally synthesized loops (no asset pipeline) - each track
+    // is a `schedule(ctx, out, startT, beatDur)` that queues one full
+    // loop of notes starting at `startT`. A look-ahead timer keeps
+    // the next loop scheduled well before the current one finishes,
+    // so the loop boundary is seamless - no audible gap or click.
+    //
+    // Three tracks:
+    //   city    - warm triangle arpeggio over a slow sine pad.
+    //             Plays in safe zones (grove + interiors).
+    //   dungeon - dark sawtooth drone with sparse eerie highs.
+    //             Plays in hostile zones when no enemies are near.
+    //   combat  - driving square bass + tense sawtooth lead at a
+    //             higher bpm. Plays when any enemy sits within
+    //             detect radius of the player.
+    //
+    // Crossfades are gain ramps: the outgoing track's gain ramps
+    // toward 0 while the incoming track's gain ramps to its target
+    // volume over `fadeSeconds`. Only one track is audible outside
+    // the brief fade overlap, which satisfies the spec.
+    //
+    // Shares `sound.ctx` + `sound.master` so the existing unlock-
+    // on-first-input path handles mobile autoplay with no extra
+    // wiring.
+    // ---------------------------------------------------------------
+    const music = (function () {
+        // One-shot note helper. Each scheduled note is a short-lived
+        // oscillator + gain pair that self-stops after `dur`, so the
+        // audio graph never accumulates - mobile-friendly.
+        function scheduleNote(ctx, out, type, t, freq, dur, vol) {
+            const osc = ctx.createOscillator();
+            const g = ctx.createGain();
+            osc.type = type;
+            osc.frequency.setValueAtTime(freq, t);
+            g.gain.setValueAtTime(0.0001, t);
+            g.gain.exponentialRampToValueAtTime(vol, t + 0.025);
+            g.gain.exponentialRampToValueAtTime(0.0001, t + Math.max(0.05, dur));
+            osc.connect(g).connect(out);
+            osc.start(t);
+            osc.stop(t + dur + 0.05);
+        }
+
+        const TRACKS = {
+            city: {
+                beatDuration: 0.55,
+                loopBeats: 16,
+                volume: 0.11,
+                schedule(ctx, out, t0, bd) {
+                    const mel = [
+                        [0,  330, 0.45], [2,  392, 0.45], [4,  440, 0.45],
+                        [6,  523, 0.55], [8,  440, 0.45], [10, 392, 0.45],
+                        [12, 330, 0.45], [14, 293, 0.7],
+                    ];
+                    for (const [b, f, d] of mel) {
+                        scheduleNote(ctx, out, "triangle", t0 + b * bd, f, d, 0.14);
+                    }
+                    const bass = [
+                        [0,  110, 1.8], [4,  146, 1.8],
+                        [8,  110, 1.8], [12,  98, 1.8],
+                    ];
+                    for (const [b, f, d] of bass) {
+                        scheduleNote(ctx, out, "sine", t0 + b * bd, f, d, 0.08);
+                    }
+                },
+            },
+            dungeon: {
+                beatDuration: 0.70,
+                loopBeats: 16,
+                volume: 0.10,
+                schedule(ctx, out, t0, bd) {
+                    // Two low drones split across the loop.
+                    scheduleNote(ctx, out, "sawtooth", t0 +  0 * bd, 65, 5.0, 0.07);
+                    scheduleNote(ctx, out, "sawtooth", t0 +  8 * bd, 73, 5.0, 0.07);
+                    const eerie = [
+                        [3,  392, 0.45], [7,  349, 0.45],
+                        [11, 440, 0.45], [15, 330, 0.6],
+                    ];
+                    for (const [b, f, d] of eerie) {
+                        scheduleNote(ctx, out, "triangle", t0 + b * bd, f, d, 0.06);
+                    }
+                },
+            },
+            combat: {
+                beatDuration: 0.32,
+                loopBeats: 16,
+                volume: 0.13,
+                schedule(ctx, out, t0, bd) {
+                    const bass = [
+                        [0, 110, 0.22], [2, 110, 0.22], [4,  98, 0.22], [6,  98, 0.22],
+                        [8, 110, 0.22], [10, 110, 0.22], [12, 87, 0.22], [14, 87, 0.22],
+                    ];
+                    for (const [b, f, d] of bass) {
+                        scheduleNote(ctx, out, "square", t0 + b * bd, f, d, 0.12);
+                    }
+                    const lead = [
+                        [1,  330, 0.18], [5,  392, 0.18],
+                        [9,  349, 0.18], [13, 440, 0.28],
+                    ];
+                    for (const [b, f, d] of lead) {
+                        scheduleNote(ctx, out, "sawtooth", t0 + b * bd, f, d, 0.08);
+                    }
+                },
+            },
+        };
+
+        // Currently-audible track ("active") and any still-fading
+        // outgoing track ("prev"). Both keep their look-ahead timer
+        // running until fade-out completes so the boundary stays
+        // seamless even mid-fade.
+        let active = null;
+        let prev = null;
+
+        function startTrack(name) {
+            const cfg = TRACKS[name];
+            const ctx = sound.ctx;
+            if (!cfg || !ctx) return null;
+            const gain = ctx.createGain();
+            gain.gain.value = 0.0001;
+            gain.connect(sound.master);
+
+            const loopDur = cfg.beatDuration * cfg.loopBeats;
+            let nextLoopAt = ctx.currentTime + 0.05;
+            cfg.schedule(ctx, gain, nextLoopAt, cfg.beatDuration);
+            nextLoopAt += loopDur;
+
+            // Look-ahead: every 200ms, if the next loop starts in the
+            // ~0.6s horizon, queue it. Keeps the loop boundary
+            // seamless without over-scheduling (which would make
+            // stop / fade less responsive).
+            const timerId = setInterval(() => {
+                if (!sound.ctx) return;
+                if (nextLoopAt < sound.ctx.currentTime + 0.6) {
+                    cfg.schedule(sound.ctx, gain, nextLoopAt, cfg.beatDuration);
+                    nextLoopAt += loopDur;
+                }
+            }, 200);
+
+            return { name, cfg, gain, loopDur, nextLoopAt, timerId };
+        }
+
+        function fadeOut(player, fadeSeconds) {
+            if (!player || !sound.ctx) return;
+            const t = sound.ctx.currentTime;
+            try {
+                player.gain.gain.cancelScheduledValues(t);
+                const current = Math.max(0.0001, player.gain.gain.value);
+                player.gain.gain.setValueAtTime(current, t);
+                player.gain.gain.exponentialRampToValueAtTime(0.0001, t + fadeSeconds);
+            } catch (_e) { /* node disconnected */ }
+            // Release the scheduler + audio node just after fade
+            // finishes so no trailing notes pop post-silence.
+            setTimeout(() => {
+                clearInterval(player.timerId);
+                try { player.gain.disconnect(); } catch (_e) {}
+            }, (fadeSeconds + 0.2) * 1000);
+        }
+
+        return {
+            playMusic(name, fadeSeconds = 1.5) {
+                if (!sound.enabled) return;
+                sound._init();
+                if (!sound.ctx) return;
+                if (!TRACKS[name]) return;
+                if (active && active.name === name) return;
+
+                if (prev) fadeOut(prev, 0.2);
+                if (active) {
+                    fadeOut(active, fadeSeconds);
+                    prev = active;
+                }
+                const p = startTrack(name);
+                if (!p) return;
+                active = p;
+                const t = sound.ctx.currentTime;
+                p.gain.gain.setValueAtTime(0.0001, t);
+                p.gain.gain.exponentialRampToValueAtTime(p.cfg.volume, t + fadeSeconds);
+            },
+
+            stopMusic(fadeSeconds = 0.5) {
+                if (prev) fadeOut(prev, fadeSeconds);
+                if (active) fadeOut(active, fadeSeconds);
+                prev = null;
+                active = null;
+            },
+
+            fadeTransition(oldName, newName, fadeSeconds = 1.5) {
+                // oldName is informational - the module tracks the
+                // current track internally. The signature matches
+                // the requested API.
+                this.playMusic(newName, fadeSeconds);
+            },
+
+            currentTrack() { return active ? active.name : null; },
+        };
+    })();
+
+    // ---------------------------------------------------------------
     // Virtual joystick (touch / pointer)
     //
     // A floating joystick that spawns wherever the player first
@@ -3061,6 +3259,10 @@
         if (player.hp <= 0) {
             player.alive = false;
             gameState = "gameover";
+            // Fade the music out so the defeat sits in silence.
+            // restartGame will pull the zone track back in on the
+            // next tick via the music picker.
+            music.stopMusic(0.8);
         }
     }
 
@@ -4091,6 +4293,38 @@
     //   engage  - hold to the role's preferredRange, attack on cd.
     //   retreat - hp below retreatThreshold: pull to formation,
     //             regen passively until recoverThreshold restores.
+    // Zone + combat-aware music pick. Safe zones always play city.
+    // In hostile zones, an enemy within COMBAT_DETECT_PX of the
+    // player promotes "dungeon" to "combat"; otherwise dungeon.
+    // Checked every 0.75s so short-lived flips (a single enemy
+    // dropping in / out of range for one frame) don't thrash.
+    let _musicPickTimer = 0;
+    function desiredMusic() {
+        if (isSafeZone()) return "city";
+        const COMBAT_DETECT_PX = 300;
+        const r2 = COMBAT_DETECT_PX * COMBAT_DETECT_PX;
+        const pcx = player.x + player.width / 2;
+        const pcy = player.y + player.height / 2;
+        for (const e of enemies) {
+            if (!e.alive) continue;
+            const dx = (e.x + e.width / 2) - pcx;
+            const dy = (e.y + e.height / 2) - pcy;
+            if (dx * dx + dy * dy < r2) return "combat";
+        }
+        return "dungeon";
+    }
+    function updateMusicState(dt) {
+        _musicPickTimer -= dt;
+        if (_musicPickTimer > 0) return;
+        _musicPickTimer = 0.75;
+        music.playMusic(desiredMusic());
+    }
+    // Force a zone-entry fade on transition so the track matches
+    // the new level without waiting up to 0.75s for the picker.
+    function kickMusicForZone() {
+        _musicPickTimer = 0;
+    }
+
     function updateFollowers(dt) {
         const pcx = player.x + player.width / 2;
         const pcy = player.y + player.height / 2;
@@ -8415,6 +8649,7 @@
         shake.update(dt);
         flash.update(dt);
         corruption.update(dt);
+        updateMusicState(dt);
 
         // Combat systems only tick in hostile zones. In safe zones
         // (NPC cities) enemy AI, spawning, and contact damage are all
@@ -8653,6 +8888,10 @@
         // Level-name toast. Reuses the existing quest toast slot
         // since they're never active at the same moment in practice.
         questLog.showToast(`Entering: ${level.name}`, 2.0);
+
+        // Fade the background track to match the new zone without
+        // waiting up to 0.75s for the periodic music picker.
+        kickMusicForZone();
     }
 
     // Restart - resets every piece of run-scoped state back to its
