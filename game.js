@@ -151,6 +151,10 @@
     const TILE_TREE = 2;
     const TILE_WATER = 3;
     const TILE_PATH = 4;
+    // Darker-than-stone floor for the post-boss "abyss" zone. Deep
+    // purple-black obsidian with a faint cracked-stone fleck so it
+    // reads as ancient ruin, not as a flat hole.
+    const TILE_VOID = 5;
 
     // Cheap deterministic "hash" for procedural decoration. Stable
     // per (col, row) with no setup; replace with a real tilemap later.
@@ -407,7 +411,17 @@
             ],
             enemyCount: 6,
             enemyOpts: { hp: 5, speed: 110, reward: 25, xpReward: 18 },
-            exits: { west: "caverns" },
+            exits: {
+                west: "caverns",
+                // Sealed stair into the Abyss. Opens only after the
+                // Shrine Keeper falls - the boss IS the lock.
+                east: {
+                    level: "abyss",
+                    requiresBoss: "shrine",
+                    lockedMessage:
+                        "A seam in the shrine's east wall. Sealed. Something here must fall before it opens.",
+                },
+            },
             npcs: [],
             // Boss of the shrine. Appears once per visit, tracked in
             // `defeatedBosses` so finishing it sticks for the rest of
@@ -445,6 +459,56 @@
                     kind: "relic",
                     x: 1820, y: 1300,
                     text: '"A stone that beats when the shrine sleeps. They say when it stops, the world does too. Thus the Keeper. Thus the fall."',
+                },
+            ],
+        },
+
+        // The Abyss - post-boss dungeon. Unlocks only after the
+        // Shrine Keeper falls (see shrine.exits.east.requiresBoss).
+        // Obsidian floor, stronger foes, no NPCs. The sense of
+        // descent is carried by the chapter6 cinematic played on
+        // entry and by the tile palette; there's no boss here - the
+        // zone itself is the reward for finishing the campaign.
+        abyss: {
+            id: "abyss",
+            name: "The Abyss",
+            safe: false,
+            baseTile: TILE_VOID,
+            borderTile: TILE_STONE,
+            scatter: [
+                // Jagged stone pillars and dark rift pools break up
+                // the obsidian floor without hiding the palette shift.
+                { tile: TILE_STONE, prob: 0.08 },
+                { tile: TILE_WATER, prob: 0.04 },
+            ],
+            // Crowded with stronger foes than caverns (4hp) or
+            // shrine (5hp). Players reach this zone post-boss, usually
+            // with several level-ups + shop upgrades, so the bump
+            // keeps combat meaningful without being a wall.
+            enemyCount: 9,
+            enemyOpts: {
+                hp: 10,
+                speed: 140,
+                contactDamage: 18,
+                reward: 40,
+                xpReward: 30,
+            },
+            exits: { west: "shrine" },
+            npcs: [],
+            lore: [
+                {
+                    id: "abyss_1",
+                    name: "Collapsed Obelisk",
+                    kind: "statue",
+                    x: 500, y: 700,
+                    text: '"The obelisk is older than the shrine that stood on it. Older than the language carved into its base. Older, perhaps, than the word for old."',
+                },
+                {
+                    id: "abyss_2",
+                    name: "Bound Pages",
+                    kind: "book",
+                    x: 1400, y: 1100,
+                    text: '"\'They told us the Heart was placed here to be kept. I think now it was placed here to be forgotten.\'"',
                 },
             ],
         },
@@ -691,6 +755,7 @@
             case TILE_STONE: return "#5c5c6e";
             case TILE_PATH:  return "#8c7a55";
             case TILE_WATER: return "#3560a0";
+            case TILE_VOID:  return "#181424";
             default:         return "#3a5a3a";
         }
     }
@@ -728,6 +793,17 @@
                 ctx.fillRect(x + 4, y + 2, TILE - 8, TILE - 8);
                 ctx.fillStyle = "#5a3a22";
                 ctx.fillRect(x + TILE / 2 - 2, y + TILE - 6, 4, 6);
+                break;
+            case TILE_VOID:
+                // Deep obsidian floor with a slightly lighter fleck
+                // and a thin darker seam so the tile reads as cracked
+                // ancient stone, not as flat black.
+                ctx.fillStyle = "#181424";
+                ctx.fillRect(x, y, TILE, TILE);
+                ctx.fillStyle = "#2a2238";
+                ctx.fillRect(x + 5, y + 9, 3, 2);
+                ctx.fillStyle = "#07050c";
+                ctx.fillRect(x + 16, y + 4, 1, TILE - 10);
                 break;
             default:
                 ctx.fillStyle = "#2a2a38";
@@ -2717,6 +2793,7 @@
         chapter3: { id: "chapter3", title: "Shrine's Call" },
         chapter4: { id: "chapter4", title: "Into the Shrine" },
         chapter5: { id: "chapter5", title: "Victory" },
+        chapter6: { id: "chapter6", title: "The Deeper Dark" },
     };
 
     const STORY_STORAGE_KEY = "ethereon.storyState";
@@ -2724,7 +2801,9 @@
     const story = {
         state: "chapter1",
         // Ordered list drives `atLeast` and enforces one-way advance.
-        chapterOrder: ["chapter1", "chapter2", "chapter3", "chapter4", "chapter5"],
+        chapterOrder: [
+            "chapter1", "chapter2", "chapter3", "chapter4", "chapter5", "chapter6",
+        ],
 
         is(id) { return this.state === id; },
 
@@ -2954,6 +3033,15 @@
                 "The Ethereon Heart pulses once - softly - then goes still.",
                 "The world beyond the gate is quiet again.",
                 "You have bought it time.",
+            ],
+        },
+        chapter6: {
+            title: "Chapter 6 - The Deeper Dark",
+            lines: [
+                "The shrine's floor splits along a seam you never saw.",
+                "A staircase descends into air that tastes of forgotten ages.",
+                "Whatever the Keeper guarded - it was never the shrine.",
+                "It was this.",
             ],
         },
     };
@@ -3336,9 +3424,20 @@
             defeatedBosses.add(enemy.levelId);
             questLog.showToast(`${enemy.name} defeated!`, 2.6);
             sound.play("levelUp");
-            // Victory chapter - the only boss today is the Shrine
-            // Keeper, so its fall closes the campaign.
+            // Victory chapter - the Shrine Keeper's fall closes the
+            // main campaign beat.
             story.advance("chapter5");
+            // Shrine specifically unlocks the Abyss. A second toast
+            // queues after the defeat banner so the player knows a
+            // new path just opened behind them.
+            if (enemy.levelId === "shrine") {
+                setTimeout(() => {
+                    questLog.showToast(
+                        "A seam in the east wall grinds open. Something deeper stirs.",
+                        3.2
+                    );
+                }, 2800);
+            }
         }
     }
 
@@ -6497,13 +6596,23 @@
     // shown when they don't.
     function resolveExit(exit) {
         if (typeof exit === "string") {
-            return { level: exit, arriveAt: null, keyId: null, lockedMessage: null };
+            return {
+                level: exit,
+                arriveAt: null,
+                keyId: null,
+                requiresBoss: null,
+                lockedMessage: null,
+            };
         }
         if (exit && typeof exit === "object") {
             return {
                 level: exit.level,
                 arriveAt: exit.arriveAt ?? null,
                 keyId: exit.keyId ?? null,
+                // Gate the exit on a boss defeat. `defeatedBosses`
+                // is run-scoped, so restarts re-seal the door until
+                // the player fells the boss again.
+                requiresBoss: exit.requiresBoss ?? null,
                 lockedMessage: exit.lockedMessage ?? null,
             };
         }
@@ -6533,21 +6642,34 @@
         questLog.showToast(msg ?? "The door is locked.", 1.8);
     }
 
-    // Consumes the key (if needed + present) and marks the door
-    // unlocked. Returns true when the transition is allowed.
-    function tryUnlock(fromLevelId, dir, keyId) {
-        if (!keyId) return true;
+    // Checks every gate on an exit and, when possible, opens it.
+    // Returns true iff the player may step through this frame.
+    //
+    //   Boss gate - hard-blocked until `defeatedBosses` contains
+    //               the named level's boss. No key consumed, no
+    //               unlocked-doors memo (so the gate stays closed
+    //               on restart until the boss falls again).
+    //   Key gate  - consumes the matching inventory item the first
+    //               time, then memoizes the open state in
+    //               `unlockedDoors` so back-and-forth crossing is
+    //               free.
+    function tryUnlock(fromLevelId, dir, exit) {
+        if (exit.requiresBoss &&
+            !defeatedBosses.has(exit.requiresBoss)) {
+            return false;
+        }
+        if (!exit.keyId) return true;
 
         const k = doorKey(fromLevelId, dir);
         if (unlockedDoors.has(k)) return true;
 
-        const idx = player.inventory.indexOf(keyId);
+        const idx = player.inventory.indexOf(exit.keyId);
         if (idx === -1) return false;
 
         player.inventory.splice(idx, 1);
         unlockedDoors.add(k);
         sound.play("levelUp");  // reuse the existing cheerful cue
-        const keyName = ITEMS[keyId]?.name ?? "key";
+        const keyName = ITEMS[exit.keyId]?.name ?? "key";
         questLog.showToast(`${keyName} turns - the lock clicks open!`, 2.0);
         return true;
     }
@@ -6564,7 +6686,7 @@
         const west = resolveExit(exits.west);
         if (west && nextX < 0 &&
             Math.abs(pcy - midY) < EXIT_TRIGGER_PX) {
-            if (!tryUnlock(fromId, "west", west.keyId)) {
+            if (!tryUnlock(fromId, "west", west)) {
                 showLockedFeedback(west.lockedMessage);
                 return false;
             }
@@ -6574,7 +6696,7 @@
         const east = resolveExit(exits.east);
         if (east && nextX + player.width > WORLD_W &&
             Math.abs(pcy - midY) < EXIT_TRIGGER_PX) {
-            if (!tryUnlock(fromId, "east", east.keyId)) {
+            if (!tryUnlock(fromId, "east", east)) {
                 showLockedFeedback(east.lockedMessage);
                 return false;
             }
@@ -6584,7 +6706,7 @@
         const north = resolveExit(exits.north);
         if (north && nextY < 0 &&
             Math.abs(pcx - midX) < EXIT_TRIGGER_PX) {
-            if (!tryUnlock(fromId, "north", north.keyId)) {
+            if (!tryUnlock(fromId, "north", north)) {
                 showLockedFeedback(north.lockedMessage);
                 return false;
             }
@@ -6594,7 +6716,7 @@
         const south = resolveExit(exits.south);
         if (south && nextY + player.height > WORLD_H &&
             Math.abs(pcx - midX) < EXIT_TRIGGER_PX) {
-            if (!tryUnlock(fromId, "south", south.keyId)) {
+            if (!tryUnlock(fromId, "south", south)) {
                 showLockedFeedback(south.lockedMessage);
                 return false;
             }
@@ -6926,6 +7048,11 @@
         // the "first hunt" beat only fires once the player has
         // actually earned it, not just by walking into the caverns.
         if (id === "shrine")  story.advance("chapter4");
+        // Post-boss descent. Chapter6 only advances if chapter5 has
+        // already fired (i.e. the Keeper is down), so the cinematic
+        // reads as "the deeper dark opens after victory" rather than
+        // a spoiler on first shrine entry.
+        if (id === "abyss")   story.advance("chapter6");
 
         currentLevel = level;
         world.load(level);
