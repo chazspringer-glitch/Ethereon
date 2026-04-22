@@ -2028,6 +2028,104 @@
     };
 
     // ---------------------------------------------------------------
+    // Special Attack button (touch / pointer)
+    //
+    // Third button in the row: sits left of SUPER. Crimson so it
+    // reads as magic-tied rather than power/super, and dims when
+    // magic is below the cast cost so the player can see at a glance
+    // whether they can fire.
+    // ---------------------------------------------------------------
+    const specialButton = {
+        x: 0, y: 0,
+        radius: 38,
+
+        layout() {
+            this.x = VIEW_W - 276;
+            this.y = VIEW_H - 170;
+        },
+
+        pressed: false,
+        pointerId: null,
+        justPressed: false,
+
+        contains(x, y) {
+            const dx = x - this.x;
+            const dy = y - this.y;
+            return dx * dx + dy * dy <= this.radius * this.radius;
+        },
+
+        onDown(x, y, pointerId) {
+            if (this.pressed) return false;
+            if (!this.contains(x, y)) return false;
+            this.pressed = true;
+            this.pointerId = pointerId;
+            this.justPressed = true;
+            return true;
+        },
+
+        onUp(pointerId) {
+            if (this.pointerId !== pointerId) return;
+            this.pressed = false;
+            this.pointerId = null;
+        },
+
+        consumeJustPressed() {
+            const v = this.justPressed;
+            this.justPressed = false;
+            return v;
+        },
+
+        draw(ctx) {
+            const cy = this.y + (this.pressed ? 2 : 0);
+            const ready = specialAttack.ready;
+            // Magic fraction toward cost - fills a ring around the
+            // button as the player builds up to a cast.
+            const frac = Math.min(1, player.magic / specialAttack.magicCost);
+
+            ctx.save();
+
+            ctx.globalAlpha = this.pressed ? 0.95 : 0.6;
+            ctx.fillStyle = ready ? "#e63946" : "#5a1a22";
+            ctx.beginPath();
+            ctx.arc(this.x, cy, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Magic-fill pie slice mirroring POWER/SUPER cooldown UI.
+            if (!ready) {
+                ctx.globalAlpha = 0.85;
+                ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+                ctx.beginPath();
+                ctx.moveTo(this.x, cy);
+                ctx.arc(
+                    this.x, cy, this.radius - 2,
+                    -Math.PI / 2 + frac * Math.PI * 2,
+                    Math.PI * 1.5
+                );
+                ctx.closePath();
+                ctx.fill();
+            }
+
+            ctx.globalAlpha = 0.95;
+            ctx.strokeStyle = ready ? "#ffd6dc" : "#888";
+            ctx.lineWidth = this.pressed ? 4 : 3;
+            ctx.beginPath();
+            ctx.arc(this.x, cy, this.radius, 0, Math.PI * 2);
+            ctx.stroke();
+
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = "#1a1a24";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.font = "bold 17px system-ui, sans-serif";
+            ctx.fillText("✦", this.x, cy - 7);
+            ctx.font = "bold 10px system-ui, sans-serif";
+            ctx.fillText("SPECIAL", this.x, cy + 8);
+
+            ctx.restore();
+        },
+    };
+
+    // ---------------------------------------------------------------
     // Interact button (touch / pointer)
     //
     // Appears bottom-center only when the player is standing near an
@@ -2114,6 +2212,7 @@
         weaponSwapButton.layout();
         powerButton.layout();
         superPowerButton.layout();
+        specialButton.layout();
         interactButton.layout();
     });
     // Button layouts need to be valid before the first frame, but
@@ -2123,6 +2222,7 @@
     weaponSwapButton.layout();
     superPowerButton.layout();
     powerButton.layout();
+    specialButton.layout();
     interactButton.layout();
 
     // ---------------------------------------------------------------
@@ -2288,6 +2388,11 @@
             e.preventDefault();
             return;
         }
+        if (specialButton.onDown(x, y, e.pointerId)) {
+            canvas.setPointerCapture(e.pointerId);
+            e.preventDefault();
+            return;
+        }
         if (interactButton.onDown(x, y, e.pointerId)) {
             canvas.setPointerCapture(e.pointerId);
             e.preventDefault();
@@ -2316,6 +2421,7 @@
         weaponSwapButton.onUp(e.pointerId);
         powerButton.onUp(e.pointerId);
         superPowerButton.onUp(e.pointerId);
+        specialButton.onUp(e.pointerId);
         interactButton.onUp(e.pointerId);
         restartButton.onUp(e.pointerId);
     }
@@ -4088,6 +4194,158 @@
             if (dx * dx + dy * dy <= r2) {
                 e.takeHit(superPower.damage, { x: cx, y: cy });
                 superPower.hitEnemies.add(e);
+                if (!e.alive) onEnemyDefeated(e);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Special Attack
+    //
+    // Magic-fuelled burst distinct from powerMove / superPower:
+    //   - Gate is a magic cost (50), not a cooldown, so pacing is
+    //     driven by red-orb drops rather than a timer.
+    //   - Casts for `castDuration` seconds during which the player
+    //     is movement-locked - a visible "commit" that rewards
+    //     aggressive positioning before firing.
+    //   - Spawns a large AoE wave that damages every enemy in its
+    //     expanding radius exactly once.
+    //   - Kicks in a short slow-motion window on impact that scales
+    //     `dt` passed to enemy AI / spawner, so the blast lands with
+    //     visible weight without freezing the UI.
+    //
+    // Visuals: white flash, crimson expanding ring, pink inner ring,
+    // and a fading halo - all drawn in a single module so the timing
+    // stays tight together.
+    // ---------------------------------------------------------------
+    const specialAttack = {
+        // Tunables
+        magicCost: 50,
+        castDuration: 0.32,     // movement lock window
+        activeDuration: 0.70,   // visual + hit window
+        slowMoDuration: 0.32,   // enemy slow-mo window
+        slowMoScale: 0.35,      // enemies tick at 35% speed during it
+        radius: 240,
+        damage: 10,
+
+        // Runtime
+        castTimer: 0,
+        activeTimer: 0,
+        slowMoTimer: 0,
+        hitEnemies: new Set(),
+
+        get ready() {
+            return player.magic >= this.magicCost &&
+                   this.activeTimer <= 0 &&
+                   this.castTimer <= 0;
+        },
+
+        // Used by updateMovement to ignore input during the cast.
+        isCasting() { return this.castTimer > 0; },
+
+        // Used by the main update loop to scale enemy dt during
+        // slow-mo. Returns 1 when no slow-mo is active.
+        enemyTimeScale() {
+            return this.slowMoTimer > 0 ? this.slowMoScale : 1;
+        },
+
+        activate() {
+            if (!this.ready) return false;
+            player.magic -= this.magicCost;
+            this.castTimer    = this.castDuration;
+            this.activeTimer  = this.activeDuration;
+            this.slowMoTimer  = this.slowMoDuration;
+            this.hitEnemies.clear();
+            // Lean on the existing super cue - same dramatic weight.
+            sound.play("super");
+            // Strong shake anchors the impact in the seat-of-the-pants.
+            shake.trigger(22, 0.5);
+            return true;
+        },
+
+        update(dt) {
+            if (this.castTimer > 0)   this.castTimer   = Math.max(0, this.castTimer - dt);
+            if (this.activeTimer > 0) this.activeTimer = Math.max(0, this.activeTimer - dt);
+            if (this.slowMoTimer > 0) this.slowMoTimer = Math.max(0, this.slowMoTimer - dt);
+        },
+
+        reset() {
+            this.castTimer = 0;
+            this.activeTimer = 0;
+            this.slowMoTimer = 0;
+            this.hitEnemies.clear();
+        },
+
+        draw(ctx, entity) {
+            if (this.activeTimer <= 0) return;
+            const t = 1 - this.activeTimer / this.activeDuration;  // 0..1
+            const cx = Math.round(entity.x + entity.width / 2);
+            const cy = Math.round(entity.y + entity.height / 2);
+
+            ctx.save();
+
+            // Bright white flash for the first quarter of the cast.
+            if (t < 0.25) {
+                const flash = 1 - t / 0.25;
+                ctx.globalAlpha = flash * 0.9;
+                ctx.fillStyle = "#ffffff";
+                ctx.beginPath();
+                ctx.arc(cx, cy, 110 - t * 80, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Two expanding rings in crimson / pink so the wave reads
+            // as magic-burst instead of reusing the super's palette.
+            const rings = [
+                { start: 0.00, color: "#e63946", width: 14 },
+                { start: 0.16, color: "#ffb3c0", width: 8  },
+            ];
+            for (const ring of rings) {
+                const localT = (t - ring.start) / (1 - ring.start);
+                if (localT <= 0 || localT >= 1) continue;
+                const r = this.radius * localT;
+                const alpha = (1 - localT) * 0.88;
+                ctx.globalAlpha = alpha;
+                ctx.strokeStyle = ring.color;
+                ctx.lineWidth = ring.width * (1 - localT) + 2;
+                ctx.beginPath();
+                ctx.arc(cx, cy, r, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+
+            // Trailing halo fills in the wake of the rings.
+            if (t > 0.3 && t < 0.9) {
+                const ht = (t - 0.3) / 0.6;
+                ctx.globalAlpha = (1 - ht) * 0.28;
+                ctx.fillStyle = "#e63946";
+                ctx.beginPath();
+                ctx.arc(cx, cy, this.radius * (0.7 + ht * 0.3), 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            ctx.restore();
+        },
+    };
+
+    // Radius grows with time, so enemies further out aren't hit until
+    // the ring reaches them. Each enemy takes the strike exactly once.
+    function updateSpecialAttackCollision() {
+        if (specialAttack.activeTimer <= 0) return;
+        const cx = player.x + player.width / 2;
+        const cy = player.y + player.height / 2;
+        const t  = 1 - specialAttack.activeTimer / specialAttack.activeDuration;
+        const currentR = specialAttack.radius * Math.min(1, t + 0.2);
+        const r2 = currentR * currentR;
+
+        for (const e of enemies) {
+            if (!e.alive || specialAttack.hitEnemies.has(e)) continue;
+            const ex = e.x + e.width / 2;
+            const ey = e.y + e.height / 2;
+            const dx = ex - cx;
+            const dy = ey - cy;
+            if (dx * dx + dy * dy < r2) {
+                e.takeHit(specialAttack.damage, { x: cx, y: cy });
+                specialAttack.hitEnemies.add(e);
                 if (!e.alive) onEnemyDefeated(e);
             }
         }
@@ -6608,6 +6866,15 @@
             dy += joystick.dy;
         }
 
+        // Special attack locks the player during the cast so the
+        // burst feels like a committed action. Input is dropped and
+        // the glide-to-stop deceleration in the physics step below
+        // takes over naturally.
+        if (specialAttack.isCasting()) {
+            dx = 0;
+            dy = 0;
+        }
+
         // Clamp the combined magnitude to 1 so pairing keyboard and
         // joystick (or pressing two arrow keys) never exceeds full
         // speed. This replaces the prior "normalize on diagonal"
@@ -6881,6 +7148,16 @@
         if (keyboardSuper || touchSuper) {
             superPower.activate(player);
         }
+
+        // Special attack - magic-gated rather than cooldown-gated.
+        // X on keyboard, SPECIAL button on touch. activate() is a
+        // no-op if magic is below cost, so mashing the key simply
+        // fizzles.
+        const keyboardSpecial = keysJustPressed["x"] || keysJustPressed["X"];
+        const touchSpecial = specialButton.consumeJustPressed();
+        if (keyboardSpecial || touchSpecial) {
+            specialAttack.activate();
+        }
     }
 
     // ---------------------------------------------------------------
@@ -6933,6 +7210,7 @@
             interactButton.consumeJustPressed();
             superPowerButton.consumeJustPressed();
             powerButton.consumeJustPressed();
+            specialButton.consumeJustPressed();
             questLog.update(dt);
             clearJustPressed();
             return;
@@ -7008,6 +7286,7 @@
         for (const w of weapons) w.update(dt);
         powerMove.update(dt);
         superPower.update(dt);
+        specialAttack.update(dt);
         shake.update(dt);
         corruption.update(dt);
 
@@ -7016,12 +7295,17 @@
         // disabled. Projectiles still tick so any in-flight shots
         // expire instead of freezing mid-air on a zone transition.
         if (!isSafeZone()) {
-            updateEnemies(dt);
+            // Slow-mo: the special attack scales enemy tick and
+            // spawner pacing down during its brief window. UI + input
+            // keep full speed so controls stay responsive.
+            const enemyDt = dt * specialAttack.enemyTimeScale();
+            updateEnemies(enemyDt);
             updateAttackCollision();
             updatePowerMoveCollision();
             updateSuperPowerCollision();
+            updateSpecialAttackCollision();
             updateEnemyContact();
-            spawner.update(dt);
+            spawner.update(enemyDt);
         }
         updateProjectiles(dt);
         updatePlayerStatus(dt);
@@ -7225,6 +7509,7 @@
         attack.progress = 0;
         attack.hitEnemies.clear();
         powerMove.reset();
+        specialAttack.reset();
 
         // Reseed with the new level's enemy config.
         spawner.configure(level);
@@ -7355,6 +7640,10 @@
         // Super power - same rewind, long cooldown back to 0.
         superPower.reset();
 
+        // Special attack - clear cast / slow-mo / hit-set so a new
+        // run doesn't open mid-animation.
+        specialAttack.reset();
+
         // Screen shake - any mid-cast impulses clear so respawn
         // isn't still rattling.
         shake.reset();
@@ -7381,6 +7670,9 @@
         superPowerButton.pressed = false;
         superPowerButton.pointerId = null;
         superPowerButton.justPressed = false;
+        specialButton.pressed = false;
+        specialButton.pointerId = null;
+        specialButton.justPressed = false;
         interactButton.pressed = false;
         interactButton.pointerId = null;
         interactButton.justPressed = false;
@@ -7453,6 +7745,10 @@
         // paint over everything else in the world layer.
         superPower.draw(ctx, player);
 
+        // Special attack - crimson magic wave. Drawn after super so
+        // when both fire near each other the special reads on top.
+        specialAttack.draw(ctx, player);
+
         // Projectiles over everything else in the world layer.
         drawProjectiles(ctx);
 
@@ -7473,6 +7769,7 @@
         weaponSwapButton.draw(ctx);
         powerButton.draw(ctx);
         superPowerButton.draw(ctx);
+        specialButton.draw(ctx);
         interactButton.draw(ctx);
         drawQuestPanel();
 
