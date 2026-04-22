@@ -284,7 +284,13 @@
             },
             enemyCount: 0,
             enemyOpts: {},
-            exits: { east: "caverns" },
+            exits: {
+                east:  "caverns",
+                // Sister-city links - arriveAt lands the player
+                // just inside each destination's matching edge.
+                south: { level: "port_halen", arriveAt: { x: 940,  y: 96 } },
+                west:  { level: "emberhold",  arriveAt: { x: 1620, y: 696 } },
+            },
             npcs: [],  // filled in after NPC_TEMPLATES
             // City buildings. The shop sits in the market district
             // (NE) and opens into an interior. The three houses are
@@ -567,6 +573,153 @@
                     x: 1400, y: 1100,
                     text: '"\'They told us the Heart was placed here to be kept. I think now it was placed here to be forgotten.\'"',
                 },
+            ],
+        },
+
+        // Port Halen - coastal sister-city south of the grove. Sand
+        // tiles under a stone plaza in the north, a wide harbor of
+        // water tiles in the south with a wooden dock reaching out.
+        // Safe zone (no combat), compact city feel with its own NPC
+        // roster (sailors, fishmongers) and a small side quest chain.
+        port_halen: {
+            id: "port_halen",
+            name: "Port Halen",
+            safe: true,
+            cols: 60, rows: 50,
+            baseTile: TILE_PATH,
+            borderTile: TILE_STONE,
+            scatter: [],
+            tileFn(c, r, cols, rows) {
+                const cx = Math.floor(cols / 2);
+                const plazaY = 14;
+                // Harbor - lower third is water with a central dock.
+                if (r >= rows - 14) {
+                    // Wooden dock (2 tiles wide) extending south
+                    // from the plaza.
+                    if (c >= cx - 1 && c <= cx && r < rows - 2) return TILE_PATH;
+                    return TILE_WATER;
+                }
+                // Central stone plaza.
+                const pdx = c - cx;
+                const pdy = r - plazaY;
+                if (pdx * pdx + pdy * pdy <= 20) return TILE_STONE;
+                // Main N-S road aligned with the dock.
+                if (c === cx || c === cx - 1) return TILE_PATH;
+                // E-W cross road through the plaza line.
+                if (r === plazaY) return TILE_PATH;
+                return TILE_PATH;
+            },
+            enemyCount: 0,
+            enemyOpts: {},
+            exits: {
+                north: { level: "grove", arriveAt: { x: 1600, y: 2200 } },
+            },
+            npcs: [],
+            buildings: [
+                {
+                    id: "harbor_office",
+                    label: "HARBOR",
+                    x: 820, y: 560, w: 150, h: 110,
+                    doorX: 884, doorY: 660, doorW: 32, doorH: 22,
+                    wall: "#4a7088", roof: "#24384c",
+                },
+                {
+                    id: "fishmarket",
+                    label: "MARKET",
+                    x: 1100, y: 620, w: 140, h: 100,
+                    doorX: 1158, doorY: 710, doorW: 32, doorH: 22,
+                    wall: "#8c6a3c", roof: "#5a3a1e",
+                },
+                {
+                    id: "lighthouse",
+                    label: "LIGHT",
+                    x: 1500, y: 450, w: 96, h: 160,
+                    doorX: 1536, doorY: 598, doorW: 24, doorH: 22,
+                    wall: "#d4d4de", roof: "#a03a3a",
+                },
+                // Three small cottages along the west road.
+                { id: "cot_1", label: "",
+                  x: 440, y: 700, w: 120, h: 92,
+                  doorX: 488, doorY: 772, doorW: 24, doorH: 20,
+                  wall: "#8ea4b8", roof: "#3c5066" },
+                { id: "cot_2", label: "",
+                  x: 440, y: 860, w: 120, h: 92,
+                  doorX: 488, doorY: 932, doorW: 24, doorH: 20,
+                  wall: "#9aa8bc", roof: "#455a70" },
+                // Awning-style dock stalls on the plaza.
+                { id: "halen_stall_1", label: "", stall: true,
+                  x: 860, y: 820, w: 50, h: 38,
+                  wall: "#5a8aa8", roof: "#8cc0d8" },
+                { id: "halen_stall_2", label: "", stall: true,
+                  x: 1060, y: 820, w: 50, h: 38,
+                  wall: "#8c6a3c", roof: "#c89858" },
+            ],
+        },
+
+        // Emberhold - mountain forge city west of the grove. Stone
+        // floor throughout, roads of path tiles, clusters of trees
+        // at the north / south ridges. Smith / miner / artisan NPCs.
+        emberhold: {
+            id: "emberhold",
+            name: "Emberhold",
+            safe: true,
+            cols: 55, rows: 44,
+            baseTile: TILE_STONE,
+            borderTile: TILE_STONE,
+            scatter: [],
+            tileFn(c, r, cols, rows) {
+                const cx = Math.floor(cols / 2);
+                const cy = Math.floor(rows / 2);
+                // Central forge plaza - path tiles in a ring around a
+                // stone hearth (kept as stone) at the center.
+                const pdx = c - cx;
+                const pdy = r - cy;
+                if (pdx * pdx + pdy * pdy <= 22 &&
+                    pdx * pdx + pdy * pdy >= 6) return TILE_PATH;
+                // Main cross roads.
+                if (c === cx || c === cx - 1) return TILE_PATH;
+                if (r === cy || r === cy - 1) return TILE_PATH;
+                // Trees at the north / south ridges suggesting the
+                // surrounding mountainside.
+                if ((r < 4 || r > rows - 4) && Math.random() < 0.4) {
+                    return TILE_TREE;
+                }
+                return TILE_STONE;
+            },
+            enemyCount: 0,
+            enemyOpts: {},
+            exits: {
+                east: { level: "grove", arriveAt: { x: 96, y: 1152 } },
+            },
+            npcs: [],
+            buildings: [
+                {
+                    id: "forge",
+                    label: "FORGE",
+                    x: 920, y: 560, w: 180, h: 140,
+                    doorX: 1000, doorY: 690, doorW: 36, doorH: 22,
+                    wall: "#8c3a2a", roof: "#52201a",
+                },
+                {
+                    id: "miner_hall",
+                    label: "MINERS",
+                    x: 560, y: 580, w: 150, h: 110,
+                    doorX: 620, doorY: 680, doorW: 32, doorH: 22,
+                    wall: "#6a5a4c", roof: "#382a20",
+                },
+                {
+                    id: "stonework",
+                    label: "CARVER",
+                    x: 1200, y: 640, w: 140, h: 100,
+                    doorX: 1258, doorY: 730, doorW: 32, doorH: 22,
+                    wall: "#8a8492", roof: "#4a4656",
+                },
+                { id: "forge_stall_1", label: "", stall: true,
+                  x: 860, y: 780, w: 50, h: 38,
+                  wall: "#6a4a2a", roof: "#c25a3a" },
+                { id: "forge_stall_2", label: "", stall: true,
+                  x: 1020, y: 780, w: 50, h: 38,
+                  wall: "#5a4030", roof: "#a85238" },
             ],
         },
 
@@ -10600,6 +10753,176 @@
                     { keywords: ["shrine", "boss"], response: "My first contract'll be the shrine, I bet. I hope my footwork's ready." },
                 ],
                 fallback: "Ask the Captain - I'm still learning.",
+            },
+        }),
+    ];
+
+    // Port Halen roster - coastal-city NPCs. Compact configs with
+    // keyword-only dialogue to keep the per-NPC data lightweight.
+    LEVELS.port_halen.npcs = [
+        new Npc({
+            id: "dockmaster", name: "Dockmaster",
+            x: 884, y: 684, width: 32, height: 32,
+            interactRange: 64, wanderRadius: 30, speed: 22,
+            colors: { robe: "#24384c", trim: "#18222e", sash: "#8ad9ff", hat: "#0c1420" },
+            dialogue: {
+                greeting: '"Ahoy, traveler. The tides have been nervous lately."',
+                options: [
+                    { label: "What's across the harbor?", response: "Open water, and ruin below it. Don't swim far." },
+                    { label: "Any work?", response: "Keep the dock clear and the lanterns lit - that's work enough for anyone." },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+        new Npc({
+            id: "fishmonger", name: "Fishmonger",
+            x: 1158, y: 728, width: 32, height: 32,
+            interactRange: 56, wanderRadius: 14, speed: 14,
+            colors: { robe: "#5a8aa8", trim: "#28486a", sash: "#e8e8f0", hat: "#122338" },
+            dialogue: {
+                greeting: '"Fresh catch! Priced honest, salted twice."',
+                options: [
+                    { label: "What\'s biting?", response: "Grey-scale lately. They come up looking wrong. I don't sell those ones." },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+        new Npc({
+            id: "lighthouse_keep", name: "Lighthouse Keeper",
+            x: 1536, y: 618, width: 32, height: 32,
+            interactRange: 64, wanderRadius: 16, speed: 10,
+            colors: { robe: "#d4d4de", trim: "#7a7a84", sash: "#a03a3a", hat: "#5a1818" },
+            dialogue: {
+                greeting: '"I keep the flame lit. The water prefers it."',
+                options: [
+                    { label: "Seen anything strange?", response: "A shadow under the waves last moon. Big as a barn. I don't call out what I can't name." },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+        new Npc({
+            id: "sailor_a", name: "Sailor",
+            x: 940, y: 1250, width: 32, height: 32,
+            interactRange: 54, wanderRadius: 80, speed: 42,
+            colors: { robe: "#3c6680", trim: "#1c2e44", sash: "#c8d8e8", hat: "#0e1c2e" },
+            dialogue: {
+                greeting: '"On leave till the next tide. Don\'t tell the captain."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+        new Npc({
+            id: "harbor_guard", name: "Harbor Guard",
+            x: 820, y: 800, width: 32, height: 32,
+            interactRange: 60, wanderRadius: 40, speed: 26,
+            colors: { robe: "#4a5060", trim: "#222632", sash: "#8ad9ff", hat: "#101420" },
+            dialogue: {
+                greeting: '"Eyes on the water. Landlubbers stay clear of the dock edge."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+        new Npc({
+            id: "child_halen", name: "Child",
+            x: 500, y: 780, width: 32, height: 32,
+            interactRange: 46, wanderRadius: 90, speed: 54,
+            colors: { robe: "#f0d080", trim: "#9a6c2e", sash: "#c84a4a", hat: "#5a3818" },
+            dialogue: {
+                greeting: '"I caught a hermit crab. Want to hold it? (No?)"',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+        new Npc({
+            id: "beachcomber", name: "Beachcomber",
+            x: 1420, y: 1260, width: 32, height: 32,
+            interactRange: 54, wanderRadius: 120, speed: 28,
+            colors: { robe: "#867660", trim: "#3a3024", sash: "#d4c4a0", hat: "#2a2018" },
+            dialogue: {
+                greeting: '"The tide gives, the tide takes. Mostly takes."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+    ];
+
+    // Emberhold roster - forge + miner town. Warmer palette,
+    // gruffer personalities.
+    LEVELS.emberhold.npcs = [
+        new Npc({
+            id: "master_smith", name: "Master Smith",
+            x: 1000, y: 720, width: 32, height: 32,
+            interactRange: 66, wanderRadius: 24, speed: 18,
+            colors: { robe: "#52201a", trim: "#2a0f0a", sash: "#ffd166", hat: "#3a130a" },
+            dialogue: {
+                greeting: '"Steel sings true in this heat. What brings you?"',
+                options: [
+                    { label: "Who forges here?", response: "Me. Three apprentices. And fire, if you count it - some days I do." },
+                    { label: "Any tips?", response: "A sharp edge beats a heavy arm. Strike twice where you\'d strike once." },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+        new Npc({
+            id: "miner_foreman", name: "Miner Foreman",
+            x: 620, y: 700, width: 32, height: 32,
+            interactRange: 60, wanderRadius: 20, speed: 20,
+            colors: { robe: "#382a20", trim: "#1c1410", sash: "#c4a070", hat: "#14100c" },
+            dialogue: {
+                greeting: '"Deep shafts this week. The wall sings back now - I don\'t like it."',
+                options: [
+                    { label: "Sings back?", response: "Like the stone is answering when we strike. I told the Smith. He said to strike quieter." },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+        new Npc({
+            id: "stonecarver", name: "Stonecarver",
+            x: 1258, y: 750, width: 32, height: 32,
+            interactRange: 60, wanderRadius: 18, speed: 14,
+            colors: { robe: "#4a4656", trim: "#252030", sash: "#a8a0b8", hat: "#18141e" },
+            dialogue: {
+                greeting: '"Stone tells you where it wants to break. Listen first."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+        new Npc({
+            id: "forge_apprentice", name: "Forge Apprentice",
+            x: 1040, y: 830, width: 32, height: 32,
+            interactRange: 52, wanderRadius: 40, speed: 30,
+            colors: { robe: "#c25a3a", trim: "#52201a", sash: "#ffd166", hat: "#3a130a" },
+            dialogue: {
+                greeting: '"Heat\'s up! Move or get singed."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+        new Npc({
+            id: "miner_1", name: "Miner",
+            x: 700, y: 900, width: 32, height: 32,
+            interactRange: 54, wanderRadius: 80, speed: 24,
+            colors: { robe: "#382a20", trim: "#1c1410", sash: "#886a4a", hat: "#14100c" },
+            dialogue: {
+                greeting: '"Coal tastes like iron today. Wrong vein."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+        new Npc({
+            id: "smith_elder", name: "Elder Smith",
+            x: 900, y: 620, width: 32, height: 32,
+            interactRange: 62, wanderRadius: 10, speed: 8,
+            colors: { robe: "#6a4836", trim: "#30180a", sash: "#ffd166", hat: "#241004" },
+            dialogue: {
+                greeting: '"You look like you swing a blade. I like that in a traveler."',
+                options: [
+                    { label: "What was this place?", response: "A forge-hold, a watch-post, a graveyard. All three, turning into one thing lately." },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+        new Npc({
+            id: "ember_child", name: "Child",
+            x: 500, y: 860, width: 32, height: 32,
+            interactRange: 46, wanderRadius: 80, speed: 52,
+            colors: { robe: "#d4a860", trim: "#7a4e20", sash: "#ffd166", hat: "#3a2010" },
+            dialogue: {
+                greeting: '"Sparks! Sparks everywhere!"',
+                options: [{ label: "Goodbye.", close: true }],
             },
         }),
     ];
