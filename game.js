@@ -2351,6 +2351,124 @@
     };
 
     // ---------------------------------------------------------------
+    // Aura
+    //
+    // Soft mystical glow + a few rising motes around the player.
+    // The glow is a single pre-baked radial gradient on an offscreen
+    // canvas; at runtime we draw it with a pulsing scale + globalAlpha
+    // so there are no per-frame gradient allocations (a common mobile
+    // GC hazard). Motes are a tiny preallocated pool that respawn in
+    // place when they time out.
+    //
+    // Color is gold (divine) to match the player's existing palette.
+    // ---------------------------------------------------------------
+    const aura = (function () {
+        const COLOR = "255, 209, 102";  // gold, matches player.color
+        const MOTE_COLOR = "255, 226, 140";
+
+        // Pre-bake the glow into a small offscreen canvas so the
+        // gradient stops are created exactly once.
+        const GLOW_SIZE = 128;
+        const glowCanvas = document.createElement("canvas");
+        glowCanvas.width = GLOW_SIZE;
+        glowCanvas.height = GLOW_SIZE;
+        const gctx = glowCanvas.getContext("2d");
+        const cx0 = GLOW_SIZE / 2;
+        const grad = gctx.createRadialGradient(
+            cx0, cx0, 0,
+            cx0, cx0, GLOW_SIZE / 2
+        );
+        grad.addColorStop(0,    `rgba(${COLOR}, 0.45)`);
+        grad.addColorStop(0.5,  `rgba(${COLOR}, 0.12)`);
+        grad.addColorStop(1,    `rgba(${COLOR}, 0)`);
+        gctx.fillStyle = grad;
+        gctx.fillRect(0, 0, GLOW_SIZE, GLOW_SIZE);
+
+        // Preallocated mote pool.
+        const MOTE_COUNT = 6;
+        const motes = new Array(MOTE_COUNT);
+        for (let i = 0; i < MOTE_COUNT; i++) {
+            motes[i] = {
+                x: 0, y: 0, vx: 0, vy: 0, life: 0, maxLife: 1, size: 1,
+            };
+        }
+
+        function respawn(m) {
+            const angle = Math.random() * Math.PI * 2;
+            const radius = 12 + Math.random() * 16;
+            m.x = player.x + 16 + Math.cos(angle) * radius;
+            // Orbit is flatter vertically for a top-down feel.
+            m.y = player.y + 16 + Math.sin(angle) * radius * 0.65;
+            m.vx = (Math.random() - 0.5) * 8;
+            m.vy = -8 - Math.random() * 10;
+            m.life = 0;
+            m.maxLife = 1.2 + Math.random() * 1.0;
+            m.size = 1.0 + Math.random() * 1.1;
+        }
+
+        return {
+            baseRadius: 30,
+            pulseAmp: 4,      // +/- pixels of radius pulse
+            baseAlpha: 0.40,  // multiplied with the baked gradient
+            alphaAmp: 0.14,
+            pulseSpeed: 1.8,
+            phase: 0,
+
+            // Called on startup, respawn, and zone transitions so
+            // motes don't trail from the previous position.
+            snap() {
+                this.phase = 0;
+                for (const m of motes) {
+                    respawn(m);
+                    // Stagger lifetimes so they don't all pulse in
+                    // unison from the first frame.
+                    m.life = Math.random() * m.maxLife;
+                }
+            },
+
+            update(dt) {
+                this.phase += dt * this.pulseSpeed;
+                for (const m of motes) {
+                    m.life += dt;
+                    if (m.life >= m.maxLife) {
+                        respawn(m);
+                    } else {
+                        m.x += m.vx * dt;
+                        m.y += m.vy * dt;
+                    }
+                }
+            },
+
+            draw() {
+                const cx = player.x + 16;
+                const cy = player.y + 16;
+                const r  = this.baseRadius + Math.sin(this.phase) * this.pulseAmp;
+                const a  = this.baseAlpha  + Math.sin(this.phase * 0.7) * this.alphaAmp;
+
+                // Glow: baked gradient drawn at the pulsing size.
+                ctx.globalAlpha = a;
+                ctx.drawImage(glowCanvas, cx - r, cy - r, r * 2, r * 2);
+                ctx.globalAlpha = 1;
+
+                // Motes: tiny fading circles. Alpha fades in / out so
+                // they don't pop at spawn / death.
+                for (const m of motes) {
+                    const frac = m.life / m.maxLife;
+                    const fade = frac < 0.2
+                        ? frac / 0.2
+                        : frac > 0.6
+                            ? 1 - (frac - 0.6) / 0.4
+                            : 1;
+                    ctx.fillStyle = `rgba(${MOTE_COLOR}, ${(fade * 0.55).toFixed(3)})`;
+                    ctx.beginPath();
+                    ctx.arc(m.x, m.y, m.size, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            },
+        };
+    })();
+
+    // ---------------------------------------------------------------
     // Stats helpers - the single place damage / healing flows through.
     // Future items ("Leather Vest: -2 damage taken") plug in here
     // rather than scattering HP math around the codebase.
@@ -4372,9 +4490,12 @@
     spawner.reset();
     spawner.seed();
 
-    // Collapse the cloak onto the player's starting position so the
-    // first drawn frame doesn't show a tail stretched from (0,0).
+    // Collapse the cloak onto the player's starting position and
+    // stagger the aura motes so the first drawn frame doesn't show
+    // a tail stretched from (0,0) or a cluster of particles popping
+    // in together.
     cloak.snap();
+    aura.snap();
 
     // ---------------------------------------------------------------
     // NPCs - per-zone friendly characters.
@@ -6223,6 +6344,7 @@
         player.animator.setState(moving ? "walk" : "idle");
         player.animator.update(dt);
         cloak.update(dt);
+        aura.update(dt);
 
         const nextX = player.x + player.vx * dt;
         const nextY = player.y + player.vy * dt;
@@ -6739,6 +6861,7 @@
         // Snap the cloak onto the new anchor so it doesn't stretch
         // across the screen from the previous room's exit.
         cloak.snap();
+        aura.snap();
 
         // Transient combat state - belongs to the previous room.
         enemies.length = 0;
@@ -6824,6 +6947,7 @@
         // Collapse the cloak onto the new anchor - otherwise it
         // stretches from the death point to the plaza on respawn.
         cloak.snap();
+        aura.snap();
 
         // Inventory / drops / UI state - fresh run has no loot.
         player.inventory.length = 0;
@@ -7455,14 +7579,17 @@
     }
 
     function drawPlayer() {
-        // Blink at ~10Hz while invulnerable. Cloak blinks with the
-        // sprite so the player doesn't split into two visible pieces.
-        if (player.iframes > 0 && Math.floor(player.iframes * 20) % 2 === 0) {
-            return;
-        }
-        // Cloak renders first so the player sprite sits on top,
-        // occluding the anchor points at the shoulders.
+        // Aura and cloak stay visible during hit-flicker so the
+        // player never fully disappears - only the body sprite
+        // blinks at ~10Hz while invulnerable, which reads as a
+        // "spectral" moment rather than a pop-off.
+        aura.draw();
         cloak.draw();
+
+        const blinking = player.iframes > 0 &&
+            Math.floor(player.iframes * 20) % 2 === 0;
+        if (blinking) return;
+
         player.sheet.draw(
             ctx,
             player.animator.col,
