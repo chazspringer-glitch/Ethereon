@@ -2899,7 +2899,14 @@
         // proportional to how far past the charge threshold we got.
         isCharging: false,
         chargeTime: 0,
+        chargeStartTime: 0,
         maxCharge: 2,  // seconds
+
+        // Parallel charge state for the special attack. Same
+        // press / release contract as the primary attack but owns
+        // its own timer so each button can be held independently.
+        specialCharging: false,
+        specialChargeTime: 0,
 
         // Currently-equipped weapon index into `weapons[]`.
         // 0 = sword (melee), 1 = energy blast (projectile).
@@ -5460,16 +5467,28 @@
     // Each enemy is hit once per spin via the shared hitEnemies set.
     // ---------------------------------------------------------------
     const swordSpin = {
+        // Base radius at full charge. Scaled down for the medium
+        // tier so the wider-arc slash sits between tap and spin.
+        baseRadius: 92,
         radius: 92,
         duration: 0.45,         // total animation + hit window
         activeTimer: 0,
         damage: 1,
+        level: 2,               // 1 = wider arc, 2 = full 360 spin
         hitEnemies: new Set(),
 
         isActive() { return this.activeTimer > 0; },
 
-        activate(dmg) {
+        // level: 1 (medium / wider arc) | 2 (full 360 spin).
+        // Knockback strength rides on level too - the Enemy's
+        // takeHit() knockback already scales with `from` distance;
+        // a shorter hit radius naturally means closer impacts,
+        // but we also bump damage as the headline effect.
+        activate(dmg, level = 2) {
             this.damage = Math.max(1, dmg | 0);
+            this.level = level;
+            this.radius = level >= 2 ? this.baseRadius : this.baseRadius * 0.62;
+            this.duration = level >= 2 ? 0.45 : 0.32;
             this.activeTimer = this.duration;
             this.hitEnemies.clear();
             sound.play("attack");
@@ -5573,21 +5592,46 @@
     // contract as the rest of the AoE modules.
     // ---------------------------------------------------------------
     const energyBeam = {
+        // Live beam geometry. length / width / duration are reset on
+        // activate() from per-level presets so the medium / full
+        // tiers scale cleanly.
         length: 640,
         width: 34,
         duration: 0.32,
         activeTimer: 0,
         damage: 1,
+        level: 2,               // 1 = medium, 2 = massive
         dirX: 1, dirY: 0,
         originX: 0, originY: 0,
         hitEnemies: new Set(),
 
+        // Continuous-damage repeat: the beam lives long enough that
+        // enemies entering late should still take hits. Per-enemy
+        // nextHitAt cooldown keeps damage from stacking each frame.
+        _rehitCooldown: 0.22,
+        _nextHitAt: new Map(),
+
         isActive() { return this.activeTimer > 0; },
 
-        activate(dmg, entity) {
+        // level: 1 (medium - narrower + shorter) | 2 (massive beam).
+        activate(dmg, entity, level = 2) {
             this.damage = Math.max(1, dmg | 0);
+            this.level = level;
+            if (level >= 2) {
+                // Massive: full-screen-ish length, thick, stays live
+                // long enough to sweep through a wave.
+                this.length = 760;
+                this.width  = 48;
+                this.duration = 0.55;
+            } else {
+                // Medium: wider than a projectile, shorter than full.
+                this.length = 520;
+                this.width  = 28;
+                this.duration = 0.28;
+            }
             this.activeTimer = this.duration;
             this.hitEnemies.clear();
+            this._nextHitAt.clear();
             const fx = entity.facing.x;
             const fy = entity.facing.y;
             const mag = Math.hypot(fx, fy) || 1;
@@ -5662,26 +5706,39 @@
         const dy = energyBeam.dirY;
         const halfW = energyBeam.width * 0.5;
         const len = energyBeam.length;
-        // Fudge the perpendicular tolerance by a fixed pad so
-        // enemy sprites that are larger than the beam's width still
-        // trigger at the edge.
+        const now = performance.now() / 1000;
+        const continuous = energyBeam.level >= 2;
+        const rehit = energyBeam.level >= 2
+            ? energyBeam._rehitCooldown
+            : Infinity; // medium: once-per-beam only
         const PERP_PAD = 12;
 
         for (const e of enemies) {
-            if (!e.alive || energyBeam.hitEnemies.has(e)) continue;
+            if (!e.alive) continue;
+            // For one-shot mode (medium), bail if we already hit this
+            // enemy this beam.
+            if (!continuous && energyBeam.hitEnemies.has(e)) continue;
             const ecx = e.x + e.width / 2;
             const ecy = e.y + e.height / 2;
             const rx = ecx - ox;
             const ry = ecy - oy;
-            // Project onto beam axis; reject enemies behind origin
-            // or past the beam's tip.
             const along = rx * dx + ry * dy;
             if (along < 0 || along > len) continue;
-            // Perpendicular distance from the beam centerline.
             const perp = Math.abs(-rx * dy + ry * dx);
             if (perp > halfW + PERP_PAD) continue;
-            e.takeHit(energyBeam.damage, { x: ox + dx * along, y: oy + dy * along });
-            energyBeam.hitEnemies.add(e);
+
+            // Continuous mode: per-enemy re-hit cooldown so a
+            // stationary target doesn't take a hit each frame.
+            if (continuous) {
+                const next = energyBeam._nextHitAt.get(e) ?? 0;
+                if (now < next) continue;
+                energyBeam._nextHitAt.set(e, now + rehit);
+            } else {
+                energyBeam.hitEnemies.add(e);
+            }
+            e.takeHit(energyBeam.damage, {
+                x: ox + dx * along, y: oy + dy * along,
+            });
             if (!e.alive) onEnemyDefeated(e);
         }
     }
@@ -6012,8 +6069,11 @@
         activeDuration: 0.70,   // visual + hit window
         slowMoDuration: 0.32,   // enemy slow-mo window
         slowMoScale: 0.35,      // enemies tick at 35% speed during it
-        radius: 240,
+        baseRadius: 240,
+        baseDamage: 10,
+        radius: 240,            // live values, scaled on activate() by level
         damage: 10,
+        level: 0,               // 0=tap, 1=medium, 2=full
 
         // Runtime
         castTimer: 0,
@@ -6036,25 +6096,27 @@
             return this.slowMoTimer > 0 ? this.slowMoScale : 1;
         },
 
-        activate() {
+        // level: 0 (tap) | 1 (medium hold) | 2 (full charge).
+        // Radius + damage scale so a held special hits harder and
+        // reaches further, while still costing the flat 50 magic.
+        activate(level = 0) {
             if (!this.ready) return false;
             player.magic -= this.magicCost;
+            this.level = level;
+            const radiusScale = 1 + level * 0.18;   // 1.0 / 1.18 / 1.36
+            const damageScale = 1 + level * 0.35;   // 1.0 / 1.35 / 1.70
+            this.radius = this.baseRadius * radiusScale;
+            this.damage = Math.round(this.baseDamage * damageScale);
             this.castTimer    = this.castDuration;
             this.activeTimer  = this.activeDuration;
             this.slowMoTimer  = this.slowMoDuration;
             this.hitEnemies.clear();
-            // Lean on the existing super cue - same dramatic weight.
             sound.play("super");
-            // Strong shake anchors the impact in the seat-of-the-pants.
-            shake.trigger(22, 0.5);
-            // White impact flash - fades in fast, then out. Peak alpha
-            // under 1.0 so the world still reads through the flash.
-            flash.trigger(0.8, 0.28);
-            // Subtle camera punch-in. 1.12x feels like a cinematic
-            // focus without disorienting the player; hold briefly at
-            // peak, then follow() eases back to 1.0 once _pulseHold
-            // drains.
-            camera.zoomPulse(1.12, 0.22);
+            // Shake + flash ramp with the charge level so the held
+            // release reads as the bigger payoff.
+            shake.trigger(22 + level * 4, 0.5);
+            flash.trigger(0.8 + level * 0.08, 0.28);
+            camera.zoomPulse(1.12 + level * 0.03, 0.22);
             tutorial.onSpecial();
             return true;
         },
@@ -6776,10 +6838,12 @@
     // easy to read + tweak.
     function buildWave(index, total, strength, baseOpts, perWaveBase) {
         // Wave count: base + index ramp + strength bump, hard-capped
-        // so stronger players don't summon literal hordes.
+        // so stronger players don't summon literal hordes. Larger
+        // ceiling (20) now that the spawner's maxOnScreen cap keeps
+        // the active population readable regardless of queue size.
         const count = Math.min(
-            12,
-            perWaveBase + index + Math.floor(strength * 0.6)
+            20,
+            perWaveBase + 2 + index + Math.floor(strength * 0.6)
         );
         // Stat scale: gentle per-wave ramp plus strength add. Enemies
         // never exceed 2.5x their base stats even at max strength +
@@ -6948,8 +7012,13 @@
                 return;
             }
 
-            // active: stagger-spawn the remaining queue.
-            if (this.spawnQueue > 0) {
+            // active: stagger-spawn the remaining queue. On-screen
+            // cap keeps the population readable on mobile even when
+            // a wave queue is large. Queued spawns wait patiently
+            // until a slot opens, so wave clear is still gated on
+            // killing the full queued count.
+            const MAX_ON_SCREEN = 14;
+            if (this.spawnQueue > 0 && enemies.length < MAX_ON_SCREEN) {
                 this.spawnTimer -= dt;
                 if (this.spawnTimer <= 0) {
                     this.spawnTimer = 0.32;
@@ -9292,6 +9361,8 @@
             // Dying mid-charge shouldn't leak state into a respawn.
             player.isCharging = false;
             player.chargeTime = 0;
+            player.specialCharging = false;
+            player.specialChargeTime = 0;
             return;
         }
 
@@ -9315,45 +9386,48 @@
                 player.chargeTime + dt
             );
         } else if (!held && player.isCharging) {
-            // Release: damage multiplier scales linearly past the
-            // 0.9s charge threshold - 1x for taps, 1.2x at 1.0s,
-            // ~3.2x at the 2.0s cap.
+            // Release: three-tier charge.
+            //   <0.5s  -> tap     (level 0, 1.0x damage)
+            //   <1.5s  -> medium  (level 1, 1.6x)
+            //   else   -> full    (level 2, 2.6x, plus weapon ult)
+            // Sword ult: level 1 wider-arc slash, level 2 360 spin.
+            // Energy ult: level 1 medium beam, level 2 massive beam.
             const t = player.chargeTime;
-            const mult = 1 + Math.max(0, t - 0.9) * 2;
+            const level = t < 0.5 ? 0 : t < 1.5 ? 1 : 2;
+            const mult = level === 0 ? 1 : level === 1 ? 1.6 : 2.6;
             player.isCharging = false;
             player.chargeTime = 0;
 
-            // Weapon-specific charged payoffs at threshold (>= 1s):
-            //   sword  -> 360-degree spin slash
-            //   energy -> wide piercing beam across the screen
-            // Below threshold, or with no charged variant, the weapon
-            // fires its normal shot with the damage multiplier
-            // applied uniformly.
             const wpn = currentWeapon();
-            const charged = t >= 1;
-            if (charged && wpn === swordWeapon) {
-                swordSpin.activate(swordWeapon.damage * mult);
-                // Share the sword's cooldown so spins can't stack
-                // back-to-back - the attack module's cooldown is the
-                // single source of truth for melee pacing.
+            if (wpn === swordWeapon && level >= 1) {
+                swordSpin.activate(swordWeapon.damage * mult, level);
+                // Sword cooldown pacing is the single source of truth
+                // for melee, so all charged sword payoffs latch it.
                 attack.cooldownTimer = attack.cooldown;
-                flash.trigger(0.5, 0.18);
-                shake.trigger(10, 0.25);
-            } else if (charged && wpn === energyWeapon) {
-                energyBeam.activate(energyWeapon.damage * mult * 2, player);
-                // Latch the weapon's cooldown so a beam can't follow
-                // a beam immediately - matches the sword pacing rule.
-                energyWeapon.cooldownTimer = energyWeapon.cooldownMax;
-                flash.trigger(0.6, 0.2);
-                shake.trigger(12, 0.3);
-            } else {
-                wpn.fire(player, mult);
-                if (charged) {
-                    // Non-spin, non-beam charged release: lighter
-                    // impact feel than the weapon-specific payoffs.
-                    flash.trigger(0.35, 0.12);
+                if (level >= 2) {
+                    flash.trigger(0.5, 0.18);
+                    shake.trigger(10, 0.25);
+                } else {
+                    flash.trigger(0.3, 0.12);
                     shake.trigger(6, 0.15);
                 }
+            } else if (wpn === energyWeapon && level >= 1) {
+                energyBeam.activate(
+                    energyWeapon.damage * mult * (level >= 2 ? 1.6 : 1.1),
+                    player, level
+                );
+                energyWeapon.cooldownTimer = energyWeapon.cooldownMax;
+                if (level >= 2) {
+                    flash.trigger(0.7, 0.22);
+                    shake.trigger(14, 0.32);
+                } else {
+                    flash.trigger(0.45, 0.14);
+                    shake.trigger(8, 0.18);
+                }
+            } else {
+                // Tap (level 0) or unhandled weapon - normal fire
+                // with the charge multiplier applied uniformly.
+                wpn.fire(player, mult);
             }
             tutorial.onAttack();
         }
@@ -9374,13 +9448,29 @@
         }
 
         // Special attack - magic-gated rather than cooldown-gated.
-        // X on keyboard, SPECIAL button on touch. activate() is a
-        // no-op if magic is below cost, so mashing the key simply
-        // fizzles.
-        const keyboardSpecial = keysJustPressed["x"] || keysJustPressed["X"];
-        const touchSpecial = specialButton.consumeJustPressed();
-        if (keyboardSpecial || touchSpecial) {
-            specialAttack.activate();
+        // X on keyboard, SPECIAL button on touch. Same press-hold-
+        // release contract as the primary attack: held duration picks
+        // the tier (0 / 1 / 2). Tap still fires immediately since the
+        // release on a sub-0.5s hold maps to level 0. activate() is
+        // a no-op if magic is below cost, so mashing fizzles.
+        const xHeld = !!(keys["x"] || keys["X"]);
+        const specialHeld = xHeld || specialButton.pressed;
+        specialButton.consumeJustPressed();  // drain edge flag
+
+        if (specialHeld && !player.specialCharging) {
+            player.specialCharging = true;
+            player.specialChargeTime = 0;
+        } else if (specialHeld && player.specialCharging) {
+            player.specialChargeTime = Math.min(
+                player.maxCharge,
+                player.specialChargeTime + dt
+            );
+        } else if (!specialHeld && player.specialCharging) {
+            const st = player.specialChargeTime;
+            const specialLevel = st < 0.5 ? 0 : st < 1.5 ? 1 : 2;
+            player.specialCharging = false;
+            player.specialChargeTime = 0;
+            specialAttack.activate(specialLevel);
         }
     }
 
@@ -9852,6 +9942,8 @@
         player.vy = 0;
         player.isCharging = false;
         player.chargeTime = 0;
+        player.specialCharging = false;
+        player.specialChargeTime = 0;
         player.facing.x = 0;
         player.facing.y = 1;
         player.facingDir = DIR_DOWN;
