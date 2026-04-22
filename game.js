@@ -1008,8 +1008,29 @@
     }
 
     function drawPlayerFrame(ctx, dir, frame, ox, oy) {
-        // Shadow
-        ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
+        // ---------------------------------------------------------------
+        // Moorish warrior palette.
+        //   Skin is a warm dark brown with a shade pass for cheek / neck.
+        //   Hood is a near-black purple so it reads as "cloth", not as
+        //     a silhouette hole against the dark grove backdrop.
+        //   Robe is warm ochre (sand-lit traveller) broken at the waist
+        //     by a crimson sash that echoes the animated cloak.
+        //   Eyes are warm cream for readability on the dark face at 32px.
+        // ---------------------------------------------------------------
+        const SKIN       = "#6e4530";
+        const SKIN_SHADE = "#4a2d1e";
+        const HOOD       = "#201a2e";
+        const HOOD_EDGE  = "#12101c";
+        const ROBE       = "#b88c46";
+        const ROBE_SHADE = "#7a5c2c";
+        const SASH       = "#7a1120";
+        const SASH_HI    = "#a1302e";
+        const BOOT       = "#2a1c12";
+        const EYES       = "#f2e0b4";
+        const GOLD       = "#ffd166";
+
+        // Ground shadow
+        ctx.fillStyle = "rgba(0, 0, 0, 0.32)";
         ctx.beginPath();
         ctx.ellipse(ox + 16, oy + 29, 8, 3, 0, 0, Math.PI * 2);
         ctx.fill();
@@ -1017,35 +1038,89 @@
         // Vertical bob on the "up" steps of the walk cycle.
         const bob = frame === 1 ? -1 : frame === 3 ? -1 : 0;
 
-        // Tunic / body
-        ctx.fillStyle = "#3a7d3a";
-        ctx.fillRect(ox + 10, oy + 14 + bob, 12, 10);
-        ctx.fillStyle = "#2f5f2f";
-        ctx.fillRect(ox + 10, oy + 22 + bob, 12, 2);
-
-        // Head
-        ctx.fillStyle = "#e8c096";
-        ctx.fillRect(ox + 11, oy + 7 + bob, 10, 8);
-
-        // Hair (direction-aware)
-        ctx.fillStyle = "#ffd166";
-        if (dir === DIR_DOWN) {
-            ctx.fillRect(ox + 11, oy + 6 + bob, 10, 3);
-            ctx.fillRect(ox + 10, oy + 8 + bob, 2, 3);
-            ctx.fillRect(ox + 20, oy + 8 + bob, 2, 3);
-        } else if (dir === DIR_UP) {
-            ctx.fillRect(ox + 11, oy + 6 + bob, 10, 5);
-        } else if (dir === DIR_LEFT) {
-            ctx.fillRect(ox + 10, oy + 6 + bob, 9, 4);
-            ctx.fillRect(ox + 10, oy + 9 + bob, 3, 3);
-        } else { // DIR_RIGHT
-            ctx.fillRect(ox + 13, oy + 6 + bob, 9, 4);
-            ctx.fillRect(ox + 19, oy + 9 + bob, 3, 3);
+        // --- Legs / boots (drawn before robe so the hem overlaps) ---
+        ctx.fillStyle = BOOT;
+        const legY = oy + 24;
+        if (frame === 1) {
+            ctx.fillRect(ox + 11, legY,     3, 4);
+            ctx.fillRect(ox + 18, legY - 1, 3, 5);
+        } else if (frame === 2) {
+            ctx.fillRect(ox + 11, legY - 1, 3, 5);
+            ctx.fillRect(ox + 18, legY,     3, 4);
+        } else {
+            ctx.fillRect(ox + 11, legY, 3, 4);
+            ctx.fillRect(ox + 18, legY, 3, 4);
         }
 
-        // Eyes (hidden when facing away)
+        // --- Robe body ---
+        ctx.fillStyle = ROBE;
+        ctx.fillRect(ox + 9, oy + 14 + bob, 14, 11);
+        // Hem shadow
+        ctx.fillStyle = ROBE_SHADE;
+        ctx.fillRect(ox + 9, oy + 23 + bob, 14, 2);
+        // Vertical seam down the front when facing toward the camera
+        if (dir === DIR_DOWN) {
+            ctx.fillRect(ox + 15, oy + 14 + bob, 1, 6);
+        }
+
+        // --- Crimson sash at waist ---
+        ctx.fillStyle = SASH;
+        ctx.fillRect(ox + 9, oy + 20 + bob, 14, 3);
+        ctx.fillStyle = SASH_HI;
+        ctx.fillRect(ox + 9, oy + 20 + bob, 14, 1);
+
+        // Gold clasp - small sparkle on the waist, front only.
+        if (dir === DIR_DOWN) {
+            ctx.fillStyle = GOLD;
+            ctx.fillRect(ox + 15, oy + 21 + bob, 2, 1);
+        }
+
+        // --- Head ---
+        // Face / skull
+        ctx.fillStyle = SKIN;
+        ctx.fillRect(ox + 11, oy + 7 + bob, 10, 8);
+        // Neck shade at the jawline
+        ctx.fillStyle = SKIN_SHADE;
+        ctx.fillRect(ox + 12, oy + 13 + bob, 8, 1);
+
+        // --- Hood (direction-aware) ---
+        // The hood is a hooded travel garment: a cap across the crown
+        // plus side "flaps" that frame the face when seen from the
+        // front or side, and fully cover the head when seen from behind.
+        ctx.fillStyle = HOOD;
+        if (dir === DIR_DOWN) {
+            // Cap across the forehead
+            ctx.fillRect(ox + 10, oy + 6 + bob, 12, 3);
+            // Side flaps
+            ctx.fillRect(ox + 10, oy + 9 + bob, 2, 5);
+            ctx.fillRect(ox + 20, oy + 9 + bob, 2, 5);
+        } else if (dir === DIR_UP) {
+            // Back of hood fully covers the head
+            ctx.fillRect(ox + 10, oy + 6 + bob, 12, 9);
+        } else if (dir === DIR_LEFT) {
+            // Hood wraps around the back (right side of sprite) and
+            // across the crown; face opening on the left.
+            ctx.fillRect(ox + 11, oy + 6 + bob, 11, 4);
+            ctx.fillRect(ox + 19, oy + 9 + bob, 3, 5);
+        } else { // DIR_RIGHT
+            ctx.fillRect(ox + 10, oy + 6 + bob, 11, 4);
+            ctx.fillRect(ox + 10, oy + 9 + bob, 3, 5);
+        }
+
+        // Hood inner rim - 1px darker line so the cloth reads as
+        // layered rather than a flat block.
+        ctx.fillStyle = HOOD_EDGE;
+        if (dir === DIR_DOWN) {
+            ctx.fillRect(ox + 10, oy + 8 + bob, 12, 1);
+        } else if (dir === DIR_LEFT) {
+            ctx.fillRect(ox + 12, oy + 9 + bob, 10, 1);
+        } else if (dir === DIR_RIGHT) {
+            ctx.fillRect(ox + 10, oy + 9 + bob, 10, 1);
+        }
+
+        // --- Eyes (hidden when facing away) ---
         if (dir !== DIR_UP) {
-            ctx.fillStyle = "#1a1a24";
+            ctx.fillStyle = EYES;
             const eyeY = oy + 11 + bob;
             if (dir === DIR_DOWN) {
                 ctx.fillRect(ox + 13, eyeY, 2, 2);
@@ -1055,20 +1130,6 @@
             } else {
                 ctx.fillRect(ox + 18, eyeY, 2, 2);
             }
-        }
-
-        // Legs - swap which foot leads on each walk step
-        ctx.fillStyle = "#2f5f2f";
-        const legY = oy + 24;
-        if (frame === 1) {
-            ctx.fillRect(ox + 11, legY, 3, 4);
-            ctx.fillRect(ox + 18, legY - 1, 3, 5);
-        } else if (frame === 2) {
-            ctx.fillRect(ox + 11, legY - 1, 3, 5);
-            ctx.fillRect(ox + 18, legY, 3, 4);
-        } else {
-            ctx.fillRect(ox + 11, legY, 3, 4);
-            ctx.fillRect(ox + 18, legY, 3, 4);
         }
     }
 
