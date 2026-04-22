@@ -2367,6 +2367,12 @@
         // at the merchant's shop.
         coins: 0,
 
+        // Magic meter. Tops up from red orbs dropped by enemies,
+        // capped at maxMagic. Future: power moves could spend magic
+        // instead of (or alongside) their current cooldown timers.
+        magic: 0,
+        maxMagic: 100,
+
         // Currently-equipped weapon index into `weapons[]`.
         // 0 = sword (melee), 1 = energy blast (projectile).
         weaponIndex: 0,
@@ -3478,6 +3484,17 @@
             isKey: true,
             use(_player) {},
         },
+        // Magic orbs - crimson pickups dropped by slain enemies.
+        // `magicValue` routes the drop into `player.magic` in
+        // updateDrops, mirroring how `currency: true` routes coins
+        // into `player.coins`. Keeps the drop pipeline uniform.
+        magic_orb: {
+            id: "magic_orb",
+            name: "Magic Orb",
+            color: "#e63946",
+            magicValue: 10,
+            use(_player) {},
+        },
     };
 
     // Helpers on the player. Defined here (rather than as methods on
@@ -3540,11 +3557,13 @@
         const cx = enemy.x + enemy.width / 2;
         const cy = enemy.y + enemy.height / 2;
 
-        // Bosses always leave a purse plus a potion - a big reward
-        // for the long fight. Coins arc out in a short circle so
-        // pickup feels like a burst, not a single tile.
+        // Bosses always leave a purse plus a potion and a pair of
+        // magic orbs - a big reward for the long fight. Coins arc
+        // out in a short circle so pickup feels like a burst.
         if (enemy.isBoss) {
             spawnDrop(cx, cy - 20, "potion");
+            spawnDrop(cx - 18, cy - 20, "magic_orb");
+            spawnDrop(cx + 18, cy - 20, "magic_orb");
             const coinCount = 8;
             for (let i = 0; i < coinCount; i++) {
                 const angle = (i / coinCount) * Math.PI * 2;
@@ -3559,15 +3578,18 @@
         }
 
         // Regular enemy table:
-        //   25% potion, 45% one coin, 15% two coins, 15% nothing.
+        //   20% potion, 40% one coin, 15% two coins, 15% magic orb,
+        //   10% nothing.
         const r = Math.random();
-        if (r < 0.25) {
+        if (r < 0.20) {
             spawnDrop(cx, cy, "potion");
-        } else if (r < 0.70) {
+        } else if (r < 0.60) {
             spawnDrop(cx, cy, "coin");
-        } else if (r < 0.85) {
+        } else if (r < 0.75) {
             spawnDrop(cx - 8, cy, "coin");
             spawnDrop(cx + 8, cy, "coin");
+        } else if (r < 0.90) {
+            spawnDrop(cx, cy, "magic_orb");
         }
         // else nothing
     }
@@ -3595,6 +3617,15 @@
                     // Currency drop - goes into the purse, not the
                     // inventory. `value` defaults to 1 when unset.
                     player.coins += tmpl.value ?? 1;
+                    sound.play("coin");
+                } else if (tmpl && tmpl.magicValue) {
+                    // Magic orb - refills the magic meter up to cap.
+                    // Bypasses the inventory entirely so picking up
+                    // at full magic simply fizzles (no wasted slot).
+                    player.magic = Math.min(
+                        player.maxMagic,
+                        player.magic + tmpl.magicValue
+                    );
                     sound.play("coin");
                 } else {
                     addToInventory(d.itemId);
@@ -7273,6 +7304,7 @@
         // Inventory / drops / UI state - fresh run has no loot.
         player.inventory.length = 0;
         player.coins = 0;
+        player.magic = 0;
         drops.length = 0;
         inventoryOpen = false;
 
@@ -7430,8 +7462,9 @@
         drawStatsPanel();
         drawScore();
         drawHealthBar();
-        drawCorruptionBar();
+        drawMagicBar();
         drawXpBar();
+        drawCorruptionBar();
         drawCooldownBar();
         drawEnemyCounter();
         drawBossHealth();
@@ -7564,7 +7597,7 @@
         const barW = 252;
         const barH = 6;
         const x = 28;
-        const y = 70;
+        const y = 74;  // tight stack: below HP (40+14) + MAGIC (58+10) + 6px gap
         const r = 3;
 
         const frac = Math.max(0, Math.min(1, stats.xp / stats.xpForNext));
@@ -7976,6 +8009,57 @@
         ctx.restore();
     }
 
+    // Magic meter - red bar below HP. Always visible: magic is a
+    // core resource and the empty bar cues players to go hunt for
+    // red orbs. Same dimensions as HP would make it read as a
+    // duplicate; a slightly shorter bar keeps HP visually primary.
+    function drawMagicBar() {
+        const barW = 180;
+        const barH = 10;
+        const x = 16;
+        const y = 58;  // 4px gap below HP (y=40, h=14)
+        const r = 4;
+
+        const frac = Math.max(0, Math.min(1, player.magic / player.maxMagic));
+
+        ctx.save();
+
+        // Track
+        roundRectPath(ctx, x, y, barW, barH, r);
+        ctx.fillStyle = "#13131c";
+        ctx.fill();
+
+        // Fill - deep red → bright crimson. Clipped to the rounded
+        // track so the fill honors the corner radius.
+        if (frac > 0) {
+            ctx.save();
+            ctx.clip();
+            ctx.fillStyle = "#c5243a";
+            ctx.fillRect(x, y, barW * frac, barH);
+            // Specular highlight
+            ctx.fillStyle = "rgba(255, 255, 255, 0.22)";
+            ctx.fillRect(x, y + 1, barW * frac, 2);
+            ctx.restore();
+        }
+
+        // Rim - faint red tint
+        ctx.strokeStyle = "rgba(230, 90, 90, 0.35)";
+        ctx.lineWidth = 1;
+        roundRectPath(ctx, x + 0.5, y + 0.5, barW - 1, barH - 1, r);
+        ctx.stroke();
+
+        // Readout
+        ctx.textBaseline = "middle";
+        drawShadowedText(
+            `MP  ${Math.floor(player.magic)} / ${player.maxMagic}`,
+            x + barW + 10, y + barH / 2,
+            "#e8b0b0",
+            "11px system-ui, sans-serif"
+        );
+
+        ctx.restore();
+    }
+
     // Corruption meter - appears beneath HP whenever the player has
     // any corruption at all or is currently in a corrupting zone
     // (so the player sees the bar fill from 0, not pop in later).
@@ -7987,7 +8071,7 @@
         const barW = 180;
         const barH = 8;
         const x = 16;
-        const y = 40 + 14 + 4;  // just below the HP bar
+        const y = 86;  // below XP (74+6) + 6px gap - conditional row
         const r = 4;
 
         const frac = Math.max(0, Math.min(1, corruption.value / corruption.max));
