@@ -10371,12 +10371,12 @@
         const d = dialogue.active;
         if (!d) return;
 
-        // Scale the box to the viewport so it reads on any screen.
-        // 16px side margin, 92% of width capped at 640, 44% of
-        // height (or 220 min) anchored at the bottom with an 18px
-        // safe-area gap.
+        // Scale the box to the viewport. Option rows are sized for
+        // finger-friendly tapping (44px each with a 6px gap), so the
+        // panel needs enough vertical room to fit up to 5 options
+        // plus the header + body text without crowding on mobile.
         const boxW = Math.min(640, VIEW_W - 32);
-        const boxH = Math.max(200, Math.min(260, Math.round(VIEW_H * 0.44)));
+        const boxH = Math.max(260, Math.min(380, Math.round(VIEW_H * 0.55)));
         const x = Math.floor((VIEW_W - boxW) / 2);
         const y = VIEW_H - boxH - 18;
 
@@ -10431,7 +10431,14 @@
         dialogue.optionRects = [];
         if (d.mode === "menu") {
             // Options start below the body text, each clickable.
-            const optionsTop = Math.max(lineY + 10, y + boxH - 10 - d.options.length * 26);
+            // Row pitch is 50px (44 tall + 6 gap) - big finger-
+            // friendly hitboxes so tapping on mobile stays easy.
+            const ROW_H = 44;
+            const ROW_PITCH = 50;
+            const optionsTop = Math.max(
+                lineY + 10,
+                y + boxH - 14 - d.options.length * ROW_PITCH + (ROW_PITCH - ROW_H)
+            );
 
             // Recruitment hint - only shown to first-time recruiters,
             // pointing at the Fight-with-me option. Auto-hides once
@@ -10451,37 +10458,41 @@
 
             for (let i = 0; i < d.options.length; i++) {
                 const opt = d.options[i];
-                const oy = optionsTop + i * 26;
-                const oh = 24;
+                const oy = optionsTop + i * ROW_PITCH;
+                const oh = ROW_H;
                 const ox = x + 16;
                 const ow = boxW - 32;
 
                 // Highlight "Goodbye" row with the close accent.
                 const isClose = opt.close === true;
                 ctx.fillStyle = isClose
-                    ? "rgba(110, 110, 130, 0.18)"
-                    : "rgba(255, 209, 102, 0.10)";
-                roundRectPath(ctx, ox, oy, ow, oh, 6);
+                    ? "rgba(110, 110, 130, 0.22)"
+                    : "rgba(255, 209, 102, 0.14)";
+                roundRectPath(ctx, ox, oy, ow, oh, 8);
                 ctx.fill();
                 ctx.strokeStyle = isClose
-                    ? "rgba(160, 160, 184, 0.35)"
-                    : "rgba(255, 209, 102, 0.38)";
-                ctx.lineWidth = 1;
+                    ? "rgba(160, 160, 184, 0.45)"
+                    : "rgba(255, 209, 102, 0.5)";
+                ctx.lineWidth = 1.5;
                 ctx.stroke();
 
-                // Number prefix + label
+                // Number prefix + label, vertically centered in the
+                // taller row. Text baseline flips to "middle" only
+                // for this block so other panel text stays top-aligned.
+                ctx.textBaseline = "middle";
                 drawShadowedText(
                     String(i + 1),
-                    ox + 10, oy + 4,
+                    ox + 14, oy + oh / 2,
                     isClose ? "#a0a0b8" : "#ffd166",
-                    "bold 13px system-ui, sans-serif"
+                    "bold 16px system-ui, sans-serif"
                 );
                 drawShadowedText(
                     opt.label,
-                    ox + 30, oy + 4,
+                    ox + 38, oy + oh / 2,
                     "#e8e8f0",
-                    "13px system-ui, sans-serif"
+                    "15px system-ui, sans-serif"
                 );
+                ctx.textBaseline = "top";
 
                 dialogue.optionRects.push({ x: ox, y: oy, w: ow, h: oh });
             }
