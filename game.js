@@ -2748,6 +2748,12 @@
 
         // Cinematic: highest-priority modal. A tap advances the
         // sequence; no other buttons react while text rolls.
+        // Scripted dialogue is above cinematic in the modal stack.
+        if (scriptedDialogue.isOpen()) {
+            scriptedDialogue.advance();
+            e.preventDefault();
+            return;
+        }
         if (cinematic.isOpen()) {
             cinematic.advance();
             e.preventDefault();
@@ -3825,8 +3831,11 @@
             // next event hook can complete it (no separate startMission
             // call required for the linear flow). startMission stays
             // available for callers that want explicit control.
+            // The "NEW MISSION" banner fires here so the player
+            // always sees the next objective spelled out.
             if (index + 1 < this.list.length) {
                 this.currentMissionIndex = index + 1;
+                newMissionBanner.show(this.list[this.currentMissionIndex].name);
             }
             return true;
         },
@@ -4183,6 +4192,224 @@
     };
 
     // ---------------------------------------------------------------
+    // Scripted dialogue box
+    //
+    // Bottom-of-screen dialogue panel with a typewriter effect,
+    // speaker name, and tap/key-to-continue. Distinct from the
+    // menu-driven dialogue system: no options, no open-ended
+    // input, just lines that advance on input and close on the
+    // last one.
+    //
+    // Used for:
+    //   - opening intro (played once per session on startGame)
+    //   - first Elder encounter (played once, before the menu)
+    //   - mission briefs (played once per quest, before accept)
+    //
+    // Priority: highest modal (even above cinematic), since these
+    // are always short and directly solicit player input. ESC skips
+    // the entire sequence in one tap, firing onDone so the followup
+    // flow still runs.
+    // ---------------------------------------------------------------
+    const scriptedDialogue = {
+        active: null,
+        charsPerSec: 42,
+
+        isOpen() { return this.active !== null; },
+
+        play(lines, onDone = null) {
+            if (!lines || !lines.length) {
+                if (onDone) onDone();
+                return;
+            }
+            this.active = { lines, index: 0, charsShown: 0, onDone };
+        },
+
+        // Called by any advance input (tap / key other than ESC):
+        //   - Mid-typewriter -> finish the current line instantly.
+        //   - Line complete  -> move to next line, or close + fire
+        //                       onDone if we were on the last line.
+        advance() {
+            if (!this.active) return;
+            const a = this.active;
+            const line = a.lines[a.index];
+            const full = line.text.length;
+            if (Math.floor(a.charsShown) < full) {
+                a.charsShown = full;
+                return;
+            }
+            a.index++;
+            a.charsShown = 0;
+            if (a.index >= a.lines.length) this._finish();
+        },
+
+        // ESC skips the whole sequence in one press.
+        skip() { if (this.active) this._finish(); },
+
+        _finish() {
+            const onDone = this.active.onDone;
+            this.active = null;
+            if (onDone) onDone();
+        },
+
+        update(dt) {
+            if (!this.active) return;
+            const a = this.active;
+            const line = a.lines[a.index];
+            if (!line) return;
+            if (a.charsShown < line.text.length) {
+                a.charsShown = Math.min(
+                    line.text.length,
+                    a.charsShown + this.charsPerSec * dt
+                );
+            }
+        },
+
+        draw(ctx) {
+            if (!this.active) return;
+            const a = this.active;
+            const line = a.lines[a.index];
+            if (!line) return;
+
+            const boxW = Math.min(640, VIEW_W - 32);
+            const boxH = line.speaker ? 150 : 130;
+            const x = Math.floor((VIEW_W - boxW) / 2);
+            const y = VIEW_H - boxH - 18;
+
+            // Full-screen dim so world reads as "story mode".
+            ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+            ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+            // Panel
+            ctx.save();
+            roundRectPath(ctx, x, y, boxW, boxH, 10);
+            ctx.fillStyle = "rgba(14, 14, 22, 0.94)";
+            ctx.fill();
+            ctx.strokeStyle = "rgba(255, 209, 102, 0.55)";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Speaker name banner
+            let textTop = y + 16;
+            if (line.speaker) {
+                ctx.textBaseline = "top";
+                ctx.textAlign = "left";
+                drawShadowedText(line.speaker, x + 18, y + 12,
+                    "#ffd166",
+                    "bold 16px system-ui, sans-serif");
+                ctx.strokeStyle = "rgba(255, 209, 102, 0.28)";
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(x + 16, y + 36);
+                ctx.lineTo(x + boxW - 16, y + 36);
+                ctx.stroke();
+                textTop = y + 46;
+            }
+
+            // Typewriter body - wrapped in-place as chars arrive.
+            const full = line.text.length;
+            const shown = Math.floor(a.charsShown);
+            const displayed = line.text.substring(0, shown);
+            const wrapped = wrapText(displayed, boxW - 36,
+                "15px system-ui, sans-serif");
+            let ly = textTop;
+            for (const w of wrapped) {
+                drawShadowedText(w, x + 18, ly, "#e8e8f0",
+                    "15px system-ui, sans-serif");
+                ly += 22;
+            }
+
+            // Continue prompt once typing completes. Pulses so it
+            // reads as the live advance target.
+            const hintY = y + boxH - 10;
+            if (shown >= full) {
+                const pulse = 0.55 + 0.45 *
+                    Math.abs(Math.sin(performance.now() * 0.004));
+                ctx.globalAlpha = pulse;
+                ctx.textAlign = "right";
+                ctx.textBaseline = "bottom";
+                const lastLine = a.index === a.lines.length - 1;
+                drawShadowedText(
+                    lastLine
+                        ? "Tap or press any key to begin"
+                        : "Tap or press any key to continue",
+                    x + boxW - 14, hintY,
+                    "#ffd166",
+                    "bold 11px system-ui, sans-serif"
+                );
+                ctx.globalAlpha = 1;
+            }
+            // Skip hint always visible in the bottom-left.
+            ctx.textAlign = "left";
+            ctx.textBaseline = "bottom";
+            ctx.globalAlpha = 0.7;
+            drawShadowedText("ESC / BACK to skip",
+                x + 14, hintY, "#a0a0b8",
+                "11px system-ui, sans-serif");
+            ctx.globalAlpha = 1;
+
+            ctx.restore();
+        },
+
+        reset() { this.active = null; },
+    };
+
+    // Large center-screen "New Mission: ..." banner for mission
+    // handoffs. Purely a toast with extra weight - no input gate.
+    const newMissionBanner = {
+        text: "",
+        timer: 0,
+        duration: 3.2,
+
+        show(name) {
+            this.text = name;
+            this.timer = this.duration;
+        },
+
+        update(dt) {
+            if (this.timer > 0) this.timer = Math.max(0, this.timer - dt);
+        },
+
+        draw(ctx) {
+            if (this.timer <= 0) return;
+            const t = 1 - this.timer / this.duration;
+            // Fade in the first 20%, hold, fade out the last 30%.
+            const alpha = t < 0.2
+                ? t / 0.2
+                : t > 0.7
+                    ? 1 - (t - 0.7) / 0.3
+                    : 1;
+
+            const w = Math.min(420, VIEW_W - 40);
+            const h = 72;
+            const x = Math.floor((VIEW_W - w) / 2);
+            const y = Math.floor(VIEW_H * 0.28);
+
+            ctx.save();
+            ctx.globalAlpha = alpha;
+            roundRectPath(ctx, x, y, w, h, 10);
+            ctx.fillStyle = "rgba(14, 14, 22, 0.92)";
+            ctx.fill();
+            ctx.strokeStyle = "rgba(255, 209, 102, 0.7)";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            drawShadowedText("NEW MISSION",
+                x + w / 2, y + 22,
+                "#ffd166",
+                "bold 13px system-ui, sans-serif");
+            drawShadowedText(this.text,
+                x + w / 2, y + 48,
+                "#e8e8f0",
+                "bold 16px system-ui, sans-serif");
+            ctx.restore();
+        },
+
+        reset() { this.text = ""; this.timer = 0; },
+    };
+
+    // ---------------------------------------------------------------
     // Quests
     //
     // QUESTS is a read-only catalog of quest templates keyed by id.
@@ -4260,6 +4487,17 @@
             // Mission 2: accepting the Elder's first hunt closes the
             // "Accept the brief" beat. No-op if mission 2 isn't current.
             if (id === "slay3") missions.completeById(2);
+            // Mission brief: slay3 gets a short scripted explanation
+            // so the player sees why they're fighting and what the
+            // payoff is. Plays in the elder's voice since they
+            // issued the quest.
+            if (id === "slay3" && !story.slay3BriefShown) {
+                story.slay3BriefShown = true;
+                scriptedDialogue.play([
+                    { speaker: "Village Elder", text: "There are waves of creatures below..." },
+                    { speaker: "Village Elder", text: "Survive them, and you'll earn the key." },
+                ]);
+            }
             return true;
         },
 
@@ -8350,6 +8588,29 @@
                 if (npc && typeof npc.interact === "function") npc.interact();
                 return;
             }
+
+            // First-time Elder meeting: play a scripted scene
+            // (typewriter box) before the menu opens. The onDone
+            // handler re-calls dialogue.open with the flag set so
+            // the normal menu path runs on the second pass.
+            if (npc.id === "elder" && !story.elderIntroShown) {
+                story.elderIntroShown = true;
+                const ELDER_INTRO_LINES = [
+                    { speaker: npc.name, text: "You're new here... I can tell." },
+                    { speaker: npc.name, text: "This place isn't as peaceful as it looks." },
+                    { speaker: npc.name, text: "The dungeon below... it's changing." },
+                    { speaker: npc.name, text: "If you're going down there... you'll need help." },
+                ];
+                scriptedDialogue.play(ELDER_INTRO_LINES, () => {
+                    // Complete mission 1 here so the "speak with
+                    // Elder" beat closes even if the player taps
+                    // away before re-entering the menu.
+                    missions.completeById(1);
+                    this.open(npc);
+                });
+                return;
+            }
+
             const d = npc.dialogue;
             // Greeting may be a plain string (static), a function
             // (open-time compute of any condition), or a chapter-
@@ -9908,6 +10169,31 @@
         // input advances the text or closes it. Escape closes
         // outright. Tick transient UI timers so toast fade doesn't
         // stall underneath.
+        // Scripted dialogue: highest-priority modal above cinematic.
+        // ESC skips the whole sequence; any other key/tap advances
+        // the current line (or finishes the typewriter in progress).
+        if (scriptedDialogue.isOpen()) {
+            scriptedDialogue.update(dt);
+            let pressed = false;
+            for (const k in keysJustPressed) {
+                if (keysJustPressed[k]) { pressed = true; break; }
+            }
+            if (keysJustPressed["Escape"]) {
+                scriptedDialogue.skip();
+            } else if (pressed) {
+                scriptedDialogue.advance();
+            }
+            attackButton.consumeJustPressed();
+            interactButton.consumeJustPressed();
+            superPowerButton.consumeJustPressed();
+            powerButton.consumeJustPressed();
+            specialButton.consumeJustPressed();
+            newMissionBanner.update(dt);
+            questLog.update(dt);
+            clearJustPressed();
+            return;
+        }
+
         if (cinematic.isOpen()) {
             cinematic.update(dt);
             // Any keydown or a new touch advances the sequence.
@@ -9927,6 +10213,7 @@
             superPowerButton.consumeJustPressed();
             powerButton.consumeJustPressed();
             specialButton.consumeJustPressed();
+            newMissionBanner.update(dt);
             questLog.update(dt);
             clearJustPressed();
             return;
@@ -9995,8 +10282,10 @@
             }
         }
 
-        // Tick transient UI state (quest + level toasts).
+        // Tick transient UI state (quest + level toasts + the big
+        // NEW MISSION banner so it fades naturally during play).
         questLog.update(dt);
+        newMissionBanner.update(dt);
         if (stats.levelUpToast > 0) {
             stats.levelUpToast = Math.max(0, stats.levelUpToast - dt);
         }
@@ -10154,12 +10443,34 @@
         }
     }
 
+    // Three-line opening narration played from startGame on a
+    // fresh session. Mission 1 ("Speak with the Village Elder") is
+    // current at this point; the onDone handler shows the "New
+    // Mission" banner so the player knows what to do next.
+    const OPENING_LINES = [
+        { speaker: null, text: "You arrived in Sunlit Grove..." },
+        { speaker: null, text: "But something beneath the world has awakened..." },
+        { speaker: null, text: "You can feel it..." },
+    ];
+
     function startGame() {
         gameState = "playing";
         lastTime = performance.now();
         // Clear any held keys that might be stuck from the input
         // that dismissed the intro.
         for (const k in keys) keys[k] = false;
+
+        // Opening intro plays only once per session - a fresh page
+        // load starts with the story; respawning from death does
+        // not replay it. Flag lives on `story` so it's session-
+        // scoped without needing a separate storage entry.
+        if (!story.openingShown) {
+            story.openingShown = true;
+            scriptedDialogue.play(OPENING_LINES, () => {
+                const cur = missions.getCurrentMission();
+                if (cur) newMissionBanner.show(cur.name);
+            });
+        }
     }
 
     // ---------------------------------------------------------------
@@ -10377,6 +10688,12 @@
         // Cinematic - close any mid-playing sequence so the next
         // run doesn't open on a stale letterbox.
         cinematic.reset();
+
+        // Scripted dialogue + mission banner reset so the respawn
+        // frame opens clean. Opening + first-Elder flags stay set
+        // so story beats don't replay every time the player dies.
+        scriptedDialogue.reset();
+        newMissionBanner.reset();
 
         // Dialogue - close any open box, drop cached option rects.
         dialogue.close();
@@ -10611,10 +10928,17 @@
         // early-out before a single fillRect.
         flash.draw(ctx);
 
-        // Cinematic draws last - it overlays every other piece of
-        // UI (including the game-over overlay and intro) so story
-        // beats always read clearly.
+        // NEW MISSION banner sits above the world / HUD but below
+        // cinematic / scripted dialogue, so a mission completion
+        // during a chapter advance doesn't compete with the
+        // bigger story overlay.
+        newMissionBanner.draw(ctx);
+
+        // Scripted dialogue + cinematic are top of the stack. The
+        // scripted box draws over everything (including cinematic
+        // letterboxing) because it's the highest-priority modal.
         cinematic.draw(ctx);
+        scriptedDialogue.draw(ctx);
     }
 
     // --- HUD helpers ---
