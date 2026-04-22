@@ -3831,6 +3831,82 @@
     // list so they move with the player across zones automatically.
     const followers = [];
 
+    // ---------------------------------------------------------------
+    // Squad roles
+    //
+    // Each recruited NPC carries a `squadRole` id keyed into this
+    // catalog. The role drives:
+    //   maxHp              starting / max health
+    //   moveSpeed          engage-state travel speed
+    //   engageRange        detect enemies within this radius
+    //   preferredRange     desired distance from target in engage
+    //   attackRange        must be within this to actually hit
+    //   attackDamage       per-swing / per-shot
+    //   attackCooldown     seconds between attacks
+    //   retreatThreshold   hp-frac below which follower retreats
+    //   recoverThreshold   hp-frac above which retreat ends
+    //   regenPerSec        hp/sec while retreating
+    //   kind               "melee" | "ranged" | "tank" - attack style
+    //   drawsAggro         true for tanks; enemies near them swap
+    //                      their target from the player to the tank
+    //   accentColor        HP bar fill + ranged projectile tint
+    //
+    // Adding a new role is one entry in this catalog plus a new
+    // branch in `performFollowerAttack` (or a shared kind).
+    // ---------------------------------------------------------------
+    const SQUAD_ROLES = {
+        melee: {
+            id: "melee",
+            name: "Melee Warrior",
+            maxHp: 45,
+            moveSpeed: 72,
+            engageRange: 260,
+            preferredRange: 24,
+            attackRange: 32,
+            attackDamage: 2,
+            attackCooldown: 0.70,
+            retreatThreshold: 0.30,
+            recoverThreshold: 0.70,
+            regenPerSec: 10,
+            kind: "melee",
+            accentColor: "#ffd166",
+        },
+        ranged: {
+            id: "ranged",
+            name: "Ranged Fighter",
+            maxHp: 28,
+            moveSpeed: 62,
+            engageRange: 340,
+            preferredRange: 180,
+            attackRange: 240,
+            attackDamage: 2,
+            attackCooldown: 1.10,
+            retreatThreshold: 0.30,
+            recoverThreshold: 0.65,
+            regenPerSec: 12,
+            kind: "ranged",
+            projectileSpeed: 380,
+            accentColor: "#8ad9ff",
+        },
+        tank: {
+            id: "tank",
+            name: "Tank",
+            maxHp: 90,
+            moveSpeed: 52,
+            engageRange: 240,
+            preferredRange: 20,
+            attackRange: 36,
+            attackDamage: 1,
+            attackCooldown: 1.30,
+            retreatThreshold: 0.18,
+            recoverThreshold: 0.45,
+            regenPerSec: 8,
+            kind: "tank",
+            drawsAggro: true,
+            accentColor: "#c96565",
+        },
+    };
+
     // Fixed formation offsets relative to the player's center.
     // Ordered so the first slot fills directly behind-left, the next
     // behind-right, and so on - a small arc that keeps the line of
@@ -3866,50 +3942,189 @@
         return null;
     }
 
+    // Pick the nearest live enemy within this follower's engageRange.
+    // Returns null in safe zones or if nothing is close enough.
+    function pickFollowerTarget(f) {
+        if (isSafeZone()) return null;
+        const fcx = f.x + f.width / 2;
+        const fcy = f.y + f.height / 2;
+        const r2 = f.roleCfg.engageRange * f.roleCfg.engageRange;
+        let best = null;
+        let bestD = r2;
+        for (const e of enemies) {
+            if (!e.alive) continue;
+            const dx = (e.x + e.width / 2) - fcx;
+            const dy = (e.y + e.height / 2) - fcy;
+            const d = dx * dx + dy * dy;
+            if (d < bestD) { best = e; bestD = d; }
+        }
+        return best;
+    }
+
+    // Fire a follower's attack. Melee / tank hit the target directly;
+    // ranged spawns a projectile with the follower's accent color into
+    // the shared projectiles array (same collision pipeline as the
+    // player's energy weapon).
+    function performFollowerAttack(f) {
+        if (!f.target || !f.target.alive) return;
+        const role = f.roleCfg;
+        const fcx = f.x + f.width / 2;
+        const fcy = f.y + f.height / 2;
+        const tcx = f.target.x + f.target.width / 2;
+        const tcy = f.target.y + f.target.height / 2;
+        f.attackFlashTimer = 0.12;
+
+        if (role.kind === "ranged") {
+            const dx = tcx - fcx;
+            const dy = tcy - fcy;
+            const mag = Math.hypot(dx, dy) || 1;
+            const speed = role.projectileSpeed;
+            projectiles.push({
+                x: fcx - 5, y: fcy - 5,
+                w: 10, h: 10,
+                vx: (dx / mag) * speed,
+                vy: (dy / mag) * speed,
+                life: 1.1,
+                damage: role.attackDamage,
+                color: role.accentColor,
+                age: 0,
+                alive: true,
+            });
+            return;
+        }
+
+        // Melee / tank: single-target hit with the target's existing
+        // hit-flash + knockback. Counts as a clean defeat like any
+        // other damage source.
+        f.target.takeHit(role.attackDamage, { x: fcx, y: fcy });
+        if (!f.target.alive) onEnemyDefeated(f.target);
+    }
+
+    // Damage a follower. Mirrors the player damage chokepoint:
+    // iframes gate repeated hits, hp floors at 0 (non-lethal - a
+    // downed follower stays put and regenerates during retreat).
+    function damageFollower(f, amount) {
+        if (f.iframes > 0) return;
+        f.hp = Math.max(0, f.hp - amount);
+        f.iframes = 0.55;
+        // Always retreat after a hit that crosses the threshold.
+        if (f.hp / f.maxHp <= f.roleCfg.retreatThreshold) {
+            f.fightState = "retreat";
+            f.target = null;
+        }
+        sound.play("playerHurt");
+    }
+
     // Advances every active follower. Kept separate from updateNpcs
     // so followers can run in every zone (including hostile ones)
     // without interfering with zone-local NPC routines.
+    //
+    // Each follower runs a tiny state machine:
+    //   follow  - no target, trail the player in formation.
+    //   engage  - hold to the role's preferredRange, attack on cd.
+    //   retreat - hp below retreatThreshold: pull to formation,
+    //             regen passively until recoverThreshold restores.
     function updateFollowers(dt) {
         const pcx = player.x + player.width / 2;
         const pcy = player.y + player.height / 2;
+        const hostile = !isSafeZone();
 
         for (let i = 0; i < followers.length; i++) {
             const f = followers[i];
-            const slot = FOLLOW_SLOTS[i % FOLLOW_SLOTS.length];
-            const tx = pcx + slot.dx - f.width / 2;
-            const ty = pcy + slot.dy - f.height / 2;
-
+            const role = f.roleCfg;
             f.age += dt;
-            const dx = tx - f.x;
-            const dy = ty - f.y;
-            const dist = Math.hypot(dx, dy);
+            if (f.iframes > 0) f.iframes = Math.max(0, f.iframes - dt);
+            if (f.attackCooldownTimer > 0)
+                f.attackCooldownTimer = Math.max(0, f.attackCooldownTimer - dt);
+            if (f.attackFlashTimer > 0)
+                f.attackFlashTimer = Math.max(0, f.attackFlashTimer - dt);
 
-            if (dist < FOLLOW_IDLE_RADIUS) {
-                // In the pocket: hold position and idle the animator
-                // so the sprite's walk bob stops.
-                f.state = "idle";
-                if (f.animator) {
-                    f.animator.setState("idle");
-                    f.animator.update(dt);
+            // State machine: retreat has priority. Regenerate while
+            // retreating; once healed above recoverThreshold, drop
+            // back to follow.
+            if (f.fightState === "retreat") {
+                f.hp = Math.min(f.maxHp, f.hp + role.regenPerSec * dt);
+                if (f.hp / f.maxHp >= role.recoverThreshold) {
+                    f.fightState = "follow";
                 }
-                continue;
+            } else if (f.hp / f.maxHp <= role.retreatThreshold) {
+                f.fightState = "retreat";
+                f.target = null;
+            } else if (hostile) {
+                // Pick / keep a target. Drop one that's run way
+                // outside engage range so followers don't chase
+                // across the whole map.
+                if (f.target && !f.target.alive) f.target = null;
+                if (f.target) {
+                    const tcx = f.target.x + f.target.width / 2;
+                    const tcy = f.target.y + f.target.height / 2;
+                    const dx = tcx - (f.x + f.width / 2);
+                    const dy = tcy - (f.y + f.height / 2);
+                    const leash2 = role.engageRange * role.engageRange * 2.5;
+                    if (dx * dx + dy * dy > leash2) f.target = null;
+                }
+                if (!f.target) f.target = pickFollowerTarget(f);
+                f.fightState = f.target ? "engage" : "follow";
+            } else {
+                f.fightState = "follow";
+                f.target = null;
             }
 
-            // Speed scales with distance so catch-up is snappy when
-            // the player sprints ahead and gentle when they drift.
-            // Capped so fast-teleport doesn't become a blur.
-            const speedScale = Math.min(FOLLOW_MAX_SPEED_X, 1 + dist / 80);
-            const step = Math.min(dist, f.speed * speedScale * dt);
-            const inv = 1 / dist;
-            f.x += dx * inv * step;
-            f.y += dy * inv * step;
-            f.state = "walk";
+            const slot = FOLLOW_SLOTS[i % FOLLOW_SLOTS.length];
+            let moving = false;
+            let faceDir = null;
+
+            if (f.fightState === "engage" && f.target) {
+                // Hold preferred distance: approach if too far, back
+                // off if too close (ranged). Dead zone keeps the
+                // sprite from jitter-stepping at exactly the radius.
+                const tcx = f.target.x + f.target.width / 2;
+                const tcy = f.target.y + f.target.height / 2;
+                const fcx = f.x + f.width / 2;
+                const fcy = f.y + f.height / 2;
+                const tdx = tcx - fcx;
+                const tdy = tcy - fcy;
+                const tdist = Math.hypot(tdx, tdy) || 1;
+                const delta = tdist - role.preferredRange;
+                const DEAD_ZONE = 5;
+                if (Math.abs(delta) > DEAD_ZONE) {
+                    const sign = delta > 0 ? 1 : -1;
+                    const step = Math.min(Math.abs(delta),
+                        role.moveSpeed * dt);
+                    const inv = 1 / tdist;
+                    f.x += tdx * inv * step * sign;
+                    f.y += tdy * inv * step * sign;
+                    moving = true;
+                }
+                faceDir = dirFromVector(tdx, tdy);
+
+                if (tdist <= role.attackRange &&
+                    f.attackCooldownTimer <= 0) {
+                    performFollowerAttack(f);
+                    f.attackCooldownTimer = role.attackCooldown;
+                }
+            } else {
+                // follow or retreat: head to the formation slot.
+                const tx = pcx + slot.dx - f.width / 2;
+                const ty = pcy + slot.dy - f.height / 2;
+                const dx = tx - f.x;
+                const dy = ty - f.y;
+                const dist = Math.hypot(dx, dy);
+                if (dist > FOLLOW_IDLE_RADIUS) {
+                    const catchup = Math.min(FOLLOW_MAX_SPEED_X,
+                        1 + dist / 80);
+                    const step = Math.min(dist, f.speed * catchup * dt);
+                    const inv = 1 / dist;
+                    f.x += dx * inv * step;
+                    f.y += dy * inv * step;
+                    moving = true;
+                    faceDir = dirFromVector(dx, dy);
+                }
+            }
 
             if (f.animator) {
-                f.animator.setState("walk");
-                // Face the movement direction.
-                const dir = dirFromVector(dx, dy);
-                if (dir !== null) f.animator.setDir(dir);
+                f.animator.setState(moving ? "walk" : "idle");
+                if (faceDir !== null) f.animator.setDir(faceDir);
                 f.animator.update(dt);
             }
         }
@@ -3925,7 +4140,6 @@
                 const dy = (b.y + b.height / 2) - (a.y + a.height / 2);
                 const d = Math.hypot(dx, dy);
                 if (d > FOLLOW_SEPARATION || d === 0) continue;
-                // Push each half the overlap along the axis between.
                 const push = (FOLLOW_SEPARATION - d) * 0.5;
                 const ix = (dx / d) * push;
                 const iy = (dy / d) * push;
@@ -3933,6 +4147,27 @@
                 b.x += ix; b.y += iy;
             }
         }
+    }
+
+    // Enemy target resolution: a tank follower within aggroRange
+    // supersedes the player. This is how "tank draws attention"
+    // lands without rewriting the enemy AI - they still chase a
+    // single target, just a different one.
+    function enemyTarget(enemy) {
+        const ecx = enemy.x + enemy.width / 2;
+        const ecy = enemy.y + enemy.height / 2;
+        const AGGRO_RADIUS_SQ = 180 * 180;
+        let best = null;
+        let bestD = AGGRO_RADIUS_SQ;
+        for (const f of followers) {
+            if (!f.roleCfg || !f.roleCfg.drawsAggro) continue;
+            if (f.hp <= 0) continue;
+            const dx = (f.x + f.width / 2) - ecx;
+            const dy = (f.y + f.height / 2) - ecy;
+            const d = dx * dx + dy * dy;
+            if (d < bestD) { best = f; bestD = d; }
+        }
+        return best || player;
     }
 
     // Snap every follower onto a formation slot near the player.
@@ -6175,6 +6410,37 @@
             ctx.fillText("E", bx, by + 1);
             ctx.restore();
         }
+
+        // Follower combat overlays. HP bar only while damaged so
+        // idle followers stay uncluttered. Attack-flash tints the
+        // sprite white briefly on each hit / shot. Retreat gets a
+        // small arrow hint so the player notices one's pulling out.
+        if (n._isFollower && n.maxHp) {
+            if (n.hp < n.maxHp) {
+                const frac = Math.max(0, n.hp / n.maxHp);
+                const barW = 22, barH = 3;
+                const bx = x + 5, by = y - 5;
+                ctx.fillStyle = "#1a1a24";
+                ctx.fillRect(bx, by, barW, barH);
+                ctx.fillStyle = (n.roleCfg && n.roleCfg.accentColor) || "#7ad17a";
+                ctx.fillRect(bx, by, barW * frac, barH);
+            }
+            if (n.attackFlashTimer > 0) {
+                const a = Math.min(1, n.attackFlashTimer / 0.12);
+                ctx.save();
+                ctx.globalCompositeOperation = "source-atop";
+                ctx.fillStyle = `rgba(255, 255, 255, ${(a * 0.8).toFixed(3)})`;
+                ctx.fillRect(x, y, 32, 32);
+                ctx.restore();
+            }
+            if (n.fightState === "retreat") {
+                ctx.fillStyle = "rgba(255, 200, 200, 0.85)";
+                ctx.font = "bold 10px system-ui, sans-serif";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "bottom";
+                ctx.fillText("!", x + 16, y - 7);
+            }
+        }
     }
 
     // --- Companions ---
@@ -6229,8 +6495,24 @@
             npc._originalRoutine = npc.routine;
             npc.routine = "follow";
             npc._isFollower = true;
+
+            // Role-driven combat stats. Default to melee so any
+            // warrior without an explicit squadRole tag still works.
+            const roleCfg = SQUAD_ROLES[npc.squadRole] ?? SQUAD_ROLES.melee;
+            npc.roleCfg = roleCfg;
+            npc.maxHp = roleCfg.maxHp;
+            npc.hp = roleCfg.maxHp;
+            npc.iframes = 0;
+            npc.fightState = "follow";
+            npc.target = null;
+            npc.attackCooldownTimer = 0;
+            npc.attackFlashTimer = 0;  // brief on-strike hit-flash cue
+
             followers.push(npc);
-            player.squad.push({ id: npc.id, name: npc.name, role: npc.role });
+            player.squad.push({
+                id: npc.id, name: npc.name, role: npc.role,
+                squadRole: roleCfg.id,
+            });
             snapFollowersToPlayer();
         },
 
@@ -6841,7 +7123,10 @@
             name: "Scout",
             // Warrior of the watch - recruitable from chapter2 once
             // the player has proved themselves in the caverns.
+            // Skirmisher: ranged role, keeps distance, pecks with
+            // energy bolts.
             role: "warrior",
+            squadRole: "ranged",
             recruitChapter: "chapter2",
             // Patrols the east gate on a three-waypoint loop:
             // north of the gate, at the gate, south of the gate.
@@ -7364,7 +7649,9 @@
             name: "Captain",
             // Commander of the watch - holds their post until the
             // Shrine is ready to fall. Recruitable in chapter4+.
+            // Tank: heavy HP, low damage, draws enemy attention.
             role: "warrior",
+            squadRole: "tank",
             recruitChapter: "chapter4",
             x: 272 - 16,
             y: 120,
@@ -7437,7 +7724,9 @@
             id: "recruit", name: "Recruit",
             // Eager rookie - first warrior willing to join you,
             // available from the very first chapter.
+            // Melee warrior: balanced hp + damage, closes the gap.
             role: "warrior",
+            squadRole: "melee",
             recruitChapter: "chapter1",
             x: 400, y: 250, width: 32, height: 32,
             interactRange: 58, wanderRadius: 36, speed: 40,
@@ -7479,7 +7768,10 @@
         // Reverse iteration lets us splice dead enemies cheaply.
         for (let i = enemies.length - 1; i >= 0; i--) {
             const e = enemies[i];
-            e.update(dt, player);
+            // enemyTarget swaps in a nearby tank follower when one
+            // is in aggro range, so the enemy chases the tank
+            // instead of the player.
+            e.update(dt, enemyTarget(e));
             if (!e.alive) enemies.splice(i, 1);
         }
     }
@@ -7511,16 +7803,37 @@
     // is a no-op while iframes are active, so one collision won't drain
     // the whole bar.
     function updateEnemyContact() {
-        if (!player.alive || isSafeZone()) return;
-        _playerBox.x = player.x;
-        _playerBox.y = player.y;
-        _playerBox.w = player.width;
-        _playerBox.h = player.height;
-        for (const e of enemies) {
-            if (!e.alive) continue;
-            if (rectsOverlap(_playerBox, e.bounds())) {
-                damagePlayer(e.contactDamage);
-                break; // one damage event per frame is enough
+        if (isSafeZone()) return;
+
+        // Player contact.
+        if (player.alive) {
+            _playerBox.x = player.x;
+            _playerBox.y = player.y;
+            _playerBox.w = player.width;
+            _playerBox.h = player.height;
+            for (const e of enemies) {
+                if (!e.alive) continue;
+                if (rectsOverlap(_playerBox, e.bounds())) {
+                    damagePlayer(e.contactDamage);
+                    break;
+                }
+            }
+        }
+
+        // Follower contact. Each follower takes at most one damage
+        // event per frame (matching the player rule). Iframes gate
+        // the next hit, so crowds of enemies can't rapid-fire a
+        // follower below zero in a single tick.
+        for (const f of followers) {
+            if (f.iframes > 0) continue;
+            for (const e of enemies) {
+                if (!e.alive) continue;
+                const b = e.bounds();
+                if (f.x < b.x + b.w && f.x + f.width > b.x &&
+                    f.y < b.y + b.h && f.y + f.height > b.y) {
+                    damageFollower(f, e.contactDamage);
+                    break;
+                }
             }
         }
     }
