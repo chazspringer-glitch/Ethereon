@@ -3826,6 +3826,129 @@
         drops.push({ x, y, itemId, age: 0 });
     }
 
+    // Active follower NPCs (subset of Npc instances that were
+    // recruited into the squad). They live outside any level's npcs
+    // list so they move with the player across zones automatically.
+    const followers = [];
+
+    // Fixed formation offsets relative to the player's center.
+    // Ordered so the first slot fills directly behind-left, the next
+    // behind-right, and so on - a small arc that keeps the line of
+    // sight in front of the player mostly clear.
+    const FOLLOW_SLOTS = [
+        { dx: -36, dy:  32 },
+        { dx:  36, dy:  32 },
+        { dx: -52, dy:   0 },
+        { dx:  52, dy:   0 },
+        { dx: -36, dy: -32 },
+        { dx:  36, dy: -32 },
+        { dx:   0, dy:  56 },
+    ];
+
+    const FOLLOW_IDLE_RADIUS = 6;     // within this, follower idles
+    const FOLLOW_SEPARATION  = 26;    // below this, followers repel
+    const FOLLOW_MAX_SPEED_X = 2.2;   // speed multiplier cap when far
+
+    // Remove a Npc instance from whichever level's npcs array it
+    // currently lives in. Returns the level id it was plucked from,
+    // or null if it wasn't found anywhere. Recorded on the NPC as
+    // `homeLevelId` so dismiss can put it back later.
+    function removeNpcFromLevel(npc) {
+        for (const levelId in LEVELS) {
+            const list = LEVELS[levelId].npcs;
+            if (!list) continue;
+            const idx = list.indexOf(npc);
+            if (idx !== -1) {
+                list.splice(idx, 1);
+                return levelId;
+            }
+        }
+        return null;
+    }
+
+    // Advances every active follower. Kept separate from updateNpcs
+    // so followers can run in every zone (including hostile ones)
+    // without interfering with zone-local NPC routines.
+    function updateFollowers(dt) {
+        const pcx = player.x + player.width / 2;
+        const pcy = player.y + player.height / 2;
+
+        for (let i = 0; i < followers.length; i++) {
+            const f = followers[i];
+            const slot = FOLLOW_SLOTS[i % FOLLOW_SLOTS.length];
+            const tx = pcx + slot.dx - f.width / 2;
+            const ty = pcy + slot.dy - f.height / 2;
+
+            f.age += dt;
+            const dx = tx - f.x;
+            const dy = ty - f.y;
+            const dist = Math.hypot(dx, dy);
+
+            if (dist < FOLLOW_IDLE_RADIUS) {
+                // In the pocket: hold position and idle the animator
+                // so the sprite's walk bob stops.
+                f.state = "idle";
+                if (f.animator) {
+                    f.animator.setState("idle");
+                    f.animator.update(dt);
+                }
+                continue;
+            }
+
+            // Speed scales with distance so catch-up is snappy when
+            // the player sprints ahead and gentle when they drift.
+            // Capped so fast-teleport doesn't become a blur.
+            const speedScale = Math.min(FOLLOW_MAX_SPEED_X, 1 + dist / 80);
+            const step = Math.min(dist, f.speed * speedScale * dt);
+            const inv = 1 / dist;
+            f.x += dx * inv * step;
+            f.y += dy * inv * step;
+            f.state = "walk";
+
+            if (f.animator) {
+                f.animator.setState("walk");
+                // Face the movement direction.
+                const dir = dirFromVector(dx, dy);
+                if (dir !== null) f.animator.setDir(dir);
+                f.animator.update(dt);
+            }
+        }
+
+        // Pairwise separation - push followers apart when they
+        // overlap. Tiny O(n^2) that saturates at <50 ops for the
+        // max squad of 7; fine for mobile.
+        for (let i = 0; i < followers.length; i++) {
+            const a = followers[i];
+            for (let j = i + 1; j < followers.length; j++) {
+                const b = followers[j];
+                const dx = (b.x + b.width / 2) - (a.x + a.width / 2);
+                const dy = (b.y + b.height / 2) - (a.y + a.height / 2);
+                const d = Math.hypot(dx, dy);
+                if (d > FOLLOW_SEPARATION || d === 0) continue;
+                // Push each half the overlap along the axis between.
+                const push = (FOLLOW_SEPARATION - d) * 0.5;
+                const ix = (dx / d) * push;
+                const iy = (dy / d) * push;
+                a.x -= ix; a.y -= iy;
+                b.x += ix; b.y += iy;
+            }
+        }
+    }
+
+    // Snap every follower onto a formation slot near the player.
+    // Called after zone transitions and save loads so the squad
+    // doesn't visibly stream in from the old room.
+    function snapFollowersToPlayer() {
+        const pcx = player.x + player.width / 2;
+        const pcy = player.y + player.height / 2;
+        for (let i = 0; i < followers.length; i++) {
+            const f = followers[i];
+            const slot = FOLLOW_SLOTS[i % FOLLOW_SLOTS.length];
+            f.x = pcx + slot.dx - f.width / 2;
+            f.y = pcy + slot.dy - f.height / 2;
+        }
+    }
+
     // Called from every kill path (sword, energy projectile, power
     // move) so score, drops, quest progress, and boss defeat all
     // fire together. Keeping it in one function means future death
@@ -4094,13 +4217,17 @@
             player.coins = data.player.coins;
             player.inventory.length = 0;
             for (const id of data.player.inventory) player.inventory.push(id);
-            player.squad.length = 0;
-            for (const m of data.player.squad) player.squad.push({ ...m });
+            // Squad: dismiss any current followers back to their
+            // home zones first, then rehire from the snapshot roster
+            // so the live followers array matches the save's squad.
+            companions.dismissAll();
+            companions.rehire(data.player.squad);
             player.weaponIndex = data.player.weaponIndex;
 
             camera.snap(player);
             cloak.snap();
             aura.snap();
+            snapFollowersToPlayer();
             return true;
         },
 
@@ -5644,6 +5771,11 @@
     // in both combat and safe zones; NPCs only live in the grove.
     function updateNpcs(dt) {
         for (const n of activeNpcs()) n.update(dt);
+        // Followers live outside any level's npcs list so they
+        // travel with the player. Ticked here too so modals that
+        // keep calling updateNpcs (shop, dialogue) also keep the
+        // squad moving in the background.
+        updateFollowers(dt);
     }
 
     function activeNpcs() {
@@ -6023,7 +6155,9 @@
         ctx.fillRect(x + 17, y + 10 + bob, 2, 2);
 
         // Interact hint when in range (world-space bubble with "E").
-        if (gameState === "playing" && npcIsNear(n)) {
+        // Followers are always within range, so their bubbles would
+        // clutter the screen - suppressed for the whole squad.
+        if (gameState === "playing" && !n._isFollower && npcIsNear(n)) {
             const bx = x + 16;
             const by = y - 14;
             ctx.save();
@@ -6086,10 +6220,59 @@
         },
 
         recruit(npc) {
+            // Pluck from the home zone's npcs array so they stop
+            // wandering their old spot; remember which zone + the
+            // pre-recruit routine for dismiss(). Then register as
+            // a live follower and snap onto a formation slot.
+            const home = removeNpcFromLevel(npc);
+            npc.homeLevelId = home;
+            npc._originalRoutine = npc.routine;
+            npc.routine = "follow";
+            npc._isFollower = true;
+            followers.push(npc);
             player.squad.push({ id: npc.id, name: npc.name, role: npc.role });
+            snapFollowersToPlayer();
         },
 
-        reset() { player.squad.length = 0; },
+        // Return every active follower to their home zone's npcs
+        // list and drop the squad snapshots. Used before load()
+        // replays a saved squad roster.
+        dismissAll() {
+            while (followers.length) {
+                const f = followers.pop();
+                f.routine = f._originalRoutine ?? "wander";
+                f._isFollower = false;
+                const home = LEVELS[f.homeLevelId];
+                if (home && home.npcs && home.npcs.indexOf(f) === -1) {
+                    // Reset to home position on the way back so they
+                    // don't resume wandering from the player's feet.
+                    f.x = f.homeX;
+                    f.y = f.homeY;
+                    home.npcs.push(f);
+                }
+            }
+            player.squad.length = 0;
+        },
+
+        // Re-recruit from a list of snapshots (as stored in
+        // player.squad by saveGame). Skips any id that can't be
+        // found in any level's npcs array - e.g. a squad member
+        // that was never returned before load.
+        rehire(snapshots) {
+            for (const snap of snapshots) {
+                for (const levelId in LEVELS) {
+                    const list = LEVELS[levelId].npcs;
+                    if (!list) continue;
+                    const npc = list.find(n => n.id === snap.id);
+                    if (npc) {
+                        this.recruit(npc);
+                        break;
+                    }
+                }
+            }
+        },
+
+        reset() { this.dismissAll(); },
     };
 
     // Reads the currently-open dialogue's NPC so a single dialogue
@@ -8042,6 +8225,9 @@
         // across the screen from the previous room's exit.
         cloak.snap();
         aura.snap();
+        // Squad comes along to the new zone - snap them onto their
+        // formation slots so they don't pop in from the old room.
+        snapFollowersToPlayer();
 
         // Transient combat state - belongs to the previous room.
         enemies.length = 0;
@@ -8139,6 +8325,7 @@
         // stretches from the death point to the plaza on respawn.
         cloak.snap();
         aura.snap();
+        // Squad resets below in companions.reset - no need to snap.
 
         // Inventory / drops / UI state - fresh run has no loot.
         player.inventory.length = 0;
@@ -8294,6 +8481,10 @@
         // beneath the player so the player always reads on top. Each
         // draws its own "E" bubble when the player is in range.
         for (const n of activeNpcs()) drawNpc(ctx, n);
+        // Followers render with the same drawNpc path; they carry
+        // the warrior's colors, walk bob, and "E" bubble just like
+        // home-zone NPCs so players can still converse with them.
+        for (const f of followers) drawNpc(ctx, f);
 
         // Lore objects - painted above the floor but below
         // enemies / player, so they read as landmarks a moving
