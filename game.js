@@ -2572,6 +2572,13 @@
         magic: 0,
         maxMagic: 100,
 
+        // Recruited warrior companions - each entry is a small
+        // snapshot `{ id, name, role }` of the source NPC rather
+        // than a live reference, so NPCs can still run their own
+        // wander / patrol routines untouched. Squad cap lives in
+        // the `companions` module and grows per story chapter.
+        squad: [],
+
         // Currently-equipped weapon index into `weapons[]`.
         // 0 = sword (melee), 1 = energy blast (projectile).
         weaponIndex: 0,
@@ -5734,6 +5741,86 @@
         }
     }
 
+    // --- Companions ---
+    //
+    // Recruitment is gated on three checks:
+    //   - role: only NPCs tagged `role: "warrior"` qualify.
+    //   - storyState: each warrior carries a `recruitChapter` id;
+    //     story must be atLeast that chapter for them to say yes.
+    //   - squad cap: starts at `baseMax` (2) and grows by one per
+    //     advanced chapter, so later chapters unlock more slots.
+    //
+    // Squad entries are value-only snapshots so the source NPC can
+    // still wander / patrol in its home zone untouched. Future
+    // "follow the player" behavior can read `player.squad` and look
+    // up live NPC refs by id.
+    const companions = {
+        baseMax: 2,
+
+        maxSize() {
+            // chapterOrder indexOf: chapter1 = 0, chapter6 = 5. Cap
+            // is 2 at chapter1 (idx 0), +1 per chapter after, so
+            // chapter2 = 3, chapter3 = 4, ..., chapter6 = 7.
+            const idx = Math.max(0, story.chapterOrder.indexOf(story.state));
+            return this.baseMax + idx;
+        },
+
+        has(npcId) {
+            for (const m of player.squad) if (m.id === npcId) return true;
+            return false;
+        },
+
+        canRecruit(npc) {
+            if (!npc || npc.role !== "warrior") {
+                return { ok: false, reason: "not_warrior" };
+            }
+            if (this.has(npc.id)) return { ok: false, reason: "already" };
+            if (player.squad.length >= this.maxSize()) {
+                return { ok: false, reason: "full" };
+            }
+            const req = npc.recruitChapter ?? "chapter1";
+            if (!story.atLeast(req)) return { ok: false, reason: "early", req };
+            return { ok: true };
+        },
+
+        recruit(npc) {
+            player.squad.push({ id: npc.id, name: npc.name, role: npc.role });
+        },
+
+        reset() { player.squad.length = 0; },
+    };
+
+    // Reads the currently-open dialogue's NPC so a single dialogue
+    // option (`action: recruitInteract`) works across every warrior
+    // without per-NPC closures. Prints a toast for every branch so
+    // the player always gets feedback on why the answer was yes/no.
+    function recruitInteract() {
+        const npc = dialogue.active && dialogue.active.npc;
+        if (!npc) return;
+
+        const res = companions.canRecruit(npc);
+        if (res.ok) {
+            companions.recruit(npc);
+            sound.play("levelUp");
+            questLog.showToast(
+                `${npc.name} joins your squad!  (${player.squad.length}/${companions.maxSize()})`,
+                2.8
+            );
+            return;
+        }
+        let msg;
+        if (res.reason === "already") {
+            msg = `${npc.name} is already at your side.`;
+        } else if (res.reason === "full") {
+            msg = `Squad full (${player.squad.length}/${companions.maxSize()}). Finish a chapter to lead more.`;
+        } else if (res.reason === "early") {
+            msg = `${npc.name}: "Not yet. Earn your name first."`;
+        } else {
+            msg = `${npc.name} can't be recruited.`;
+        }
+        questLog.showToast(msg, 2.4);
+    }
+
     // --- Interact behaviors (shared so multiple NPCs can reference) ---
 
     // The Elder's familiar quest-chain dialogue.
@@ -6267,6 +6354,10 @@
         new Npc({
             id: "scout",
             name: "Scout",
+            // Warrior of the watch - recruitable from chapter2 once
+            // the player has proved themselves in the caverns.
+            role: "warrior",
+            recruitChapter: "chapter2",
             // Patrols the east gate on a three-waypoint loop:
             // north of the gate, at the gate, south of the gate.
             x: 2900,
@@ -6306,6 +6397,7 @@
                         label: "Any advice?",
                         response: "Keep a weapon ready and your health full. Retreat costs nothing.",
                     },
+                    { label: "Fight with me.", action: recruitInteract },
                     { label: "Ask a question...", input: true },
                     { label: "Goodbye.", close: true },
                 ],
@@ -6785,6 +6877,10 @@
         new Npc({
             id: "captain",
             name: "Captain",
+            // Commander of the watch - holds their post until the
+            // Shrine is ready to fall. Recruitable in chapter4+.
+            role: "warrior",
+            recruitChapter: "chapter4",
             x: 272 - 16,
             y: 120,
             width: 32, height: 32,
@@ -6812,6 +6908,7 @@
                         label: "Who are you?",
                         response: "Captain of the watch - what little of it remains since the star-fall.",
                     },
+                    { label: "Fight with me.", action: recruitInteract },
                     { label: "Ask a question...", input: true },
                     { label: "Goodbye.", close: true },
                 ],
@@ -6853,6 +6950,10 @@
 
         new Npc({
             id: "recruit", name: "Recruit",
+            // Eager rookie - first warrior willing to join you,
+            // available from the very first chapter.
+            role: "warrior",
+            recruitChapter: "chapter1",
             x: 400, y: 250, width: 32, height: 32,
             interactRange: 58, wanderRadius: 36, speed: 40,
             colors: { robe: "#687488", trim: "#343c48", sash: "#b8c0d0", hat: "#202a38" },
@@ -6861,6 +6962,7 @@
                 options: [
                     { label: "What are you training?", response: "Footwork, mostly. The Captain says footwork wins fights." },
                     { label: "Who are you?", response: "Fresh recruit. Haven't earned the watch cloak yet." },
+                    { label: "Fight with me.", action: recruitInteract },
                     { label: "Ask a question...", input: true },
                     { label: "Goodbye.", close: true },
                 ],
@@ -7694,6 +7796,8 @@
         player.inventory.length = 0;
         player.coins = 0;
         player.magic = 0;
+        // Squad - fresh run recruits no one by default.
+        companions.reset();
         drops.length = 0;
         inventoryOpen = false;
 
