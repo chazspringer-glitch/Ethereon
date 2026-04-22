@@ -5219,6 +5219,135 @@
         }
     }
 
+    // ---------------------------------------------------------------
+    // Charged energy beam
+    //
+    // Fires on an energy-weapon charge-release past the 1s threshold.
+    // A wide stationary beam cast from the player's center in the
+    // facing direction, piercing every enemy along its length. No
+    // travel step - the beam is a live hitbox for its entire 0.32s
+    // window, so hits register instantly on overlap rather than
+    // waiting on a projectile to arrive.
+    //
+    // Hit test is a point-on-oriented-rect check plus a small
+    // enemy-radius fudge, so large sprites still trigger at the
+    // beam edge. Each enemy is hit once via hitEnemies, same
+    // contract as the rest of the AoE modules.
+    // ---------------------------------------------------------------
+    const energyBeam = {
+        length: 640,
+        width: 34,
+        duration: 0.32,
+        activeTimer: 0,
+        damage: 1,
+        dirX: 1, dirY: 0,
+        originX: 0, originY: 0,
+        hitEnemies: new Set(),
+
+        isActive() { return this.activeTimer > 0; },
+
+        activate(dmg, entity) {
+            this.damage = Math.max(1, dmg | 0);
+            this.activeTimer = this.duration;
+            this.hitEnemies.clear();
+            const fx = entity.facing.x;
+            const fy = entity.facing.y;
+            const mag = Math.hypot(fx, fy) || 1;
+            this.dirX = fx / mag;
+            this.dirY = fy / mag;
+            this.originX = entity.x + entity.width / 2;
+            this.originY = entity.y + entity.height / 2;
+            sound.play("attack");
+        },
+
+        update(dt) {
+            if (this.activeTimer > 0) {
+                this.activeTimer = Math.max(0, this.activeTimer - dt);
+            }
+        },
+
+        reset() {
+            this.activeTimer = 0;
+            this.hitEnemies.clear();
+        },
+
+        progress() {
+            if (this.activeTimer <= 0) return 0;
+            return 1 - this.activeTimer / this.duration;
+        },
+
+        draw(ctx) {
+            if (this.activeTimer <= 0) return;
+            const t = this.progress();
+            const alpha = 1 - t;
+
+            ctx.save();
+            ctx.translate(this.originX, this.originY);
+            ctx.rotate(Math.atan2(this.dirY, this.dirX));
+
+            // Outer glow halo - widest, softest.
+            ctx.globalAlpha = alpha * 0.38;
+            ctx.fillStyle = "#8ad9ff";
+            ctx.fillRect(0, -this.width, this.length, this.width * 2);
+
+            // Main beam - shrinks slightly as it fades for a "spent"
+            // feel without dropping brightness suddenly.
+            const coreW = this.width * (1 - t * 0.25);
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = "#eaf7ff";
+            ctx.fillRect(0, -coreW * 0.5, this.length, coreW);
+
+            // White center line - the searing streak down the middle.
+            ctx.globalAlpha = alpha * 0.95;
+            ctx.fillStyle = "#ffffff";
+            ctx.fillRect(0, -2, this.length, 4);
+
+            // Muzzle burst at the origin - a brighter disc that fades
+            // first, reading as the moment of release.
+            if (t < 0.5) {
+                ctx.globalAlpha = (1 - t / 0.5) * 0.8;
+                ctx.fillStyle = "#ffffff";
+                ctx.beginPath();
+                ctx.arc(0, 0, 18 - t * 20, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            ctx.restore();
+        },
+    };
+
+    function updateEnergyBeamCollision() {
+        if (!energyBeam.isActive()) return;
+        const ox = energyBeam.originX;
+        const oy = energyBeam.originY;
+        const dx = energyBeam.dirX;
+        const dy = energyBeam.dirY;
+        const halfW = energyBeam.width * 0.5;
+        const len = energyBeam.length;
+        // Fudge the perpendicular tolerance by a fixed pad so
+        // enemy sprites that are larger than the beam's width still
+        // trigger at the edge.
+        const PERP_PAD = 12;
+
+        for (const e of enemies) {
+            if (!e.alive || energyBeam.hitEnemies.has(e)) continue;
+            const ecx = e.x + e.width / 2;
+            const ecy = e.y + e.height / 2;
+            const rx = ecx - ox;
+            const ry = ecy - oy;
+            // Project onto beam axis; reject enemies behind origin
+            // or past the beam's tip.
+            const along = rx * dx + ry * dy;
+            if (along < 0 || along > len) continue;
+            // Perpendicular distance from the beam centerline.
+            const perp = Math.abs(-rx * dy + ry * dx);
+            if (perp > halfW + PERP_PAD) continue;
+            e.takeHit(energyBeam.damage, { x: ox + dx * along, y: oy + dy * along });
+            energyBeam.hitEnemies.add(e);
+            if (!e.alive) onEnemyDefeated(e);
+        }
+    }
+
     // Energy blast: owns its own cooldown and spawns a projectile on
     // fire. Uses the same `sound.play("attack")` cue for now so the
     // existing spam guard applies.
@@ -5228,6 +5357,7 @@
         shortName: "ENERGY",
         glyph: "✦",
         color: "#8ad9ff",
+        damage: 1,            // base projectile damage; level-ups bump it
         cooldownMax: 0.5,
         cooldownTimer: 0,
         get ready() { return this.cooldownTimer <= 0; },
@@ -8727,12 +8857,15 @@
             player.isCharging = false;
             player.chargeTime = 0;
 
-            // Sword + full charge -> 360-degree spin instead of the
-            // regular directional swing. Energy weapon continues to
-            // benefit from the multiplier on a normal charged shot.
+            // Weapon-specific charged payoffs at threshold (>= 1s):
+            //   sword  -> 360-degree spin slash
+            //   energy -> wide piercing beam across the screen
+            // Below threshold, or with no charged variant, the weapon
+            // fires its normal shot with the damage multiplier
+            // applied uniformly.
             const wpn = currentWeapon();
-            const spinSword = wpn === swordWeapon && t >= 1;
-            if (spinSword) {
+            const charged = t >= 1;
+            if (charged && wpn === swordWeapon) {
                 swordSpin.activate(swordWeapon.damage * mult);
                 // Share the sword's cooldown so spins can't stack
                 // back-to-back - the attack module's cooldown is the
@@ -8740,10 +8873,18 @@
                 attack.cooldownTimer = attack.cooldown;
                 flash.trigger(0.5, 0.18);
                 shake.trigger(10, 0.25);
+            } else if (charged && wpn === energyWeapon) {
+                energyBeam.activate(energyWeapon.damage * mult * 2, player);
+                // Latch the weapon's cooldown so a beam can't follow
+                // a beam immediately - matches the sword pacing rule.
+                energyWeapon.cooldownTimer = energyWeapon.cooldownMax;
+                flash.trigger(0.6, 0.2);
+                shake.trigger(12, 0.3);
             } else {
                 wpn.fire(player, mult);
-                if (t >= 1) {
-                    // Non-spin charged release: lighter impact feel.
+                if (charged) {
+                    // Non-spin, non-beam charged release: lighter
+                    // impact feel than the weapon-specific payoffs.
                     flash.trigger(0.35, 0.12);
                     shake.trigger(6, 0.15);
                 }
@@ -8943,6 +9084,7 @@
         superPower.update(dt);
         specialAttack.update(dt);
         swordSpin.update(dt);
+        energyBeam.update(dt);
         shake.update(dt);
         flash.update(dt);
         corruption.update(dt);
@@ -8963,6 +9105,7 @@
             updateSuperPowerCollision();
             updateSpecialAttackCollision();
             updateSwordSpinCollision();
+            updateEnergyBeamCollision();
             updateEnemyContact();
             spawner.update(enemyDt);
         }
@@ -9173,6 +9316,7 @@
         powerMove.reset();
         specialAttack.reset();
         swordSpin.reset();
+        energyBeam.reset();
         flash.reset();
         camera.resetZoom();
 
@@ -9328,6 +9472,7 @@
 
         // Sword spin - belongs to the previous run's mid-swing state.
         swordSpin.reset();
+        energyBeam.reset();
 
         // Screen shake - any mid-cast impulses clear so respawn
         // isn't still rattling.
@@ -10163,6 +10308,10 @@
         // blade trail reads as swung from the player's hand rather
         // than floating above the head.
         swordSpin.draw(ctx, player);
+        // Charged-energy beam - same world-space layer as the spin.
+        // Drawn under the sprite so the player's silhouette reads on
+        // top of the beam, selling it as emitted from the character.
+        energyBeam.draw(ctx);
 
         const blinking = player.iframes > 0 &&
             Math.floor(player.iframes * 20) % 2 === 0;
