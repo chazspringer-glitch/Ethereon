@@ -860,6 +860,28 @@
         y: 0,
         sharpness: 8, // higher = snappier follow
 
+        // Zoom pulse: the world transform reads `scale`. `zoomPulse`
+        // eases toward a peak, holds for `hold` seconds, then eases
+        // back to 1. Ease speeds are tuned so the round trip fits in
+        // under ~0.6s even at high peak values, and re-triggering
+        // during an active pulse replaces the target rather than
+        // stacking (so mashing the input can't runaway-zoom).
+        scale: 1,
+        _zoomTarget: 1,
+        _zoomSharpness: 8,
+        _pulseHold: 0,
+
+        zoomPulse(peak, hold) {
+            this._zoomTarget = peak;
+            this._pulseHold = hold;
+        },
+
+        resetZoom() {
+            this.scale = 1;
+            this._zoomTarget = 1;
+            this._pulseHold = 0;
+        },
+
         follow(target, dt) {
             const tx = target.x + target.width / 2 - VIEW_W / 2;
             const ty = target.y + target.height / 2 - VIEW_H / 2;
@@ -869,6 +891,16 @@
             this.y += (ty - this.y) * t;
 
             this.clamp();
+
+            // Zoom easing: decay hold -> flip target back to 1 ->
+            // ease scale toward target with the same frame-rate-
+            // independent exponential smoothing as position.
+            if (this._pulseHold > 0) {
+                this._pulseHold = Math.max(0, this._pulseHold - dt);
+                if (this._pulseHold === 0) this._zoomTarget = 1;
+            }
+            const zt = 1 - Math.exp(-this._zoomSharpness * dt);
+            this.scale += (this._zoomTarget - this.scale) * zt;
         },
 
         snap(target) {
@@ -953,6 +985,67 @@
             this.timer = 0;
             this.peak = 0;
             this.duration = 0;
+        },
+    };
+
+    // ---------------------------------------------------------------
+    // Screen flash
+    //
+    // Full-viewport colored overlay that fades in quickly (first 15%
+    // of duration) and fades out over the remainder. Used for the
+    // special attack's impact frame. Multiple triggers don't stack
+    // brightness - peak is kept so a later smaller trigger doesn't
+    // dim an active flash, but alpha stays clamped at 1.0.
+    //
+    // Cheap: one fillRect per frame while active, zero when idle.
+    // ---------------------------------------------------------------
+    const flash = {
+        alpha: 0,
+        timer: 0,
+        duration: 0,
+        peak: 0,
+        color: "#ffffff",
+
+        trigger(intensity, duration, color = "#ffffff") {
+            if (intensity > this.peak) this.peak = intensity;
+            if (duration > this.timer) {
+                this.timer = duration;
+                this.duration = duration;
+            }
+            this.color = color;
+        },
+
+        update(dt) {
+            if (this.timer <= 0) { this.alpha = 0; return; }
+            this.timer = Math.max(0, this.timer - dt);
+            if (this.timer === 0) {
+                this.alpha = 0;
+                this.peak = 0;
+                this.duration = 0;
+                return;
+            }
+            const t = 1 - this.timer / this.duration;  // progress 0..1
+            // Snap up in the first 15%, linear fade over the rest.
+            this.alpha = t < 0.15
+                ? this.peak * (t / 0.15)
+                : this.peak * (1 - (t - 0.15) / 0.85);
+            if (this.alpha > 1) this.alpha = 1;
+        },
+
+        draw(ctx) {
+            if (this.alpha <= 0) return;
+            ctx.save();
+            ctx.globalAlpha = this.alpha;
+            ctx.fillStyle = this.color;
+            ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+            ctx.restore();
+        },
+
+        reset() {
+            this.alpha = 0;
+            this.timer = 0;
+            this.duration = 0;
+            this.peak = 0;
         },
     };
 
@@ -4260,6 +4353,14 @@
             sound.play("super");
             // Strong shake anchors the impact in the seat-of-the-pants.
             shake.trigger(22, 0.5);
+            // White impact flash - fades in fast, then out. Peak alpha
+            // under 1.0 so the world still reads through the flash.
+            flash.trigger(0.8, 0.28);
+            // Subtle camera punch-in. 1.12x feels like a cinematic
+            // focus without disorienting the player; hold briefly at
+            // peak, then follow() eases back to 1.0 once _pulseHold
+            // drains.
+            camera.zoomPulse(1.12, 0.22);
             return true;
         },
 
@@ -7288,6 +7389,7 @@
         superPower.update(dt);
         specialAttack.update(dt);
         shake.update(dt);
+        flash.update(dt);
         corruption.update(dt);
 
         // Combat systems only tick in hostile zones. In safe zones
@@ -7510,6 +7612,8 @@
         attack.hitEnemies.clear();
         powerMove.reset();
         specialAttack.reset();
+        flash.reset();
+        camera.resetZoom();
 
         // Reseed with the new level's enemy config.
         spawner.configure(level);
@@ -7648,6 +7752,11 @@
         // isn't still rattling.
         shake.reset();
 
+        // Screen flash + camera zoom - drop any mid-cast cinematic
+        // effects so the respawn frame opens clean.
+        flash.reset();
+        camera.resetZoom();
+
         // Camera - jump straight to the player so the world doesn't
         // pan in from wherever the death happened.
         camera.snap(player);
@@ -7698,7 +7807,18 @@
         // shimmering when the camera is sub-pixel offset. Screen
         // shake is added on top; since the HUD draws outside this
         // save/restore, only the world rattles.
+        //
+        // Zoom is applied around the viewport center so the player
+        // (who is already camera-centered by follow()) stays put.
+        // The scale branch is gated on scale !== 1 so idle frames
+        // skip the extra matrix ops entirely.
         ctx.save();
+        const camScale = camera.scale;
+        if (camScale !== 1) {
+            ctx.translate(VIEW_W / 2, VIEW_H / 2);
+            ctx.scale(camScale, camScale);
+            ctx.translate(-VIEW_W / 2, -VIEW_H / 2);
+        }
         ctx.translate(
             -Math.round(camera.x) + Math.round(shake.offsetX()),
             -Math.round(camera.y) + Math.round(shake.offsetY())
@@ -7785,6 +7905,11 @@
             restartButton.draw(ctx);
         }
         if (gameState === "intro") drawIntro();
+
+        // Full-screen flash overlay - drawn above the HUD so the
+        // impact frame briefly whites out everything. Idle frames
+        // early-out before a single fillRect.
+        flash.draw(ctx);
 
         // Cinematic draws last - it overlays every other piece of
         // UI (including the game-over overlay and intro) so story
