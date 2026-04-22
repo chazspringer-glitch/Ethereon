@@ -352,6 +352,48 @@
                     doorX: 770, doorY: 1570, doorW: 24, doorH: 20,
                     wall: "#a88a6a", roof: "#744830",
                 },
+                // Two more residences tightening up the SW quarter -
+                // visual only, now collision-solid via the new rule.
+                {
+                    id: "house_4",
+                    label: "",
+                    x: 380, y: 1580, w: 118, h: 92,
+                    doorX: 428, doorY: 1652, doorW: 24, doorH: 20,
+                    wall: "#927860", roof: "#5c3826",
+                },
+                {
+                    id: "house_5",
+                    label: "",
+                    x: 880, y: 1620, w: 126, h: 96,
+                    doorX: 934, doorY: 1696, doorW: 24, doorH: 20,
+                    wall: "#b09580", roof: "#6e4838",
+                },
+                // Market stalls around the NE plaza - small wooden
+                // stands with a striped awning, no interior. Serve
+                // as ambient city clutter + soft-cover for combat
+                // pathing if any spills over from the east gate.
+                {
+                    id: "stall_1", label: "", stall: true,
+                    x: 2110, y: 650, w: 48, h: 38,
+                    wall: "#b8823a", roof: "#d1a34a",
+                },
+                {
+                    id: "stall_2", label: "", stall: true,
+                    x: 2490, y: 650, w: 48, h: 38,
+                    wall: "#a66c3a", roof: "#c8913a",
+                },
+                {
+                    id: "stall_3", label: "", stall: true,
+                    x: 2300, y: 720, w: 54, h: 40,
+                    wall: "#8c5a3c", roof: "#c48a5c",
+                },
+                // One more stall on the main plaza side so the
+                // central hub reads as lived-in, not empty.
+                {
+                    id: "stall_4", label: "", stall: true,
+                    x: 1420, y: 1300, w: 52, h: 38,
+                    wall: "#996836", roof: "#c7953b",
+                },
             ],
         },
         caverns: {
@@ -4375,6 +4417,118 @@
     const followers = [];
 
     // ---------------------------------------------------------------
+    // Ambient animals
+    //
+    // Lightweight "city life" entities that don't interact with
+    // combat or NPCs - birds float overhead in slow loops, critters
+    // hop around the ground in short bursts. Only spawn in safe
+    // zones (grove) so they don't compete with enemy readability in
+    // dungeons.
+    //
+    // Each frame we distance-cull updates to 600px from the player,
+    // and view-cull draws to the visible rect. Preallocated pool
+    // means zero GC after the initial spawnAll().
+    // ---------------------------------------------------------------
+    const animals = {
+        items: [],
+        _updateCullSq: 600 * 600,
+
+        spawnAll() {
+            this.items.length = 0;
+            if (!currentLevel || !currentLevel.safe) return;
+
+            // 6 birds + 12 small critters = 18 total. Plenty of
+            // ambient motion; nothing close to the NPC tick cost.
+            const BIRDS = 6, CRITTERS = 12;
+            for (let i = 0; i < BIRDS + CRITTERS; i++) {
+                const isBird = i < BIRDS;
+                this.items.push({
+                    kind: isBird ? "bird" : "critter",
+                    x: 200 + Math.random() * Math.max(200, WORLD_W - 400),
+                    y: 200 + Math.random() * Math.max(200, WORLD_H - 400),
+                    vx: 0, vy: 0,
+                    phase: Math.random() * Math.PI * 2,
+                    timer: Math.random() * 2,
+                    hopT: 0,
+                    speed: isBird ? 52 + Math.random() * 28
+                                  : 30 + Math.random() * 18,
+                    size: isBird ? 3 : 4,
+                    color: isBird
+                        ? (Math.random() < 0.5 ? "#e8e8f0" : "#a0a0b8")
+                        : (Math.random() < 0.5 ? "#8c6c3c" : "#6c4a2a"),
+                });
+            }
+        },
+
+        update(dt) {
+            if (!this.items.length) return;
+            const pcx = player.x + player.width / 2;
+            const pcy = player.y + player.height / 2;
+            for (const a of this.items) {
+                const dx = a.x - pcx;
+                const dy = a.y - pcy;
+                if (dx * dx + dy * dy > this._updateCullSq) continue;
+
+                if (a.kind === "bird") {
+                    // Lazy circular-ish flight. Phase drifts so
+                    // loops don't sync to a perfect circle.
+                    a.phase += dt * 0.8;
+                    a.x += Math.cos(a.phase) * a.speed * dt;
+                    a.y += Math.sin(a.phase * 0.7) * a.speed * 0.6 * dt;
+                    if (a.x < 80 || a.x > WORLD_W - 80) a.phase += Math.PI;
+                    if (a.y < 80 || a.y > WORLD_H - 80) a.phase += Math.PI;
+                } else {
+                    // Critters hop in random short bursts with
+                    // generous pauses between.
+                    a.timer -= dt;
+                    if (a.timer <= 0) {
+                        a.timer = 1.2 + Math.random() * 1.5;
+                        a.hopT = 0.3;
+                        const ang = Math.random() * Math.PI * 2;
+                        a.vx = Math.cos(ang) * a.speed;
+                        a.vy = Math.sin(ang) * a.speed * 0.5;
+                    }
+                    if (a.hopT > 0) {
+                        a.hopT = Math.max(0, a.hopT - dt);
+                        a.x += a.vx * dt;
+                        a.y += a.vy * dt;
+                    }
+                }
+            }
+        },
+
+        // View-frustum culled draw. Each entry is ~2 fillRects so
+        // the only risk to mobile perf is hundreds on-screen; with
+        // 18 total and the cull, we're firmly in the green.
+        draw(ctx) {
+            if (!this.items.length) return;
+            const vx0 = camera.x - 32;
+            const vy0 = camera.y - 32;
+            const vx1 = camera.x + VIEW_W + 32;
+            const vy1 = camera.y + VIEW_H + 32;
+            for (const a of this.items) {
+                if (a.x < vx0 || a.x > vx1 || a.y < vy0 || a.y > vy1) continue;
+                if (a.kind === "bird") {
+                    // Tiny V-shape + soft ground shadow below.
+                    ctx.fillStyle = a.color;
+                    ctx.fillRect(a.x - 3, a.y, 2, 1);
+                    ctx.fillRect(a.x + 1, a.y, 2, 1);
+                    ctx.fillStyle = "rgba(0, 0, 0, 0.14)";
+                    ctx.fillRect(a.x - 2, a.y + 18, 4, 1);
+                } else {
+                    ctx.fillStyle = a.color;
+                    ctx.fillRect(a.x, a.y, a.size, a.size);
+                    // Tail pixel for a bit of character.
+                    ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
+                    ctx.fillRect(a.x + a.size - 1, a.y + a.size, 1, 1);
+                }
+            }
+        },
+
+        reset() { this.items.length = 0; },
+    };
+
+    // ---------------------------------------------------------------
     // Squad roles
     //
     // Each recruited NPC carries a `squadRole` id keyed into this
@@ -7051,6 +7205,7 @@
     spawner.configure(currentLevel);
     spawner.reset();
     spawner.seed();
+    animals.spawnAll();
 
     // Collapse the cloak onto the player's starting position and
     // stagger the aura motes so the first drawn frame doesn't show
@@ -7221,12 +7376,30 @@
     // machine tick + a bounded-distance move per NPC. Safe to call
     // in both combat and safe zones; NPCs only live in the grove.
     function updateNpcs(dt) {
-        for (const n of activeNpcs()) n.update(dt);
+        // Distance-cull: NPCs too far from the player skip their
+        // state-machine tick this frame. They still draw (cheap),
+        // so the player sees a populated city; they just pause
+        // their wander / patrol until the player gets closer. This
+        // keeps mobile perf stable in a dense city even with 30+
+        // NPCs since idle work is bounded by "what's nearby".
+        const pcx = player.x + player.width / 2;
+        const pcy = player.y + player.height / 2;
+        const CULL_SQ = 900 * 900;
+        for (const n of activeNpcs()) {
+            const cx = n.x + n.width / 2;
+            const cy = n.y + n.height / 2;
+            const dx = cx - pcx;
+            const dy = cy - pcy;
+            if (dx * dx + dy * dy > CULL_SQ) continue;
+            n.update(dt);
+        }
         // Followers live outside any level's npcs list so they
-        // travel with the player. Ticked here too so modals that
-        // keep calling updateNpcs (shop, dialogue) also keep the
-        // squad moving in the background.
+        // travel with the player - always ticked so combat AI
+        // doesn't freeze if the player walks far from the npc list.
         updateFollowers(dt);
+        // Ambient animals run with their own internal cull, so no
+        // extra distance check needed here.
+        animals.update(dt);
     }
 
     function activeNpcs() {
@@ -7310,6 +7483,28 @@
     function drawBuilding(ctx, b) {
         const x = b.x;
         const y = b.y;
+
+        // Market stalls: tiny awning + counter sprite, skips the
+        // window / door / label pass that a full building draws.
+        if (b.stall) {
+            // Counter box.
+            ctx.fillStyle = b.wall ?? "#8c5a3c";
+            ctx.fillRect(x, y + 10, b.w, b.h - 10);
+            ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
+            ctx.fillRect(x, y + b.h - 3, b.w, 3);
+            // Striped awning above.
+            ctx.fillStyle = b.roof ?? "#c8913a";
+            ctx.fillRect(x - 3, y, b.w + 6, 12);
+            ctx.fillStyle = "rgba(255, 255, 255, 0.22)";
+            for (let sx = 2; sx < b.w + 4; sx += 8) {
+                ctx.fillRect(x - 3 + sx, y, 4, 12);
+            }
+            // Corner posts to anchor the awning to the ground.
+            ctx.fillStyle = "#3c2818";
+            ctx.fillRect(x - 2, y, 2, b.h);
+            ctx.fillRect(x + b.w, y, 2, b.h);
+            return;
+        }
 
         // Walls
         ctx.fillStyle = b.wall ?? "#8c5a3c";
@@ -8715,6 +8910,126 @@
             },
         }),
 
+        // --- Extra townsfolk (compact configs, keyword-only) ---
+        // Market stallkeepers + shoppers + residents. Each is a
+        // full Npc so existing systems (wander, dialogue, view
+        // cull) just apply; their dialogue is intentionally short
+        // to keep file size manageable.
+        new Npc({
+            id: "stallkeep_fruit", name: "Fruit Seller",
+            x: 2110 - 16, y: 700, width: 32, height: 32,
+            interactRange: 56, wanderRadius: 12, speed: 16,
+            colors: { robe: "#c96535", trim: "#6c3018", sash: "#ffd166", hat: "#4a2810" },
+            dialogue: {
+                greeting: '"Fresh from the orchards. Don\'t tell the Elder my prices."',
+                options: [
+                    { label: "What do you sell?", response: "Apples, figs, grove-berries. Sweet enough to make your sword hand shake." },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+        new Npc({
+            id: "stallkeep_cloth", name: "Cloth Seller",
+            x: 2490 - 16, y: 700, width: 32, height: 32,
+            interactRange: 56, wanderRadius: 10, speed: 14,
+            colors: { robe: "#5a7ea0", trim: "#2a3e58", sash: "#c0c0d8", hat: "#1e2e42" },
+            dialogue: {
+                greeting: '"Cloth woven in the old way. Dye\'s honest."',
+                options: [
+                    { label: "Any deals?", response: "Deals for heroes, not hagglers. Show a blade if you want a discount." },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+        new Npc({
+            id: "stallkeep_spice", name: "Spice Seller",
+            x: 2300 - 16, y: 768, width: 32, height: 32,
+            interactRange: 56, wanderRadius: 8, speed: 14,
+            colors: { robe: "#a84b4b", trim: "#5a2020", sash: "#ffd166", hat: "#3a1414" },
+            dialogue: {
+                greeting: '"Saffron, cardamom, fire-root. One of them isn\'t for soup."',
+                options: [
+                    { label: "Which one?", response: "*winks* Fire-root. A pinch in your wineskin and you\'ll feel braver than you are." },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+        new Npc({
+            id: "shopper_1", name: "Shopper",
+            x: 2360, y: 540, width: 32, height: 32,
+            interactRange: 54, wanderRadius: 60, speed: 28,
+            colors: { robe: "#9c6aa8", trim: "#5a3064", sash: "#e2c6ea", hat: "#3a1c44" },
+            dialogue: {
+                greeting: '"Figs are too dear today. Everything is."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+        new Npc({
+            id: "shopper_2", name: "Shopper",
+            x: 2200, y: 620, width: 32, height: 32,
+            interactRange: 54, wanderRadius: 70, speed: 32,
+            colors: { robe: "#6a8c50", trim: "#2e4226", sash: "#c0d890", hat: "#1e2c14" },
+            dialogue: {
+                greeting: '"If the caverns quiet, trade picks back up. Gods willing."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+        new Npc({
+            id: "kid_plaza", name: "Kid",
+            x: 1700, y: 1240, width: 32, height: 32,
+            interactRange: 48, wanderRadius: 90, speed: 58,
+            idleMin: 0.3, idleMax: 1.0,
+            walkMin: 1.2, walkMax: 2.4,
+            colors: { robe: "#e8a858", trim: "#8c5630", sash: "#ffd166", hat: "#5a351a" },
+            dialogue: {
+                greeting: '"Tag! ... wait. Are you IT?"',
+                options: [{ label: "No. Goodbye.", close: true }],
+            },
+        }),
+        new Npc({
+            id: "farmer", name: "Farmer",
+            x: 560, y: 1280, width: 32, height: 32,
+            interactRange: 58, wanderRadius: 60, speed: 22,
+            colors: { robe: "#7a8a4a", trim: "#3e4624", sash: "#a0b060", hat: "#2a3012" },
+            dialogue: {
+                greeting: '"Rain\'s late. Grove-berries will be sour again."',
+                options: [
+                    { label: "Any word from the east?", response: "Quieter than last week. Could mean calm. Could mean the wrong thing held its breath." },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+        new Npc({
+            id: "beggar", name: "Beggar",
+            x: 1260, y: 1180, width: 32, height: 32,
+            interactRange: 50, wanderRadius: 24, speed: 12,
+            colors: { robe: "#555560", trim: "#28282e", sash: "#8e8e98", hat: "#1a1a22" },
+            dialogue: {
+                greeting: '"A coin, traveler? A blessing for a coin."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+        new Npc({
+            id: "watcher", name: "Watcher",
+            x: 2860, y: 1300, width: 32, height: 32,
+            interactRange: 58, wanderRadius: 40, speed: 24,
+            colors: { robe: "#3a5070", trim: "#1c2a42", sash: "#8ab4d8", hat: "#10182a" },
+            dialogue: {
+                greeting: '"Eyes on the east. Always."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+        new Npc({
+            id: "child_sw", name: "Child",
+            x: 860, y: 1800, width: 32, height: 32,
+            interactRange: 46, wanderRadius: 70, speed: 50,
+            idleMin: 0.2, idleMax: 0.8,
+            colors: { robe: "#a8c0d8", trim: "#5a7090", sash: "#ffd166", hat: "#2a4258" },
+            dialogue: {
+                greeting: '"Mom says don\'t bother adventurers. So I\'m not."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
     ];
 
     // Shop interior roster - the Merchant lives inside the building.
@@ -9181,8 +9496,20 @@
 
         const prevX = player.x;
         const prevY = player.y;
-        player.x = Math.max(0, Math.min(WORLD_W - player.width, nextX));
-        player.y = Math.max(0, Math.min(WORLD_H - player.height, nextY));
+        const clampedX = Math.max(0, Math.min(WORLD_W - player.width, nextX));
+        const clampedY = Math.max(0, Math.min(WORLD_H - player.height, nextY));
+
+        // Per-axis building collision resolution. Try each axis
+        // independently so the player can slide along a wall
+        // instead of getting glued to it when both axes would have
+        // intersected. Cheap: each collidesWithBuilding is O(b) for
+        // a handful of buildings.
+        let appliedX = prevX;
+        let appliedY = prevY;
+        if (!collidesWithBuilding(clampedX, prevY)) appliedX = clampedX;
+        if (!collidesWithBuilding(appliedX, clampedY)) appliedY = clampedY;
+        player.x = appliedX;
+        player.y = appliedY;
         // Tutorial step 1 watches actual traveled distance so mashing
         // an arrow key into a wall doesn't trip the advance.
         tutorial.onMove(player.x - prevX, player.y - prevY);
@@ -9206,6 +9533,43 @@
                 transitionTo(b.interior, null, b.entry);
                 return true;
             }
+        }
+        return false;
+    }
+
+    // Returns true if the player box (x, y, player.width/height)
+    // would overlap the solid footprint of any building in the
+    // current level. The door rect is excluded so the player can
+    // step through it into an interior without being blocked.
+    //
+    // Small building-solid shrink (2px) keeps the player from
+    // snagging on invisible edges caused by the shadow pixel and
+    // the roof overhang, so movement stays smooth along walls.
+    function collidesWithBuilding(x, y) {
+        const buildings = currentLevel.buildings;
+        if (!buildings || buildings.length === 0) return false;
+        const px1 = x;
+        const py1 = y;
+        const px2 = x + player.width;
+        const py2 = y + player.height;
+        for (const b of buildings) {
+            const bx1 = b.x + 2;
+            const by1 = b.y + 2;
+            const bx2 = b.x + b.w - 2;
+            const by2 = b.y + b.h - 2;
+            if (px1 >= bx2 || px2 <= bx1 || py1 >= by2 || py2 <= by1) continue;
+            // Overlapping the box, but the door gap is a free pass
+            // so players can walk onto the entry tile.
+            if (b.interior) {
+                const dx1 = b.doorX;
+                const dy1 = b.doorY;
+                const dx2 = b.doorX + b.doorW;
+                const dy2 = b.doorY + b.doorH;
+                if (!(px1 >= dx2 || px2 <= dx1 || py1 >= dy2 || py2 <= dy1)) {
+                    continue;  // inside door rect - allowed
+                }
+            }
+            return true;
         }
         return false;
     }
@@ -9892,6 +10256,7 @@
         spawner.configure(level);
         spawner.reset();
         spawner.seed();
+        animals.spawnAll();
 
         // Snap the camera to prevent a visible pan from the old spot.
         camera.snap(player);
@@ -9968,6 +10333,7 @@
         spawner.configure(currentLevel);
         spawner.reset();
         spawner.seed();
+        animals.spawnAll();
 
         // Now WORLD_* are grove dims - warp the player to the
         // grove's center (the main plaza tile).
@@ -10141,7 +10507,21 @@
         // NPCs - one per entry in the current level's roster. Drawn
         // beneath the player so the player always reads on top. Each
         // draws its own "E" bubble when the player is in range.
-        for (const n of activeNpcs()) drawNpc(ctx, n);
+        // View-frustum cull the NPC draw: skip anything clearly
+        // offscreen. Padding (64px) gives a generous margin so
+        // sprites at the edge don't pop when the camera pans.
+        const vx0 = camera.x - 64;
+        const vy0 = camera.y - 64;
+        const vx1 = camera.x + VIEW_W + 64;
+        const vy1 = camera.y + VIEW_H + 64;
+        for (const n of activeNpcs()) {
+            if (n.x + 32 < vx0 || n.x > vx1 ||
+                n.y + 32 < vy0 || n.y > vy1) continue;
+            drawNpc(ctx, n);
+        }
+        // Ambient critters + birds draw below the player layer;
+        // the animals module does its own view-rect cull.
+        animals.draw(ctx);
         // Followers render with the same drawNpc path; they carry
         // the warrior's colors, walk bob, and "E" bubble just like
         // home-zone NPCs so players can still converse with them.
