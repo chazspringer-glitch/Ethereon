@@ -473,6 +473,9 @@
             id: "abyss",
             name: "The Abyss",
             safe: false,
+            // Corrupting zone - the corruption module ticks upward
+            // while the player is here, decays in safe zones.
+            corrupting: true,
             baseTile: TILE_VOID,
             borderTile: TILE_STONE,
             scatter: [
@@ -2533,24 +2536,34 @@
     const aura = (function () {
         const COLOR = "255, 209, 102";  // gold, matches player.color
         const MOTE_COLOR = "255, 226, 140";
+        // Corruption tint - deep violet that reads as "something
+        // wrong is in the halo" rather than competing with the gold.
+        const CORRUPT_COLOR = "140, 60, 200";
 
         // Pre-bake the glow into a small offscreen canvas so the
-        // gradient stops are created exactly once.
+        // gradient stops are created exactly once. We bake a second
+        // purple canvas for the corruption overlay, composited at
+        // runtime with an alpha tied to corruption.value.
         const GLOW_SIZE = 128;
-        const glowCanvas = document.createElement("canvas");
-        glowCanvas.width = GLOW_SIZE;
-        glowCanvas.height = GLOW_SIZE;
-        const gctx = glowCanvas.getContext("2d");
-        const cx0 = GLOW_SIZE / 2;
-        const grad = gctx.createRadialGradient(
-            cx0, cx0, 0,
-            cx0, cx0, GLOW_SIZE / 2
-        );
-        grad.addColorStop(0,    `rgba(${COLOR}, 0.45)`);
-        grad.addColorStop(0.5,  `rgba(${COLOR}, 0.12)`);
-        grad.addColorStop(1,    `rgba(${COLOR}, 0)`);
-        gctx.fillStyle = grad;
-        gctx.fillRect(0, 0, GLOW_SIZE, GLOW_SIZE);
+        function bakeGlow(rgb) {
+            const c = document.createElement("canvas");
+            c.width = GLOW_SIZE;
+            c.height = GLOW_SIZE;
+            const gctx = c.getContext("2d");
+            const center = GLOW_SIZE / 2;
+            const grad = gctx.createRadialGradient(
+                center, center, 0,
+                center, center, GLOW_SIZE / 2
+            );
+            grad.addColorStop(0,    `rgba(${rgb}, 0.45)`);
+            grad.addColorStop(0.5,  `rgba(${rgb}, 0.12)`);
+            grad.addColorStop(1,    `rgba(${rgb}, 0)`);
+            gctx.fillStyle = grad;
+            gctx.fillRect(0, 0, GLOW_SIZE, GLOW_SIZE);
+            return c;
+        }
+        const glowCanvas    = bakeGlow(COLOR);
+        const corruptCanvas = bakeGlow(CORRUPT_COLOR);
 
         // Preallocated mote pool.
         const MOTE_COUNT = 6;
@@ -2614,8 +2627,19 @@
                 const a  = this.baseAlpha  + Math.sin(this.phase * 0.7) * this.alphaAmp;
 
                 // Glow: baked gradient drawn at the pulsing size.
-                ctx.globalAlpha = a;
+                // Under corruption, fade the gold glow and layer the
+                // purple glow on top so the shift reads as tint, not
+                // addition.
+                const cv = corruption.value;
+                ctx.globalAlpha = a * (1 - cv * 0.4);
                 ctx.drawImage(glowCanvas, cx - r, cy - r, r * 2, r * 2);
+                if (cv > 0) {
+                    // Corruption halo pulses a touch faster than the
+                    // gold so at high values it feels agitated.
+                    const rc = r * (1 + cv * 0.08);
+                    ctx.globalAlpha = a * cv * 1.1;
+                    ctx.drawImage(corruptCanvas, cx - rc, cy - rc, rc * 2, rc * 2);
+                }
                 ctx.globalAlpha = 1;
 
                 // Motes: tiny fading circles. Alpha fades in / out so
@@ -2635,6 +2659,75 @@
             },
         };
     })();
+
+    // ---------------------------------------------------------------
+    // Corruption
+    //
+    // A normalized 0..1 value that rises while the player lingers in
+    // "corrupting" zones (flagged with `level.corrupting: true` - the
+    // Abyss today) and decays in safe zones. Small spikes on kills
+    // inside a corrupting zone so the meter responds to action, not
+    // just exposure. Peak value is tracked so future mechanics can
+    // gate on "highest you've been" rather than current reading.
+    //
+    // Difficulty hook: corruption scales incoming damage via the
+    // existing `player.damageModifiers` chain. A modifier is pushed
+    // once at boot; clearing + re-pushing on restart keeps the chain
+    // well-known instead of growing across runs.
+    //
+    // Expansion points:
+    //   - `corrupting` flag can be added to any level.
+    //   - `onKill` already branches on zone, so adding corruption
+    //     gain from specific enemies is a one-line addition.
+    //   - Future thresholds (e.g. whisper SFX at >0.5) read from
+    //     `corruption.value` and keep the module the source of truth.
+    // ---------------------------------------------------------------
+    const corruption = {
+        value: 0,
+        max: 1,
+        peak: 0,
+        // Rates are per-second so dt-scaling is automatic.
+        //   Gain fills the meter in ~85s of pure exposure.
+        //   Decay drains it in ~3min of time in a safe zone.
+        //   Kill gain is a small spike so combat feels "costly".
+        gainPerSecond:  0.012,
+        decayPerSecond: 0.006,
+        killGain:       0.02,
+
+        // Zones whose `corrupting` flag is true expose the player.
+        _exposes(level) { return !!(level && level.corrupting); },
+
+        update(dt) {
+            if (this._exposes(currentLevel)) {
+                this.value = Math.min(this.max, this.value + this.gainPerSecond * dt);
+            } else if (currentLevel && currentLevel.safe) {
+                this.value = Math.max(0, this.value - this.decayPerSecond * dt);
+            }
+            if (this.value > this.peak) this.peak = this.value;
+        },
+
+        onKill() {
+            if (this._exposes(currentLevel)) {
+                this.value = Math.min(this.max, this.value + this.killGain);
+                if (this.value > this.peak) this.peak = this.value;
+            }
+        },
+
+        // Incoming-damage multiplier. 1.0 at rest, up to 1.45 at full
+        // corruption - enough that combat tightens without becoming
+        // a wall.
+        damageMultiplier() { return 1 + this.value * 0.45; },
+
+        reset() {
+            this.value = 0;
+            this.peak  = 0;
+        },
+    };
+
+    // Wire corruption into the damage pipeline. Runs as a multiplier
+    // in the existing damageModifiers chain, so other modifiers
+    // (armor, resistances) still compose naturally.
+    player.damageModifiers.push((dmg) => dmg * corruption.damageMultiplier());
 
     // ---------------------------------------------------------------
     // Stats helpers - the single place damage / healing flows through.
@@ -3420,6 +3513,7 @@
     function onEnemyDefeated(enemy) {
         stats.addKill(enemy);
         rollEnemyDrop(enemy);
+        corruption.onKill();
         if (enemy.isBoss && enemy.levelId) {
             defeatedBosses.add(enemy.levelId);
             questLog.showToast(`${enemy.name} defeated!`, 2.6);
@@ -6884,6 +6978,7 @@
         powerMove.update(dt);
         superPower.update(dt);
         shake.update(dt);
+        corruption.update(dt);
 
         // Combat systems only tick in hostile zones. In safe zones
         // (NPC cities) enemy AI, spawning, and contact damage are all
@@ -7184,6 +7279,11 @@
         // Quests - fresh run resets the chain back to the start.
         questLog.reset();
 
+        // Corruption - value and peak both rewind. The damage
+        // modifier stays on player.damageModifiers (was pushed once
+        // at boot) and returns to x1 automatically once value is 0.
+        corruption.reset();
+
         // Story progression - death ends the current campaign run;
         // localStorage is also cleared so the next page load opens
         // on chapter 1, not wherever we died.
@@ -7330,6 +7430,7 @@
         drawStatsPanel();
         drawScore();
         drawHealthBar();
+        drawCorruptionBar();
         drawXpBar();
         drawCooldownBar();
         drawEnemyCounter();
@@ -7870,6 +7971,66 @@
             x + barW + 10, y + barH / 2,
             "#e8e8f0",
             "12px system-ui, sans-serif"
+        );
+
+        ctx.restore();
+    }
+
+    // Corruption meter - appears beneath HP whenever the player has
+    // any corruption at all or is currently in a corrupting zone
+    // (so the player sees the bar fill from 0, not pop in later).
+    // Hidden otherwise so normal-campaign players never notice it.
+    function drawCorruptionBar() {
+        const exposed = !!(currentLevel && currentLevel.corrupting);
+        if (corruption.value <= 0 && !exposed) return;
+
+        const barW = 180;
+        const barH = 8;
+        const x = 16;
+        const y = 40 + 14 + 4;  // just below the HP bar
+        const r = 4;
+
+        const frac = Math.max(0, Math.min(1, corruption.value / corruption.max));
+
+        ctx.save();
+
+        // Track
+        roundRectPath(ctx, x, y, barW, barH, r);
+        ctx.fillStyle = "#13131c";
+        ctx.fill();
+
+        // Fill - deep violet ramping to bright at high corruption.
+        // The pulse amplitude grows with value so a full bar visibly
+        // "agitates" without being distracting at low levels.
+        if (frac > 0) {
+            const pulse = 0.75 + Math.sin(performance.now() * 0.004) * 0.08 * frac;
+            ctx.save();
+            ctx.clip();
+            ctx.fillStyle = frac > 0.66 ? "#b94bdb"
+                          : frac > 0.33 ? "#8a2bbb"
+                          :               "#5e1a7a";
+            ctx.globalAlpha = pulse;
+            ctx.fillRect(x, y, barW * frac, barH);
+            // Thin lighter band across the top for a bit of depth.
+            ctx.fillStyle = "rgba(220, 170, 255, 0.22)";
+            ctx.globalAlpha = pulse;
+            ctx.fillRect(x, y + 1, barW * frac, 1);
+            ctx.restore();
+        }
+
+        // Rim
+        ctx.strokeStyle = "rgba(160, 110, 200, 0.45)";
+        ctx.lineWidth = 1;
+        roundRectPath(ctx, x + 0.5, y + 0.5, barW - 1, barH - 1, r);
+        ctx.stroke();
+
+        // Label
+        ctx.textBaseline = "middle";
+        drawShadowedText(
+            `CORRUPTION  ${Math.round(frac * 100)}%`,
+            x + barW + 10, y + barH / 2,
+            "#c8a6e0",
+            "10px system-ui, sans-serif"
         );
 
         ctx.restore();
