@@ -2755,6 +2755,13 @@
 
         // Pause button sits in the top-right corner, well clear of
         // the joystick region. Tapping toggles into the pause menu.
+        // Tutorial SKIP chip sits above the mobile button cluster,
+        // so it gets first crack at taps in that region.
+        if (tutorial.handlePointer(x, y)) {
+            e.preventDefault();
+            return;
+        }
+
         if (pauseButton.onDown(x, y, e.pointerId)) {
             canvas.setPointerCapture(e.pointerId);
             paused = true;
@@ -4604,6 +4611,7 @@
                     // inventory. `value` defaults to 1 when unset.
                     player.coins += tmpl.value ?? 1;
                     sound.play("coin");
+                    tutorial.onPickup();
                 } else if (tmpl && tmpl.magicValue) {
                     // Magic orb - refills the magic meter up to cap.
                     // Bypasses the inventory entirely so picking up
@@ -4613,6 +4621,7 @@
                         player.magic + tmpl.magicValue
                     );
                     sound.play("coin");
+                    tutorial.onPickup();
                 } else {
                     addToInventory(d.itemId);
                 }
@@ -4652,6 +4661,101 @@
     // keeps running so the overlay renders; the last frame stays
     // visible behind it.
     let paused = false;
+
+    // ---------------------------------------------------------------
+    // Tutorial
+    //
+    // Five-step onboarding nudge that appears only on a fresh install
+    // (persisted in localStorage so it never replays once finished or
+    // skipped). Each step watches a single natural gameplay action
+    // and advances when the player does it; no timers, no forced
+    // pauses. Skip is a single tap / click on the SKIP chip.
+    //
+    // Steps are declarative - adding a sixth is one entry here plus
+    // a matching onTrigger call in the game logic for that action.
+    // ---------------------------------------------------------------
+    const TUTORIAL_KEY = "ethereon.tutorialDone";
+    const tutorial = (function () {
+        const STEPS = [
+            { text: "Move around",                            trigger: "move" },
+            { text: "Attack enemies",                         trigger: "attack" },
+            { text: "Collect coins and red orbs",             trigger: "pickup" },
+            { text: "Use special attack when magic is full",  trigger: "special" },
+            { text: "Find warriors and recruit them",         trigger: "recruit" },
+        ];
+
+        let active = false;
+        let step = 0;
+        let moveDistance = 0;       // accumulates px moved for step 1
+        const MOVE_THRESHOLD = 80;
+
+        // Rect cached each draw so the pointer handler can hit-test
+        // without re-computing layout. Uses the same contract as
+        // pauseMenu rects / startButton.rect.
+        const skipRect = { x: 0, y: 0, w: 0, h: 0 };
+
+        function markDone() {
+            active = false;
+            try { localStorage.setItem(TUTORIAL_KEY, "1"); }
+            catch (_e) { /* private mode, etc. */ }
+        }
+
+        function advance() {
+            if (!active) return;
+            step++;
+            if (step >= STEPS.length) markDone();
+        }
+
+        function onTrigger(name) {
+            if (!active) return;
+            const cur = STEPS[step];
+            if (cur && cur.trigger === name) advance();
+        }
+
+        return {
+            start() {
+                try {
+                    if (localStorage.getItem(TUTORIAL_KEY) === "1") return;
+                } catch (_e) {}
+                active = true;
+                step = 0;
+                moveDistance = 0;
+            },
+
+            isActive() { return active; },
+            text()     { return active && STEPS[step] ? STEPS[step].text : ""; },
+            stepNum()  { return step + 1; },
+            total()    { return STEPS.length; },
+            skipRect,
+
+            skip() { markDone(); },
+
+            // Per-frame nudge for step 1. Accumulates actual travel
+            // distance so standing still with keys held can't trip
+            // the threshold.
+            onMove(dx, dy) {
+                if (!active || step !== 0) return;
+                moveDistance += Math.hypot(dx, dy);
+                if (moveDistance > MOVE_THRESHOLD) onTrigger("move");
+            },
+            onAttack()  { onTrigger("attack");  },
+            onPickup()  { onTrigger("pickup");  },
+            onSpecial() { onTrigger("special"); },
+            onRecruit() { onTrigger("recruit"); },
+
+            handlePointer(x, y) {
+                if (!active) return false;
+                const r = skipRect;
+                if (x >= r.x && x <= r.x + r.w &&
+                    y >= r.y && y <= r.y + r.h) {
+                    this.skip();
+                    return true;
+                }
+                return false;
+            },
+        };
+    })();
+    tutorial.start();
 
     // ---------------------------------------------------------------
     // Save / load
@@ -5357,6 +5461,7 @@
             // peak, then follow() eases back to 1.0 once _pulseHold
             // drains.
             camera.zoomPulse(1.12, 0.22);
+            tutorial.onSpecial();
             return true;
         },
 
@@ -6846,6 +6951,7 @@
                 squadRole: roleCfg.id,
             });
             snapFollowersToPlayer();
+            tutorial.onRecruit();
         },
 
         // Return every active follower to their home zone's npcs
@@ -8282,8 +8388,13 @@
         // the border - hand off to the next level. Otherwise clamp.
         if (maybeTransitionOnEdge(nextX, nextY)) return;
 
+        const prevX = player.x;
+        const prevY = player.y;
         player.x = Math.max(0, Math.min(WORLD_W - player.width, nextX));
         player.y = Math.max(0, Math.min(WORLD_H - player.height, nextY));
+        // Tutorial step 1 watches actual traveled distance so mashing
+        // an arrow key into a wall doesn't trip the advance.
+        tutorial.onMove(player.x - prevX, player.y - prevY);
     }
 
     // Returns true if the tentative step overlaps any building door
@@ -8465,6 +8576,7 @@
             // gates on its own `ready` check, so spam presses that
             // land on cooldown quietly no-op.
             currentWeapon().fire(player);
+            tutorial.onAttack();
         }
 
         // Power move (shared across all weapons)
@@ -9192,6 +9304,7 @@
         if (gameState === "playing") pauseButton.draw(ctx);
         drawQuestPanel();
         drawSquadIndicator();
+        drawTutorial();
 
         if (stats.levelUpToast > 0) drawLevelUpToast();
         if (questLog.toastTimer > 0) drawQuestToast();
@@ -9445,6 +9558,80 @@
     // touch taps on the pause icon don't graze this text. Hidden
     // entirely when no one has been recruited yet, so normal-campaign
     // players see no new clutter until they bring a warrior along.
+    // Tutorial banner - a small bottom-center chip showing the
+    // current step plus a SKIP tap target. Hidden during modals
+    // (pause, dialogue, shop, cinematic) and on game-over so it
+    // doesn't compete with those higher-priority overlays.
+    function drawTutorial() {
+        if (!tutorial.isActive()) return;
+        if (gameState !== "playing") return;
+        if (paused || dialogue.isOpen() || shop.isOpen() ||
+            cinematic.isOpen()) return;
+
+        const w = Math.min(420, VIEW_W - 40);
+        const h = 48;
+        const x = Math.floor((VIEW_W - w) / 2);
+        // Sits above the mobile interact / attack button rows
+        // (those cluster around VIEW_H - 84 and below).
+        const y = VIEW_H - 200;
+
+        ctx.save();
+        // Panel
+        ctx.globalAlpha = 0.92;
+        roundRectPath(ctx, x, y, w, h, 8);
+        ctx.fillStyle = "rgba(18, 18, 30, 0.92)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255, 209, 102, 0.55)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Step counter on the left.
+        ctx.globalAlpha = 1;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        drawShadowedText(
+            `${tutorial.stepNum()}/${tutorial.total()}`,
+            x + 12, y + h / 2,
+            "#ffd166",
+            "bold 14px system-ui, sans-serif"
+        );
+
+        // Step text, sized to the panel width minus the skip chip.
+        drawShadowedText(
+            tutorial.text(),
+            x + 46, y + h / 2,
+            "#e8e8f0",
+            "14px system-ui, sans-serif"
+        );
+
+        // SKIP chip on the right. Rect is cached so the pointer
+        // handler hit-tests the same coords.
+        const skipW = 54;
+        const skipH = 26;
+        const skipX = x + w - skipW - 10;
+        const skipY = y + (h - skipH) / 2;
+        tutorial.skipRect.x = skipX;
+        tutorial.skipRect.y = skipY;
+        tutorial.skipRect.w = skipW;
+        tutorial.skipRect.h = skipH;
+
+        roundRectPath(ctx, skipX, skipY, skipW, skipH, 5);
+        ctx.fillStyle = "#2a2a38";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255, 209, 102, 0.4)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.textAlign = "center";
+        drawShadowedText(
+            "SKIP",
+            skipX + skipW / 2, skipY + skipH / 2,
+            "#e8e8f0",
+            "bold 12px system-ui, sans-serif"
+        );
+
+        ctx.restore();
+    }
+
     function drawSquadIndicator() {
         const max = companions.maxSize();
         const n = player.squad.length;
