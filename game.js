@@ -1196,18 +1196,37 @@
         },
 
         clamp() {
-            // When a level is smaller than the viewport (e.g. a shop
-            // interior) center the world inside the screen instead of
-            // pinning to the corner.
-            if (WORLD_W <= VIEW_W) {
+            // The world transform scales around the screen center,
+            // so when scale < 1 the effective viewport in world-space
+            // is wider than VIEW_W. Clamp the camera using those
+            // scale-adjusted bounds, otherwise zoom-out shows the
+            // raw canvas background outside the world rectangle.
+            //
+            // Derivation:
+            //   screen_x = s * (wx - camera.x - VIEW_W/2) + VIEW_W/2
+            // Solving for the world-x at the screen edges gives the
+            // bounds below. At scale=1 they collapse back to the
+            // original [0, WORLD_W - VIEW_W] clamp.
+            const s = (this.scale && this.scale > 0) ? this.scale : 1;
+            const halfW = VIEW_W / 2;
+            const halfH = VIEW_H / 2;
+            const minX = halfW * (1 / s - 1);
+            const maxX = WORLD_W - halfW * (1 + 1 / s);
+            const minY = halfH * (1 / s - 1);
+            const maxY = WORLD_H - halfH * (1 + 1 / s);
+
+            if (maxX <= minX) {
+                // World narrower than the zoomed viewport - center
+                // it so the world sits in the middle of the screen
+                // and any OOB band fills symmetrically.
                 this.x = (WORLD_W - VIEW_W) / 2;
             } else {
-                this.x = Math.max(0, Math.min(WORLD_W - VIEW_W, this.x));
+                this.x = Math.max(minX, Math.min(maxX, this.x));
             }
-            if (WORLD_H <= VIEW_H) {
+            if (maxY <= minY) {
                 this.y = (WORLD_H - VIEW_H) / 2;
             } else {
-                this.y = Math.max(0, Math.min(WORLD_H - VIEW_H, this.y));
+                this.y = Math.max(minY, Math.min(maxY, this.y));
             }
         },
     };
@@ -14457,9 +14476,12 @@
     // Draw - paint the current state. No logic lives here.
     // ---------------------------------------------------------------
     function draw() {
-        // Screen-space safety fill (visible only if the camera ever
-        // somehow leaves the world; clamping should prevent it).
-        ctx.fillStyle = "#1a1a24";
+        // Screen-space safety fill. The camera clamp accounts for
+        // zoom, but tiny interiors at high zoom-out may still show
+        // a thin band where the world doesn't reach - use a very
+        // dark void tone so it reads intentional instead of "UI
+        // panel grey".
+        ctx.fillStyle = "#08080e";
         ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
         // --- World space ---
