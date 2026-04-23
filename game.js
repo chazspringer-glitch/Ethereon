@@ -3222,6 +3222,15 @@
         // the `companions` module and grows per story chapter.
         squad: [],
 
+        // Creatures of the Light - a tiny, separate roster that
+        // exists alongside the squad / army. Each entry is a value
+        // snapshot { speciesId }; live creatures live in the
+        // lightCreatures array so they can be culled / drawn with
+        // their own pipeline. Hard-capped at maxLightCreatures so
+        // the Light Herd never competes with the main formation.
+        lightCreatures: [],
+        maxLightCreatures: 3,
+
         // Charge-attack state. isCharging flips true on attack-press,
         // accumulates chargeTime (clamped at maxCharge) while held,
         // and fires the weapon on release with a damage multiplier
@@ -5275,6 +5284,459 @@
     };
 
     // ---------------------------------------------------------------
+    // Creatures of the Light
+    //
+    // A separate tier of entities that doesn't touch the NPC,
+    // follower, or enemy systems:
+    //   - spawn rarely on zone entry (city outskirts / hostile
+    //     edges). Wild creatures wander slowly and show an "E"
+    //     interact bubble when the player gets close.
+    //   - Recruitment: interact key next to a wild creature rolls a
+    //     success chance (story-boosted). On success the creature
+    //     joins player.lightCreatures (capped at 3) and flips into
+    //     autonomous combat mode. On fail it slips away.
+    //   - Three species with distinct combat kinds:
+    //       wolf  - fast melee, targets enemies.
+    //       bird  - ranged, fires from distance.
+    //       stag  - support, heals nearby followers in an aura.
+    //
+    // Visuals: a soft additive aura halo + 3 orbiting sparkles per
+    // creature, tinted per species (gold / white / cyan). Cheap -
+    // <=4 creatures on-screen at a time (1 wild + up to 3 tamed).
+    // ---------------------------------------------------------------
+    const LIGHT_SPECIES = {
+        wolf: {
+            id: "wolf",
+            name: "Wolf of Light",
+            color: "#ffd166",
+            auraColor: "rgba(255, 220, 140, 0.38)",
+            maxHp: 30, speed: 150,
+            engageRange: 260, preferredRange: 22,
+            attackRange: 34, attackDamage: 3, attackCooldown: 0.55,
+            kind: "melee",
+        },
+        bird: {
+            id: "bird",
+            name: "Skylight Bird",
+            color: "#ffffff",
+            auraColor: "rgba(255, 255, 255, 0.35)",
+            maxHp: 16, speed: 140,
+            engageRange: 340, preferredRange: 180,
+            attackRange: 260, attackDamage: 2, attackCooldown: 0.9,
+            kind: "ranged",
+        },
+        stag: {
+            id: "stag",
+            name: "Dawn Stag",
+            color: "#8ad9ff",
+            auraColor: "rgba(138, 217, 255, 0.35)",
+            maxHp: 40, speed: 100,
+            engageRange: 160, preferredRange: 32,
+            attackRange: 0, attackDamage: 0, attackCooldown: 0,
+            kind: "support",
+            healRate: 5,       // hp/sec restored to followers in aura
+            auraRadius: 90,
+        },
+    };
+
+    // Live creatures in the world. Each entry is a plain object -
+    // avoids a class hierarchy since these don't share enough with
+    // Enemy / Npc to be worth inheriting.
+    const lightCreatures = [];
+    const WILD_LIGHT_SPAWN_CHANCE = 0.22;  // per zone entry
+
+    // Spawn roll: runs once per hostile / safe zone seed. Skips
+    // interiors entirely and biases the species mix by chapter so
+    // rare encounters feel like progression.
+    function maybeSpawnWildLightCreature(level) {
+        if (!level || level.isInterior) return;
+        // One wild creature at a time - skip if there's already a
+        // wild one in the world.
+        for (const c of lightCreatures) if (c.state === "wild") return;
+        if (Math.random() > WILD_LIGHT_SPAWN_CHANCE) return;
+
+        // Pick a species, slightly weighted by chapter so early runs
+        // see more wolves (basic) and late runs see more stags
+        // (support).
+        const chapterIdx = Math.max(0, story.chapterOrder.indexOf(story.state));
+        const r = Math.random();
+        let speciesId;
+        if (chapterIdx < 2)      speciesId = r < 0.6 ? "wolf" : r < 0.85 ? "bird" : "stag";
+        else if (chapterIdx < 4) speciesId = r < 0.4 ? "wolf" : r < 0.75 ? "bird" : "stag";
+        else                     speciesId = r < 0.3 ? "wolf" : r < 0.6  ? "bird" : "stag";
+        const species = LIGHT_SPECIES[speciesId];
+
+        // Drop into one of the four outskirts with a small random
+        // offset so the spawn point feels curated, not grid-snapped.
+        const m = 140;
+        const edge = Math.floor(Math.random() * 4);
+        let x, y;
+        if (edge === 0)      { x = m + Math.random() * (WORLD_W - 2*m); y = m; }
+        else if (edge === 1) { x = m + Math.random() * (WORLD_W - 2*m); y = WORLD_H - m; }
+        else if (edge === 2) { x = m; y = m + Math.random() * (WORLD_H - 2*m); }
+        else                 { x = WORLD_W - m; y = m + Math.random() * (WORLD_H - 2*m); }
+
+        lightCreatures.push({
+            species,
+            x, y,
+            width: 28, height: 28,
+            hp: species.maxHp, maxHp: species.maxHp,
+            state: "wild",      // wild | follow | engage | retreat | flee
+            target: null,
+            cooldown: 0,
+            phase: Math.random() * Math.PI * 2,
+            sparklePhase: Math.random() * Math.PI * 2,
+            wanderX: x, wanderY: y,
+            wanderTimer: 0,
+            fleeTimer: 0,
+        });
+    }
+
+    // Preload a tamed light creature from a save snapshot (species
+    // id only; hp is reset). Spawns right next to the player so it
+    // doesn't leak across zones.
+    function rehireLightCreature(snap) {
+        const species = LIGHT_SPECIES[snap.speciesId];
+        if (!species) return;
+        const pcx = player.x + player.width / 2;
+        const pcy = player.y + player.height / 2;
+        lightCreatures.push({
+            species,
+            x: pcx + (Math.random() - 0.5) * 48,
+            y: pcy + 40 + Math.random() * 20,
+            width: 28, height: 28,
+            hp: species.maxHp, maxHp: species.maxHp,
+            state: "follow", target: null,
+            cooldown: 0,
+            phase: Math.random() * Math.PI * 2,
+            sparklePhase: Math.random() * Math.PI * 2,
+            wanderX: 0, wanderY: 0, wanderTimer: 0, fleeTimer: 0,
+        });
+    }
+
+    function nearestHostileForLight(c) {
+        const cx = c.x + c.width / 2;
+        const cy = c.y + c.height / 2;
+        const r2 = c.species.engageRange * c.species.engageRange;
+        let best = null, bestD = r2;
+        for (const e of enemies) {
+            if (!e.alive || e.ally || e.neutral) continue;
+            const dx = (e.x + e.width / 2) - cx;
+            const dy = (e.y + e.height / 2) - cy;
+            const d = dx * dx + dy * dy;
+            if (d < bestD) { best = e; bestD = d; }
+        }
+        return best;
+    }
+
+    function performLightAttack(c) {
+        if (!c.target || !c.target.alive) return;
+        const sx = c.x + c.width / 2;
+        const sy = c.y + c.height / 2;
+        const tcx = c.target.x + c.target.width / 2;
+        const tcy = c.target.y + c.target.height / 2;
+        if (c.species.kind === "ranged") {
+            const dx = tcx - sx, dy = tcy - sy;
+            const mag = Math.hypot(dx, dy) || 1;
+            projectiles.push({
+                x: sx - 5, y: sy - 5, w: 10, h: 10,
+                vx: (dx / mag) * 380, vy: (dy / mag) * 380,
+                life: 1.0,
+                damage: c.species.attackDamage,
+                color: c.species.color,
+                age: 0, alive: true,
+            });
+        } else if (c.species.kind === "melee") {
+            c.target.takeHit(c.species.attackDamage, { x: sx, y: sy });
+            if (!c.target.alive) onEnemyDefeated(c.target);
+        }
+    }
+
+    function lightCreatureNearPlayer(c, radius = 60) {
+        const cx = c.x + c.width / 2;
+        const cy = c.y + c.height / 2;
+        const px = player.x + player.width / 2;
+        const py = player.y + player.height / 2;
+        const dx = cx - px, dy = cy - py;
+        return dx * dx + dy * dy < radius * radius;
+    }
+
+    // Called by the interact key when no NPC / neutral is closer.
+    function nearestWildLightCreature() {
+        for (const c of lightCreatures) {
+            if (c.state === "wild" && lightCreatureNearPlayer(c)) return c;
+        }
+        return null;
+    }
+
+    function reachOutToLightCreature(c) {
+        if (!c || c.state !== "wild") return;
+        if (player.lightCreatures.length >= player.maxLightCreatures) {
+            questLog.showToast(
+                "Your light-companions are already at your side.", 2.4
+            );
+            return;
+        }
+        // Story-boosted chance: 40% base + 8% per chapter advanced,
+        // capped at 80%. Early-game recruits are earned; late-game
+        // recruits almost always succeed.
+        const chapterIdx = Math.max(0, story.chapterOrder.indexOf(story.state));
+        const succ = Math.min(0.8, 0.4 + chapterIdx * 0.08);
+        if (Math.random() < succ) {
+            c.state = "follow";
+            c.hp = c.species.maxHp;
+            player.lightCreatures.push({ speciesId: c.species.id });
+            questLog.showToast(
+                `${c.species.name} accepts your call.`, 2.8
+            );
+            flash.trigger(0.35, 0.25);
+            sound.play("levelUp");
+        } else {
+            c.state = "flee";
+            c.fleeTimer = 0.8;
+            questLog.showToast(
+                `${c.species.name} slips back into the light.`, 2.0
+            );
+        }
+    }
+
+    function updateLightCreatures(dt) {
+        const pcx = player.x + player.width / 2;
+        const pcy = player.y + player.height / 2;
+
+        for (let i = lightCreatures.length - 1; i >= 0; i--) {
+            const c = lightCreatures[i];
+            c.phase += dt * 3;
+            c.sparklePhase += dt * 2;
+            if (c.cooldown > 0) c.cooldown -= dt;
+
+            // Flee despawn: fail-to-recruit creatures fade away.
+            if (c.state === "flee") {
+                c.fleeTimer -= dt;
+                if (c.fleeTimer <= 0) {
+                    lightCreatures.splice(i, 1);
+                    continue;
+                }
+                // Drift away from the player during the fade.
+                const dx = c.x - pcx, dy = c.y - pcy;
+                const d = Math.hypot(dx, dy) || 1;
+                c.x += (dx / d) * 90 * dt;
+                c.y += (dy / d) * 90 * dt;
+                continue;
+            }
+
+            if (c.state === "wild") {
+                // Gentle wander near the spawn point.
+                c.wanderTimer -= dt;
+                if (c.wanderTimer <= 0) {
+                    c.wanderTimer = 2 + Math.random() * 2;
+                    c.wanderX = c.x + (Math.random() - 0.5) * 60;
+                    c.wanderY = c.y + (Math.random() - 0.5) * 60;
+                }
+                const dx = c.wanderX - c.x;
+                const dy = c.wanderY - c.y;
+                const dist = Math.hypot(dx, dy);
+                if (dist > 2) {
+                    const step = Math.min(dist, c.species.speed * 0.3 * dt);
+                    c.x += (dx / dist) * step;
+                    c.y += (dy / dist) * step;
+                }
+                continue;
+            }
+
+            // --- Tamed states: follow / engage / retreat ----------
+            // Retreat if low health.
+            const hpFrac = c.hp / c.maxHp;
+            if (c.state !== "retreat" && hpFrac < 0.25) {
+                c.state = "retreat";
+            }
+            if (c.state === "retreat") {
+                c.hp = Math.min(c.maxHp, c.hp + 12 * dt);
+                if (c.hp / c.maxHp >= 0.75) c.state = "follow";
+            }
+
+            // Stag support tick: heals nearby followers + player.
+            if (c.species.kind === "support" && c.state !== "retreat") {
+                const r2 = c.species.auraRadius * c.species.auraRadius;
+                const cx = c.x + c.width / 2;
+                const cy = c.y + c.height / 2;
+                const heal = c.species.healRate * dt;
+                for (const f of followers) {
+                    if (f.hp <= 0 || f.hp >= f.maxHp) continue;
+                    const dx = (f.x + f.width / 2) - cx;
+                    const dy = (f.y + f.height / 2) - cy;
+                    if (dx * dx + dy * dy < r2) {
+                        f.hp = Math.min(f.maxHp, f.hp + heal);
+                    }
+                }
+                // Small player regen too (slower so it's flavor, not
+                // a replacement for potions).
+                if (player.hp < player.maxHp) {
+                    const dx = pcx - cx, dy = pcy - cy;
+                    if (dx * dx + dy * dy < r2) {
+                        player.hp = Math.min(
+                            player.maxHp, player.hp + heal * 0.5
+                        );
+                    }
+                }
+            }
+
+            // Target selection for melee/ranged combat species.
+            if (c.state !== "retreat" && c.species.kind !== "support") {
+                if (!c.target || !c.target.alive) {
+                    c.target = nearestHostileForLight(c);
+                }
+                c.state = c.target ? "engage" : "follow";
+            } else if (c.state !== "retreat") {
+                // Stag always follows unless retreating.
+                c.state = "follow";
+            }
+
+            let moving = false;
+            if (c.state === "engage" && c.target) {
+                const tcx = c.target.x + c.target.width / 2;
+                const tcy = c.target.y + c.target.height / 2;
+                const cx = c.x + c.width / 2;
+                const cy = c.y + c.height / 2;
+                const dx = tcx - cx, dy = tcy - cy;
+                const dist = Math.hypot(dx, dy) || 1;
+                const pref = c.species.preferredRange;
+                const DEAD = 6;
+                if (dist - pref > DEAD) {
+                    const step = Math.min(dist - pref, c.species.speed * dt);
+                    c.x += (dx / dist) * step;
+                    c.y += (dy / dist) * step;
+                    moving = true;
+                } else if (pref - dist > DEAD) {
+                    const step = Math.min(pref - dist, c.species.speed * dt);
+                    c.x -= (dx / dist) * step;
+                    c.y -= (dy / dist) * step;
+                    moving = true;
+                }
+                if (dist <= c.species.attackRange && c.cooldown <= 0) {
+                    performLightAttack(c);
+                    c.cooldown = c.species.attackCooldown;
+                }
+            } else {
+                // Follow: drift behind the player with per-creature
+                // slot offset so multiple creatures don't stack.
+                const slotIdx = lightCreatures.indexOf(c);
+                const offX = -40 + (slotIdx * 28);
+                const offY = -34 + (slotIdx % 2) * 8;
+                const tx = pcx + offX;
+                const ty = pcy + offY;
+                const dx = tx - (c.x + c.width / 2);
+                const dy = ty - (c.y + c.height / 2);
+                const dist = Math.hypot(dx, dy);
+                if (dist > 12) {
+                    const step = Math.min(dist, c.species.speed * 0.55 * dt);
+                    c.x += (dx / dist) * step;
+                    c.y += (dy / dist) * step;
+                    moving = true;
+                }
+            }
+            c._moving = moving;
+        }
+    }
+
+    function drawLightCreatures(ctx) {
+        if (lightCreatures.length === 0) return;
+        for (const c of lightCreatures) {
+            const cx = c.x + c.width / 2;
+            const cy = c.y + c.height / 2;
+
+            // Additive aura - tinted by species, pulses with phase.
+            const pulse = 0.7 + 0.3 * Math.sin(c.phase);
+            ctx.save();
+            ctx.globalCompositeOperation = "lighter";
+            ctx.globalAlpha = 0.45 * pulse;
+            ctx.fillStyle = c.species.auraColor;
+            ctx.beginPath();
+            ctx.arc(cx, cy, 22, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+
+            // Body - filled circle in species color.
+            ctx.fillStyle = c.species.color;
+            ctx.beginPath();
+            ctx.arc(cx, cy, 8, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Species silhouette over the body.
+            if (c.species.id === "wolf") {
+                // Triangle ears + snout
+                ctx.fillRect(cx - 7, cy - 10, 2, 4);
+                ctx.fillRect(cx + 5, cy - 10, 2, 4);
+                ctx.fillStyle = "#1a1a24";
+                ctx.fillRect(cx - 1, cy + 1, 2, 2);
+            } else if (c.species.id === "bird") {
+                // Wing beats on animated bob.
+                const wing = Math.floor(Math.sin(c.phase * 5) * 2);
+                ctx.fillRect(cx - 11, cy - 1 + wing, 5, 2);
+                ctx.fillRect(cx + 6,  cy - 1 + wing, 5, 2);
+                ctx.fillStyle = "#1a1a24";
+                ctx.fillRect(cx - 1, cy - 1, 2, 2);
+            } else if (c.species.id === "stag") {
+                // Antlers
+                ctx.fillRect(cx - 5, cy - 12, 1, 5);
+                ctx.fillRect(cx - 7, cy - 10, 2, 2);
+                ctx.fillRect(cx + 4, cy - 12, 1, 5);
+                ctx.fillRect(cx + 6, cy - 10, 2, 2);
+            }
+
+            // Orbiting sparkles. 3 small specks at staggered angles
+            // so the creature reads as radiating softly.
+            ctx.globalAlpha = 1;
+            for (let j = 0; j < 3; j++) {
+                const ang = c.sparklePhase + (j / 3) * Math.PI * 2;
+                const r = 16 + Math.sin(c.sparklePhase * 2 + j) * 3;
+                const sx = cx + Math.cos(ang) * r;
+                const sy = cy + Math.sin(ang) * r * 0.6;
+                const a = 0.5 + 0.5 * Math.sin(c.sparklePhase * 2 + j);
+                ctx.globalAlpha = a * 0.7;
+                ctx.fillStyle = c.species.color;
+                ctx.fillRect(Math.round(sx), Math.round(sy), 2, 2);
+            }
+            ctx.globalAlpha = 1;
+
+            // "Reach out" bubble on wild creatures near the player.
+            if (c.state === "wild" && lightCreatureNearPlayer(c)) {
+                const bx = cx, by = cy - 22;
+                ctx.save();
+                ctx.fillStyle = "#1a1a24";
+                ctx.beginPath();
+                ctx.arc(bx, by, 11, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = c.species.color;
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+                ctx.fillStyle = c.species.color;
+                ctx.font = "bold 12px system-ui, sans-serif";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.fillText("E", bx, by + 1);
+                ctx.restore();
+            }
+
+            // Tiny HP pip for tamed creatures that have taken damage.
+            if (c.state !== "wild" && c.hp < c.maxHp) {
+                const barW = 20, barH = 2;
+                ctx.fillStyle = "#1a1a24";
+                ctx.fillRect(cx - barW / 2, cy - 14, barW, barH);
+                ctx.fillStyle = c.species.color;
+                ctx.fillRect(
+                    cx - barW / 2, cy - 14,
+                    barW * Math.max(0, c.hp / c.maxHp), barH
+                );
+            }
+        }
+    }
+
+    function resetLightCreatures() {
+        lightCreatures.length = 0;
+    }
+
+    // ---------------------------------------------------------------
     // Squad roles
     //
     // Each recruited NPC carries a `squadRole` id keyed into this
@@ -6046,6 +6508,7 @@
                     coins: player.coins,
                     inventory: [...player.inventory],
                     squad: player.squad.map(m => ({ ...m })),
+                    lightCreatures: player.lightCreatures.map(c => ({ ...c })),
                     weaponIndex: player.weaponIndex,
                 },
                 stats: {
@@ -6146,6 +6609,16 @@
             // so the live followers array matches the save's squad.
             companions.dismissAll();
             companions.rehire(data.player.squad);
+            // Light creatures: wipe live list + snapshot roster,
+            // then replay from the save. Next seed spawns live
+            // entities from the restored snapshots.
+            resetLightCreatures();
+            player.lightCreatures.length = 0;
+            for (const s of (data.player.lightCreatures ?? [])) {
+                if (LIGHT_SPECIES[s.speciesId]) {
+                    player.lightCreatures.push({ speciesId: s.speciesId });
+                }
+            }
             player.weaponIndex = data.player.weaponIndex;
 
             camera.snap(player);
@@ -8870,6 +9343,7 @@
     spawner.reset();
     spawner.seed();
     animals.spawnAll();
+    maybeSpawnWildLightCreature(currentLevel);
 
     // Collapse the cloak onto the player's starting position and
     // stagger the aura motes so the first drawn frame doesn't show
@@ -9064,6 +9538,7 @@
         // Ambient animals run with their own internal cull, so no
         // extra distance check needed here.
         animals.update(dt);
+        updateLightCreatures(dt);
     }
 
     function activeNpcs() {
@@ -12114,8 +12589,16 @@
                 if (neutral) {
                     allyWithGuardian(neutral);
                 } else {
-                    const loreTarget = nearestLore();
-                    if (loreTarget) openLore(loreTarget);
+                    // Wild Creatures of the Light take priority over
+                    // lore objects - they're rare and have a short
+                    // window before they drift off.
+                    const wildLight = nearestWildLightCreature();
+                    if (wildLight) {
+                        reachOutToLightCreature(wildLight);
+                    } else {
+                        const loreTarget = nearestLore();
+                        if (loreTarget) openLore(loreTarget);
+                    }
                 }
             }
         }
@@ -12392,6 +12875,12 @@
         enemies.length = 0;
         projectiles.length = 0;
         drops.length = 0;
+        // Live light creatures belong to the previous zone (they
+        // don't trail across, to keep the rare-encounter feel).
+        // Tamed ones rehire next to the player from snapshots so
+        // the roster carries over.
+        resetLightCreatures();
+        for (const snap of player.lightCreatures) rehireLightCreature(snap);
         attack.active = false;
         attack.timer = 0;
         attack.cooldownTimer = 0;
@@ -12411,6 +12900,7 @@
         spawner.reset();
         spawner.seed();
         animals.spawnAll();
+        maybeSpawnWildLightCreature(currentLevel);
 
         // Snap the camera to prevent a visible pan from the old spot.
         camera.snap(player);
@@ -12488,6 +12978,7 @@
         spawner.reset();
         spawner.seed();
         animals.spawnAll();
+        maybeSpawnWildLightCreature(currentLevel);
 
         // Now WORLD_* are grove dims - warp the player to the
         // grove's center (the main plaza tile).
@@ -12506,6 +12997,10 @@
         player.magic = 0;
         // Squad - fresh run recruits no one by default.
         companions.reset();
+        // Light creatures - fresh run = empty roster + no wild
+        // creature carryover. Next zone seed re-rolls a spawn.
+        player.lightCreatures.length = 0;
+        resetLightCreatures();
         drops.length = 0;
         inventoryOpen = false;
 
@@ -12689,6 +13184,7 @@
         // Ambient critters + birds draw below the player layer;
         // the animals module does its own view-rect cull.
         animals.draw(ctx);
+        drawLightCreatures(ctx);
         // Followers render with the same drawNpc path; they carry
         // the warrior's colors, walk bob, and "E" bubble just like
         // home-zone NPCs so players can still converse with them.
