@@ -9373,8 +9373,10 @@
     spawner.seed();
     animals.spawnAll();
     maybeSpawnWildLightCreature(currentLevel);
-    ensureCityClustersFor(currentLevel && currentLevel.id);
-    cityChat.reset();
+    // Note: city cluster assignment + cityChat reset run later in
+    // the IIFE, once the cityChat module has been initialized -
+    // moving these up here would TDZ-crash on the `const cityChat`
+    // that lives further down in the file.
 
     // Collapse the cloak onto the player's starting position and
     // stagger the aura motes so the first drawn frame doesn't show
@@ -11882,6 +11884,15 @@
         _clustersAssigned.add(levelId);
         assignCityClusters(levelId);
     }
+
+    // Boot-time city-life init. Must run AFTER the cityChat +
+    // clusters consts above are initialized (they live here because
+    // they need the fully-populated grove NPC roster). transitionTo
+    // and restartGame hit these paths too, but their function
+    // bodies close over the names at call time, so they'll always
+    // see the live cityChat binding by the time they run.
+    ensureCityClustersFor(currentLevel && currentLevel.id);
+    cityChat.reset();
 
     // Port Halen roster - coastal-city NPCs. Compact configs with
     // keyword-only dialogue to keep the per-NPC data lightweight.
