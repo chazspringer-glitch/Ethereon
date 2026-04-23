@@ -9495,7 +9495,10 @@
                     Math.random() * (this.idleMax - this.idleMin);
                 return;
             }
-            const step = Math.min(dist, this.speed * dt);
+            // Night / dusk slow everyone down so the city visibly
+            // winds down after dark. worldClock returns 1.0 during
+            // the day so this is a no-op otherwise.
+            const step = Math.min(dist, this.speed * worldClock.npcSpeedMult() * dt);
             const inv = 1 / dist;
             this.x += dx * inv * step;
             this.y += dy * inv * step;
@@ -9574,6 +9577,9 @@
         updateLightCreatures(dt);
         updateChatBubbles(dt);
         cityChat.tick(dt);
+        worldClock.update(dt);
+        cityEvents.update(dt);
+        mysticalEvents.update(dt);
     }
 
     function activeNpcs() {
@@ -11876,6 +11882,359 @@
         },
     };
 
+    // ---------------------------------------------------------------
+    // World clock + city events + mystical sightings
+    //
+    // worldClock drives an 8-minute day/night cycle. The phase drives
+    // a screen-space color overlay (dawn warm / day clear / dusk warm
+    // / night cool), slows NPC wander speed at night, and pulls the
+    // roster toward building doors so the city "goes to sleep".
+    //
+    // cityEvents spawns short random scenes at cluster anchors -
+    // gatherings, arguments, performers - that last ~24s and trigger
+    // extra chat bubbles on nearby NPCs. Player can "Watch" them for
+    // a small coin reward.
+    //
+    // mysticalEvents are rare (~4 min apart) screen-level sightings:
+    // a shooting star streak, a crown pulse, or a glow-creature drift.
+    // Nearby NPCs face the event position.
+    //
+    // All of this runs only in safe zones, stays mobile-cheap
+    // (zero per-frame allocations after setup), and layers on top
+    // of the existing cityChat / bubbles pool.
+    // ---------------------------------------------------------------
+    const worldClock = {
+        cycleSeconds: 480,   // 8 min per full cycle
+        t: 0.18,             // start at dawn so the first load is bright
+
+        update(dt) {
+            this.t = (this.t + dt / this.cycleSeconds) % 1;
+        },
+
+        phase() {
+            const t = this.t;
+            if (t < 0.18) return "dawn";
+            if (t < 0.58) return "day";
+            if (t < 0.72) return "dusk";
+            return "night";
+        },
+
+        // Screen-space color overlay. Called at the end of the world
+        // draw so tiles / sprites all get tinted, but the HUD (drawn
+        // after) stays readable.
+        drawOverlay(ctx) {
+            const p = this.phase();
+            if (p === "day") return;
+            // Smoothly ramp alpha based on proximity to phase center
+            // so transitions glide rather than snap.
+            let fill, alpha;
+            const t = this.t;
+            if (p === "dawn") {
+                fill = "rgba(255, 190, 120,";
+                const pct = t / 0.18;
+                alpha = (1 - pct) * 0.22;
+            } else if (p === "dusk") {
+                fill = "rgba(240, 130, 90,";
+                const pct = (t - 0.58) / (0.72 - 0.58);
+                alpha = Math.sin(pct * Math.PI) * 0.26;
+            } else {
+                // Night: deep blue cast. Holds its peak darkness
+                // through the middle of the night.
+                fill = "rgba(20, 30, 70,";
+                const pct = (t - 0.72) / (1 - 0.72);
+                alpha = 0.40 + Math.sin(pct * Math.PI) * 0.10;
+            }
+            ctx.fillStyle = fill + alpha.toFixed(3) + ")";
+            ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+        },
+
+        // Warm window glow for nighttime buildings. Drawn in world
+        // space so it scrolls with the camera.
+        drawBuildingLights(ctx, level) {
+            if (this.phase() !== "night") return;
+            if (!level || !level.buildings) return;
+            for (const b of level.buildings) {
+                if (b.stall || !b.doorX) continue;  // skip stalls
+                const wy = b.y + Math.floor(b.h * 0.35);
+                ctx.fillStyle = "rgba(255, 209, 102, 0.38)";
+                ctx.fillRect(b.x + 16, wy, 24, 20);
+                ctx.fillRect(b.x + b.w - 40, wy, 24, 20);
+            }
+        },
+
+        // NPC-tick modifiers pulled from the clock. Simple bands:
+        // night cuts wander speed + halves gather chance so the
+        // city palpably slows down.
+        npcSpeedMult() {
+            const p = this.phase();
+            return p === "night" ? 0.45 : p === "dusk" ? 0.8 : 1;
+        },
+        npcGatherBias() {
+            // Night pushes every NPC toward home - used by Npc
+            // update below to bias wander target selection.
+            return this.phase() === "night";
+        },
+    };
+
+    // --- City events --------------------------------------------------
+    const CITY_EVENT_LINES = {
+        gathering: [
+            "Tell me more...",
+            "You don't say.",
+            "Huh!",
+        ],
+        argument: [
+            "That's not what I said!",
+            "You always do this!",
+            "Enough!",
+        ],
+        performer: [
+            "♪ la la la ♪",
+            "Bravo!",
+            "More!",
+        ],
+    };
+
+    const cityEvents = {
+        active: null,   // { kind, x, y, timer, duration, label }
+        cooldown: 30,
+
+        _clusterAnchor(levelId) {
+            const zones = CITY_CLUSTERS[levelId];
+            if (!zones || !zones.length) return null;
+            return zones[Math.floor(Math.random() * zones.length)];
+        },
+
+        _kind() {
+            const r = Math.random();
+            if (r < 0.4) return "gathering";
+            if (r < 0.75) return "performer";
+            return "argument";
+        },
+
+        spawn() {
+            if (!currentLevel || !currentLevel.safe) return;
+            const anchor = this._clusterAnchor(currentLevel.id);
+            if (!anchor) return;
+            const kind = this._kind();
+            this.active = {
+                kind, x: anchor.x, y: anchor.y,
+                timer: 24, duration: 24,
+                label:
+                    kind === "gathering" ? "SMALL CROWD"
+                    : kind === "argument" ? "ARGUMENT"
+                    : "PERFORMER",
+                watched: false,
+            };
+            // Drop a chat bubble at the anchor so the player
+            // notices the event even from a distance.
+            const lines = CITY_EVENT_LINES[kind];
+            spawnChatBubble(
+                { x: anchor.x, y: anchor.y },
+                lines[Math.floor(Math.random() * lines.length)],
+                3.2
+            );
+        },
+
+        update(dt) {
+            if (!currentLevel || !currentLevel.safe) {
+                this.active = null;
+                return;
+            }
+            if (this.active) {
+                this.active.timer -= dt;
+                // Occasionally spawn an additional bubble at the
+                // anchor so the event feels live instead of static.
+                if (Math.random() < dt * 0.5) {
+                    const lines = CITY_EVENT_LINES[this.active.kind];
+                    spawnChatBubble(
+                        { x: this.active.x, y: this.active.y - 4 },
+                        lines[Math.floor(Math.random() * lines.length)],
+                        2.6
+                    );
+                }
+                if (this.active.timer <= 0) this.active = null;
+            } else {
+                this.cooldown -= dt;
+                if (this.cooldown <= 0) {
+                    this.cooldown = 45 + Math.random() * 50;
+                    if (Math.random() < 0.7) this.spawn();
+                }
+            }
+        },
+
+        draw(ctx) {
+            if (!this.active) return;
+            const e = this.active;
+            const fade = Math.min(1, e.timer / 1.0);
+            // Ground marker - a pulsing ring around the event.
+            const pulse = 0.6 + 0.4 * Math.abs(Math.sin(performance.now() * 0.004));
+            ctx.save();
+            ctx.globalAlpha = fade * 0.55 * pulse;
+            ctx.strokeStyle =
+                e.kind === "argument"  ? "#e06666" :
+                e.kind === "performer" ? "#ffd166" :
+                                         "#8ad9ff";
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            ctx.arc(e.x, e.y, 40, 0, Math.PI * 2);
+            ctx.stroke();
+            // Icon / label floating above.
+            ctx.globalAlpha = fade;
+            ctx.fillStyle = "#1a1a24";
+            roundRectPath(ctx, e.x - 46, e.y - 58, 92, 20, 4);
+            ctx.fill();
+            ctx.strokeStyle = "rgba(255, 209, 102, 0.6)";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            drawShadowedText(e.label, e.x, e.y - 48,
+                "#ffd166", "bold 10px system-ui, sans-serif");
+            ctx.restore();
+        },
+
+        // Player interact: watch the event for a small reward.
+        watch() {
+            if (!this.active || this.active.watched) return false;
+            this.active.watched = true;
+            const coins = 2 + Math.floor(Math.random() * 4);
+            player.coins += coins;
+            questLog.showToast(`You paused to watch. +${coins}g`, 2.0);
+            sound.play("coin");
+            return true;
+        },
+
+        reset() {
+            this.active = null;
+            this.cooldown = 30;
+        },
+    };
+
+    function nearestCityEvent() {
+        if (!cityEvents.active) return null;
+        const pcx = player.x + player.width / 2;
+        const pcy = player.y + player.height / 2;
+        const dx = cityEvents.active.x - pcx;
+        const dy = cityEvents.active.y - pcy;
+        if (dx * dx + dy * dy > 60 * 60) return null;
+        return cityEvents.active;
+    }
+
+    // --- Mystical sightings ------------------------------------------
+    // Rare (~4 min apart, with randomness). Three kinds. Each runs a
+    // short screen-space / world-space animation that draws above
+    // everything else in the world layer.
+    const mysticalEvents = {
+        active: null,
+        cooldown: 90 + Math.random() * 120,
+
+        _pick() {
+            const r = Math.random();
+            if (r < 0.4) return "shootingStar";
+            if (r < 0.75) return "crownPulse";
+            return "glowDrift";
+        },
+
+        trigger() {
+            const kind = this._pick();
+            const pcx = player.x + player.width / 2;
+            const pcy = player.y + player.height / 2;
+            if (kind === "shootingStar") {
+                this.active = {
+                    kind,
+                    // Screen-space streak crossing from upper-left
+                    // to upper-right, with a randomized y.
+                    sx: -60, sy: 30 + Math.random() * 80,
+                    ex: VIEW_W + 60, ey: 50 + Math.random() * 60,
+                    timer: 2.0, duration: 2.0,
+                };
+                questLog.showToast("A strange light crosses the sky.", 2.4);
+            } else if (kind === "crownPulse") {
+                this.active = {
+                    kind,
+                    x: pcx, y: pcy,
+                    timer: 1.5, duration: 1.5,
+                };
+                // Give the crown a small energy nudge as a reward.
+                if (crown) crown.add(8);
+                questLog.showToast("The crown pulses - something answered.", 2.6);
+                flash.trigger(0.3, 0.4);
+            } else {
+                // Glow drift: spawn a wild light creature in the
+                // world even if the zone roll already passed. Still
+                // capped by the "one wild at a time" rule.
+                maybeSpawnWildLightCreature(currentLevel);
+                this.active = null;  // no extra visual needed
+                questLog.showToast("Something of light drifts nearby.", 2.6);
+                return;
+            }
+        },
+
+        update(dt) {
+            this.cooldown -= dt;
+            if (this.cooldown <= 0) {
+                this.cooldown = 210 + Math.random() * 150;
+                this.trigger();
+            }
+            if (this.active) {
+                this.active.timer -= dt;
+                if (this.active.timer <= 0) this.active = null;
+            }
+        },
+
+        drawScreen(ctx) {
+            // Draws in screen space - called AFTER the world
+            // transform restore so the shooting star crosses the
+            // viewport, not the world.
+            if (!this.active) return;
+            const e = this.active;
+            if (e.kind === "shootingStar") {
+                const t = 1 - e.timer / e.duration;
+                const x = e.sx + (e.ex - e.sx) * t;
+                const y = e.sy + (e.ey - e.sy) * t;
+                ctx.save();
+                ctx.globalAlpha = Math.sin(t * Math.PI) * 0.9;
+                // Trail
+                ctx.strokeStyle = "#ffffff";
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(x, y);
+                ctx.lineTo(x - 48, y - 12);
+                ctx.stroke();
+                // Head
+                ctx.fillStyle = "#fff6d6";
+                ctx.beginPath();
+                ctx.arc(x, y, 3, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+        },
+
+        drawWorld(ctx) {
+            // World-space: crown pulse emanates from the player.
+            if (!this.active) return;
+            const e = this.active;
+            if (e.kind === "crownPulse") {
+                const t = 1 - e.timer / e.duration;
+                const r = 40 + t * 160;
+                ctx.save();
+                ctx.globalAlpha = (1 - t) * 0.7;
+                ctx.strokeStyle = "#ffd166";
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(e.x, e.y, r, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.restore();
+            }
+        },
+
+        reset() {
+            this.active = null;
+            this.cooldown = 90 + Math.random() * 120;
+        },
+    };
+
     // Run cluster assignment once per level id. Flag prevents a
     // re-entry each zone load from re-shuffling routines.
     const _clustersAssigned = new Set();
@@ -11893,6 +12252,8 @@
     // see the live cityChat binding by the time they run.
     ensureCityClustersFor(currentLevel && currentLevel.id);
     cityChat.reset();
+    cityEvents.reset();
+    mysticalEvents.reset();
 
     // Port Halen roster - coastal-city NPCs. Compact configs with
     // keyword-only dialogue to keep the per-NPC data lightweight.
@@ -12906,6 +13267,10 @@
                     const wildLight = nearestWildLightCreature();
                     if (wildLight) {
                         reachOutToLightCreature(wildLight);
+                    } else if (nearestCityEvent()) {
+                        // City event "Watch" - small coin reward,
+                        // one-shot per event.
+                        cityEvents.watch();
                     } else {
                         const loreTarget = nearestLore();
                         if (loreTarget) openLore(loreTarget);
@@ -13214,6 +13579,8 @@
         maybeSpawnWildLightCreature(currentLevel);
         ensureCityClustersFor(currentLevel && currentLevel.id);
         cityChat.reset();
+        cityEvents.reset();
+        mysticalEvents.reset();
 
         // Snap the camera to prevent a visible pan from the old spot.
         camera.snap(player);
@@ -13294,6 +13661,8 @@
         maybeSpawnWildLightCreature(currentLevel);
         ensureCityClustersFor(currentLevel && currentLevel.id);
         cityChat.reset();
+        cityEvents.reset();
+        mysticalEvents.reset();
 
         // Now WORLD_* are grove dims - warp the player to the
         // grove's center (the main plaza tile).
@@ -13477,6 +13846,9 @@
         // and roof. Drawn beneath NPCs and the player so characters
         // read on top when standing in front.
         for (const b of currentLevel.buildings || []) drawBuilding(ctx, b);
+        // Night window-glow sits on top of the building faces so
+        // the warm light reads against the cooler overall tint.
+        worldClock.drawBuildingLights(ctx, currentLevel);
 
         // Padlock icon on any still-locked border gate.
         drawLockIndicators(ctx);
@@ -13501,6 +13873,8 @@
         animals.draw(ctx);
         drawLightCreatures(ctx);
         drawChatBubbles(ctx);
+        cityEvents.draw(ctx);
+        mysticalEvents.drawWorld(ctx);
         // Followers render with the same drawNpc path; they carry
         // the warrior's colors, walk bob, and "E" bubble just like
         // home-zone NPCs so players can still converse with them.
@@ -13543,6 +13917,14 @@
         drawSquadFx(ctx);
 
         ctx.restore();
+
+        // Day/night color overlay - drawn after the world restore so
+        // the tint blankets the whole scene, and before the HUD so
+        // UI stays readable.
+        worldClock.drawOverlay(ctx);
+        // Mystical shooting-star streak - screen-space so it moves
+        // across the viewport rather than the world.
+        mysticalEvents.drawScreen(ctx);
 
         // --- Screen space (HUD) ---
         drawStatsPanel();
