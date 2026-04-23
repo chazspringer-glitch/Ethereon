@@ -13961,34 +13961,190 @@
     // (Resume / Save / Load) with keyboard hints, and a small status
     // line fed by pauseMenu.setStatus. Rects are stored on pauseMenu
     // so tap hit-testing can run against the same coords.
+    // Static zone-map layout for the pause journal. col / row are
+    // grid coordinates inside the map region; positions are computed
+    // per-draw so the panel can resize with the viewport.
+    const PAUSE_MAP_NODES = [
+        { id: "emberhold",  label: "EMBERHOLD",  col: 0, row: 0 },
+        { id: "grove",      label: "GROVE",      col: 1, row: 0 },
+        { id: "caverns",    label: "CAVERNS",    col: 2, row: 0 },
+        { id: "shrine",     label: "SHRINE",     col: 3, row: 0 },
+        { id: "abyss",      label: "ABYSS",      col: 4, row: 0 },
+        { id: "port_halen", label: "PORT HALEN", col: 1, row: 1 },
+    ];
+    const PAUSE_MAP_LINKS = [
+        ["emberhold", "grove"],
+        ["grove",     "caverns"],
+        ["caverns",   "shrine"],
+        ["shrine",    "abyss"],
+        ["grove",     "port_halen"],
+    ];
+
     function drawPauseMenu() {
-        const w = Math.min(340, VIEW_W - 40);
-        const h = 240;
+        // Bigger panel now that it carries the journal + map. Caps
+        // at 540x620 so it stays readable on desktop without
+        // stretching; clamps to the viewport on mobile.
+        const w = Math.min(540, VIEW_W - 16);
+        const h = Math.min(640, VIEW_H - 16);
         const x = Math.floor((VIEW_W - w) / 2);
         const y = Math.floor((VIEW_H - h) / 2);
 
-        ctx.fillStyle = "rgba(0, 0, 0, 0.62)";
+        ctx.fillStyle = "rgba(0, 0, 0, 0.68)";
         ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
         ctx.save();
         roundRectPath(ctx, x, y, w, h, 12);
-        ctx.fillStyle = "rgba(18, 18, 30, 0.95)";
+        ctx.fillStyle = "rgba(18, 18, 30, 0.96)";
         ctx.fill();
         ctx.strokeStyle = "rgba(255, 209, 102, 0.55)";
         ctx.lineWidth = 2;
         ctx.stroke();
 
+        // --- Header ------------------------------------------------
         ctx.textAlign = "center";
         ctx.textBaseline = "top";
-        drawShadowedText("PAUSED", x + w / 2, y + 16, "#ffd166",
-            "bold 20px system-ui, sans-serif");
+        drawShadowedText("PAUSED", x + w / 2, y + 14,
+            "#ffd166", "bold 19px system-ui, sans-serif");
+        drawShadowedText(`Chapter ${story.chapterOrder.indexOf(story.state) + 1} - ${story.title()}`,
+            x + w / 2, y + 38,
+            "#a0a0b8", "11px system-ui, sans-serif");
 
-        // Row layout: three evenly-spaced buttons.
+        // --- Section 1: Missions timeline -------------------------
+        let sy = y + 62;
+        ctx.textAlign = "left";
+        drawShadowedText("MISSIONS", x + 20, sy,
+            "#8ad9ff", "bold 11px system-ui, sans-serif");
+        sy += 18;
+        const missionRowH = 20;
+        for (let i = 0; i < missions.list.length; i++) {
+            const m = missions.list[i];
+            const isCurrent =
+                i === missions.currentMissionIndex && !m.completed;
+            const done = m.completed;
+            const icon = done ? "[x]" : isCurrent ? "[>]" : "[ ]";
+            const color = done ? "#7ad17a"
+                        : isCurrent ? "#ffd166"
+                        : "#a0a0b8";
+            drawShadowedText(
+                `${icon}  ${i + 1}. ${m.name}`,
+                x + 28, sy + i * missionRowH,
+                color,
+                isCurrent ? "bold 12px system-ui, sans-serif"
+                          : "12px system-ui, sans-serif"
+            );
+        }
+        sy += missions.list.length * missionRowH + 14;
+
+        // --- Section 2: World map ---------------------------------
+        drawShadowedText("WORLD MAP", x + 20, sy,
+            "#8ad9ff", "bold 11px system-ui, sans-serif");
+        sy += 14;
+
+        const mapX = x + 20;
+        const mapY = sy;
+        const mapW = w - 40;
+        const mapH = 140;
+
+        ctx.save();
+        // Subtle backdrop for the map area.
+        roundRectPath(ctx, mapX, mapY, mapW, mapH, 6);
+        ctx.fillStyle = "rgba(10, 12, 22, 0.75)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(138, 217, 255, 0.18)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Compute node screen positions from the grid coords.
+        const maxCol = 4, maxRow = 1;
+        const nodePositions = {};
+        for (const n of PAUSE_MAP_NODES) {
+            const nx = mapX + 28 + (n.col / maxCol) * (mapW - 56);
+            const ny = mapY + 32 + (n.row / Math.max(1, maxRow)) * (mapH - 64);
+            nodePositions[n.id] = { x: nx, y: ny };
+        }
+
+        // Links first so the circles draw on top. Known-route links
+        // are a bright cyan; locked-by-boss-gate links (shrine ->
+        // abyss) go dim until the boss falls.
+        ctx.lineWidth = 2;
+        for (const [a, b] of PAUSE_MAP_LINKS) {
+            const pa = nodePositions[a];
+            const pb = nodePositions[b];
+            if (!pa || !pb) continue;
+            const locked = (a === "shrine" && b === "abyss") &&
+                !defeatedBosses.has("shrine");
+            ctx.strokeStyle = locked
+                ? "rgba(120, 90, 130, 0.45)"
+                : "rgba(138, 217, 255, 0.55)";
+            ctx.beginPath();
+            ctx.moveTo(pa.x, pa.y);
+            ctx.lineTo(pb.x, pb.y);
+            ctx.stroke();
+        }
+
+        // Nodes.
+        for (const n of PAUSE_MAP_NODES) {
+            const p = nodePositions[n.id];
+            const isHere = currentLevel && currentLevel.id === n.id;
+            const cleared = defeatedBosses.has(n.id);
+            const safeZone = LEVELS[n.id] && LEVELS[n.id].safe;
+
+            // Base fill - bright gold for current, green for zones
+            // whose boss fell, cyan for known safe zones, violet for
+            // other hostile zones (still reachable but unsubdued).
+            let fill = "#8ad9ff";
+            let rim  = "rgba(138, 217, 255, 0.7)";
+            if (cleared)  { fill = "#7ad17a"; rim = "rgba(122, 209, 122, 0.85)"; }
+            else if (safeZone) { fill = "#8ad9ff"; rim = "rgba(138, 217, 255, 0.75)"; }
+            else           { fill = "#b06bff"; rim = "rgba(176, 107, 255, 0.75)"; }
+            if (isHere)    { fill = "#ffd166"; rim = "#fff6d6"; }
+
+            ctx.fillStyle = fill;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, isHere ? 8 : 6, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = rim;
+            ctx.lineWidth = isHere ? 2.5 : 1.5;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, isHere ? 10 : 7, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // "here" pulse ring so the current zone reads at a glance.
+            if (isHere) {
+                const pulse = 0.5 + 0.5 *
+                    Math.abs(Math.sin(performance.now() * 0.004));
+                ctx.globalAlpha = pulse * 0.45;
+                ctx.strokeStyle = "#fff6d6";
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 14, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.globalAlpha = 1;
+            }
+
+            // Label under the node.
+            ctx.textAlign = "center";
+            ctx.textBaseline = "top";
+            drawShadowedText(n.label, p.x, p.y + 12,
+                isHere ? "#ffd166" : "#e8e8f0",
+                isHere ? "bold 10px system-ui, sans-serif"
+                       : "10px system-ui, sans-serif");
+
+            // Checkmark marker for cleared bosses.
+            if (cleared) {
+                drawShadowedText("[x]", p.x + 12, p.y - 4,
+                    "#7ad17a", "bold 10px system-ui, sans-serif");
+            }
+        }
+        ctx.restore();
+
+        sy += mapH + 14;
+
+        // --- Section 3: action rows -------------------------------
         const rowW = w - 40;
-        const rowH = 38;
+        const rowH = 34;
         const rowX = x + 20;
-        let rowY = y + 58;
-        const gap = 10;
+        const gap = 8;
 
         const hasSave = saveGame.exists();
         const rows = [
@@ -13999,10 +14155,10 @@
 
         for (const row of rows) {
             const r = pauseMenu.rects[row.id];
-            r.x = rowX; r.y = rowY; r.w = rowW; r.h = rowH;
+            r.x = rowX; r.y = sy; r.w = rowW; r.h = rowH;
 
             ctx.globalAlpha = row.enabled ? 1 : 0.45;
-            roundRectPath(ctx, rowX, rowY, rowW, rowH, 6);
+            roundRectPath(ctx, rowX, sy, rowW, rowH, 6);
             ctx.fillStyle = "#2a2a38";
             ctx.fill();
             ctx.strokeStyle = "rgba(255, 209, 102, 0.38)";
@@ -14011,13 +14167,13 @@
 
             ctx.textAlign = "left";
             ctx.textBaseline = "middle";
-            drawShadowedText(row.label, rowX + 14, rowY + rowH / 2,
-                "#e8e8f0", "bold 15px system-ui, sans-serif");
+            drawShadowedText(row.label, rowX + 14, sy + rowH / 2,
+                "#e8e8f0", "bold 14px system-ui, sans-serif");
             ctx.textAlign = "right";
-            drawShadowedText(row.hint, rowX + rowW - 14, rowY + rowH / 2,
-                "#a0a0b8", "12px system-ui, sans-serif");
+            drawShadowedText(row.hint, rowX + rowW - 14, sy + rowH / 2,
+                "#a0a0b8", "11px system-ui, sans-serif");
 
-            rowY += rowH + gap;
+            sy += rowH + gap;
         }
         ctx.globalAlpha = 1;
 
@@ -14027,9 +14183,9 @@
             ctx.textBaseline = "bottom";
             ctx.globalAlpha = Math.min(1, pauseMenu.statusTimer / 0.5);
             drawShadowedText(pauseMenu.statusText,
-                x + w / 2, y + h - 14,
+                x + w / 2, y + h - 10,
                 "#8ad9ff",
-                "13px system-ui, sans-serif");
+                "12px system-ui, sans-serif");
             ctx.globalAlpha = 1;
         }
 
