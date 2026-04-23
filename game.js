@@ -9820,11 +9820,18 @@
             const greeting = typeof d.greeting === "function"
                 ? d.greeting(npc)
                 : pickStage(d.greeting) ?? d.greeting;
+            // Options: either a plain array OR a chapter-keyed object
+            // (same shape as greeting). Using pickStage here means
+            // repeat visits reflect the story - new questions per
+            // chapter instead of the same menu forever.
+            const options = Array.isArray(d.options)
+                ? d.options
+                : pickStage(d.options) ?? d.options;
             this.active = {
                 speaker: npc.name,
                 npc,                   // kept so submitQuestion can call askNpc
                 greeting,
-                options: d.options,
+                options,
                 text: greeting,
                 mode: "menu",
             };
@@ -9917,22 +9924,110 @@
                     chapter4: '"You stood at the shrine\'s threshold. Whatever comes, we\'ll mourn or cheer."',
                     chapter5: '"Hero of the grove. The Keeper\'s silence - that\'s your work. Thank you."',
                 },
-                options: [
-                    {
-                        label: "Who are you?",
-                        response: "I am the Elder - keeper of these grounds since before the star-fall.",
-                    },
-                    {
-                        label: "What is this place?",
-                        response: "The Sunlit Grove. Last safe haven before the dark places east.",
-                    },
-                    {
-                        label: "Any work for me?",
-                        action: elderInteract,  // jumps into the quest chain
-                    },
-                    { label: "Ask a question...", input: true },
-                    { label: "Goodbye.", close: true },
-                ],
+                // Chapter-staged options. Each mission beat with the
+                // Elder has a distinct prompt + a short response that
+                // reacts to the campaign state so repeat visits feel
+                // like a real conversation, not a repeat menu. The
+                // staged form resolves via pickStage in dialogue.open
+                // (same rule as greeting / knowledge).
+                options: {
+                    chapter1: [
+                        {
+                            label: "Who are you?",
+                            response: "I am the Elder - keeper of these grounds since before the star-fall.",
+                        },
+                        {
+                            label: "What is this place?",
+                            response: "The Sunlit Grove. Last safe haven before the dark places east.",
+                        },
+                        {
+                            label: "Is there work for me?",
+                            action: elderInteract,
+                        },
+                        { label: "Ask a question...", input: true },
+                        { label: "Goodbye.", close: true },
+                    ],
+                    chapter2: [
+                        {
+                            label: "How do I press deeper?",
+                            response: "Head east through the caverns. Their dark runs deeper than it looks - mind the echoes.",
+                        },
+                        {
+                            label: "Tell me of the Golden Key.",
+                            response: "It opens the shrine. Finish a longer hunt and I'll place it in your hand myself.",
+                        },
+                        {
+                            label: "I'm ready for more work.",
+                            action: elderInteract,
+                        },
+                        { label: "Ask a question...", input: true },
+                        { label: "Goodbye.", close: true },
+                    ],
+                    chapter3: [
+                        {
+                            label: "The shrine awaits - what should I know?",
+                            response: "The Keeper guards the heart. Strike when it rests. Do not let its rush break your line.",
+                        },
+                        {
+                            label: "What of the key I carry?",
+                            response: "Consumed by the lock. You'll know it when it turns.",
+                        },
+                        {
+                            label: "Any last advice?",
+                            response: "Take a companion if the grove will give one. No one walks the shrine alone.",
+                        },
+                        { label: "Ask a question...", input: true },
+                        { label: "Goodbye.", close: true },
+                    ],
+                    chapter4: [
+                        {
+                            label: "I stand at the threshold.",
+                            response: "Then cross. We've waited long enough. We'll be here, whatever comes.",
+                        },
+                        {
+                            label: "What if I fall?",
+                            response: "The grove remembers. So would we. But don't plan on falling - plan on the next step.",
+                        },
+                        {
+                            label: "What is the Heart, truly?",
+                            response: "A thing older than this grove. When it stops, the world stops. The Keeper was made to keep it beating.",
+                        },
+                        { label: "Ask a question...", input: true },
+                        { label: "Goodbye.", close: true },
+                    ],
+                    chapter5: [
+                        {
+                            label: "It is done.",
+                            response: "It is done. The grove breathes easier tonight because of you.",
+                        },
+                        {
+                            label: "What now?",
+                            response: "Now we rest. And watch the deeper dark - in case it is not yet done with us.",
+                        },
+                        {
+                            label: "Was this the plan all along?",
+                            response: "No plan. Only hope, and you. That was enough, as it turns out.",
+                        },
+                        { label: "Ask a question...", input: true },
+                        { label: "Goodbye.", close: true },
+                    ],
+                    chapter6: [
+                        {
+                            label: "The Abyss opened beneath us.",
+                            response: "It was never closed. Only quiet. Now it listens - so listen back.",
+                        },
+                        {
+                            label: "Will you come with me?",
+                            response: "I cannot. I am the grove's anchor. But my voice, and my thanks, and whatever blade you find on your way - those go with you.",
+                        },
+                        {
+                            label: "Is there a way to end it?",
+                            response: "Endings are rare. Better to bind what you cannot kill. Carry the light down with you.",
+                        },
+                        { label: "Ask a question...", input: true },
+                        { label: "Goodbye.", close: true },
+                    ],
+                },
                 knowledge: [
                     { keywords: ["name", "who are", "elder"], response: "I am the Elder - keeper of the grove." },
                     { keywords: ["grove", "place", "town", "city"], response: "The Sunlit Grove. The star-fall spared it for a reason." },
