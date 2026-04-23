@@ -5343,17 +5343,27 @@
     // avoids a class hierarchy since these don't share enough with
     // Enemy / Npc to be worth inheriting.
     const lightCreatures = [];
-    const WILD_LIGHT_SPAWN_CHANCE = 0.22;  // per zone entry
+    // Biome-aware rates per level id. Cities are "sightings at the
+    // outskirts" (low), dungeon edges are "reinforcements crossing
+    // over" (mid), and the Abyss is a special area - the veil is
+    // thin there, so sightings are notably more common.
+    const WILD_LIGHT_BIOME_RATE = {
+        grove:      0.16,
+        port_halen: 0.20,
+        emberhold:  0.18,
+        caverns:    0.22,
+        shrine:     0.24,
+        abyss:      0.42,   // special area - sightings feel common
+    };
+    const WILD_LIGHT_DEFAULT_RATE = 0.15;
 
-    // Spawn roll: runs once per hostile / safe zone seed. Skips
-    // interiors entirely and biases the species mix by chapter so
-    // rare encounters feel like progression.
     function maybeSpawnWildLightCreature(level) {
         if (!level || level.isInterior) return;
         // One wild creature at a time - skip if there's already a
         // wild one in the world.
         for (const c of lightCreatures) if (c.state === "wild") return;
-        if (Math.random() > WILD_LIGHT_SPAWN_CHANCE) return;
+        const rate = WILD_LIGHT_BIOME_RATE[level.id] ?? WILD_LIGHT_DEFAULT_RATE;
+        if (Math.random() > rate) return;
 
         // Pick a species, slightly weighted by chapter so early runs
         // see more wolves (basic) and late runs see more stags
@@ -5620,15 +5630,22 @@
             } else {
                 // Follow: drift behind the player with per-creature
                 // slot offset so multiple creatures don't stack.
+                // When no enemies are nearby the creature also adds
+                // a small roam offset per-phase so the "resting"
+                // formation doesn't look rigid - they circle the
+                // player instead of locking to a grid slot.
                 const slotIdx = lightCreatures.indexOf(c);
                 const offX = -40 + (slotIdx * 28);
                 const offY = -34 + (slotIdx % 2) * 8;
-                const tx = pcx + offX;
-                const ty = pcy + offY;
+                const hasEnemy = !!nearestHostileForLight(c);
+                const roamX = hasEnemy ? 0 : Math.cos(c.phase * 0.7) * 14;
+                const roamY = hasEnemy ? 0 : Math.sin(c.phase * 0.5) * 8;
+                const tx = pcx + offX + roamX;
+                const ty = pcy + offY + roamY;
                 const dx = tx - (c.x + c.width / 2);
                 const dy = ty - (c.y + c.height / 2);
                 const dist = Math.hypot(dx, dy);
-                if (dist > 12) {
+                if (dist > 10) {
                     const step = Math.min(dist, c.species.speed * 0.55 * dt);
                     c.x += (dx / dist) * step;
                     c.y += (dy / dist) * step;
@@ -5646,13 +5663,25 @@
             const cy = c.y + c.height / 2;
 
             // Additive aura - tinted by species, pulses with phase.
+            // Wild creatures get a bigger, slower pulse + an outer
+            // shimmer ring so they read as clearly "ethereal", not
+            // just another combatant.
+            const isWild = c.state === "wild";
             const pulse = 0.7 + 0.3 * Math.sin(c.phase);
             ctx.save();
             ctx.globalCompositeOperation = "lighter";
-            ctx.globalAlpha = 0.45 * pulse;
+            if (isWild) {
+                // Outer shimmer - wider, slower. Only on wild state.
+                ctx.globalAlpha = 0.25 * pulse;
+                ctx.fillStyle = c.species.auraColor;
+                ctx.beginPath();
+                ctx.arc(cx, cy, 32 + Math.sin(c.phase * 0.6) * 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.globalAlpha = (isWild ? 0.55 : 0.45) * pulse;
             ctx.fillStyle = c.species.auraColor;
             ctx.beginPath();
-            ctx.arc(cx, cy, 22, 0, Math.PI * 2);
+            ctx.arc(cx, cy, isWild ? 24 : 22, 0, Math.PI * 2);
             ctx.fill();
             ctx.restore();
 
@@ -13255,6 +13284,7 @@
         drawMinimap();
         drawTutorial();
         drawRecruitHint();
+        drawLightCreatureHint();
 
         if (stats.levelUpToast > 0) drawLevelUpToast();
         if (questLog.toastTimer > 0) drawQuestToast();
@@ -13594,6 +13624,63 @@
     // recruitment yet (squad still empty). Auto-hides once the
     // player has any squadmate, so it never nags the second time.
     // Hidden during modals and game-over so it doesn't stack.
+    // Light-creature hint chip. Only shows when a wild creature is
+    // near the player, prompting the "Reach out" action. Distinct
+    // chrome + tinted by the species color so it reads as a
+    // different prompt than the warrior-recruit chip.
+    function drawLightCreatureHint() {
+        if (gameState !== "playing") return;
+        if (paused || dialogue.isOpen() || shop.isOpen() ||
+            cinematic.isOpen() || scriptedDialogue.isOpen()) return;
+
+        const wild = nearestWildLightCreature();
+        if (!wild) return;
+
+        const label = `Reach out to the ${wild.species.name}`;
+        ctx.save();
+        ctx.font = "bold 13px system-ui, sans-serif";
+        const tw = ctx.measureText(label).width;
+        const padX = 16;
+        const w = Math.ceil(tw + padX * 2 + 30);  // +30 for E pip
+        const h = 34;
+        // Float above the mobile action cluster.
+        const yBase = tutorial.isActive() ? VIEW_H - 250 : VIEW_H - 220;
+        const x = Math.floor((VIEW_W - w) / 2);
+        const y = yBase;
+
+        // Panel
+        ctx.globalAlpha = 0.94;
+        roundRectPath(ctx, x, y, w, h, 7);
+        ctx.fillStyle = "rgba(18, 18, 30, 0.92)";
+        ctx.fill();
+        ctx.strokeStyle = wild.species.color;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+
+        // E pip on the left to echo the world-space bubble.
+        ctx.fillStyle = "#1a1a24";
+        ctx.beginPath();
+        ctx.arc(x + 16, y + h / 2, 10, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = wild.species.color;
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+        ctx.fillStyle = wild.species.color;
+        ctx.font = "bold 11px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("E", x + 16, y + h / 2 + 1);
+
+        // Label
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        drawShadowedText(label, x + 32, y + h / 2,
+            "#e8e8f0", "bold 13px system-ui, sans-serif");
+
+        ctx.restore();
+    }
+
     function drawRecruitHint() {
         if (gameState !== "playing") return;
         if (paused || dialogue.isOpen() || shop.isOpen() ||
