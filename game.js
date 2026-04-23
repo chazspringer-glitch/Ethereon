@@ -7480,6 +7480,155 @@
         },
     };
 
+    // ---------------------------------------------------------------
+    // Red energy beam (basic-sword upgrade)
+    //
+    // Continuous damage stream while the attack button is HELD
+    // with sword equipped. Replaces the "long hold does nothing"
+    // idle - now holding is an active crowd-control attack. The
+    // charged spin on release is preserved; the beam layers on
+    // top during the hold. Short taps still fire the normal
+    // directional swing since the beam only activates past a
+    // 0.15s threshold.
+    // ---------------------------------------------------------------
+    const redBeam = {
+        active: false,
+        tickTimer: 0,
+        tickInterval: 0.18,
+        range: 130,
+        halfWidth: 12,
+        damagePerTick: 0.6,
+
+        update(dt) {
+            const held = player.isCharging &&
+                player.chargeTime > 0.15 &&
+                currentWeapon() === swordWeapon;
+            this.active = held;
+            if (!this.active) {
+                this.tickTimer = 0;
+                return;
+            }
+            this.tickTimer -= dt;
+            if (this.tickTimer <= 0) {
+                this.tickTimer = this.tickInterval;
+                this._dealDamage();
+            }
+        },
+
+        _dealDamage() {
+            const cx = player.x + player.width / 2;
+            const cy = player.y + player.height / 2;
+            const fx = player.facing.x;
+            const fy = player.facing.y;
+            const mag = Math.hypot(fx, fy) || 1;
+            const dx = fx / mag;
+            const dy = fy / mag;
+
+            // Crown synergy: wider, slightly longer, hotter damage.
+            const crownUp = (typeof crown !== "undefined" && crown.active);
+            const widthMult = crownUp ? 1.4 : 1;
+            const rangeMult = crownUp ? 1.15 : 1;
+            const dmgMult = crownUp ? 1.3 : 1;
+
+            const halfW = this.halfWidth * widthMult;
+            const range = this.range * rangeMult;
+            const dmg = Math.max(1, Math.round(
+                (this.damagePerTick + (swordWeapon.damage - 1) * 0.4)
+                * dmgMult
+            ));
+
+            let hitAny = false;
+            for (const e of enemies) {
+                if (!e.alive || e.ally || e.neutral) continue;
+                const ecx = e.x + e.width / 2;
+                const ecy = e.y + e.height / 2;
+                const rx = ecx - cx;
+                const ry = ecy - cy;
+                const along = rx * dx + ry * dy;
+                if (along < 0 || along > range) continue;
+                const perp = Math.abs(-rx * dy + ry * dx);
+                if (perp > halfW + 10) continue;
+
+                e.takeHit(dmg, { x: cx, y: cy });
+                // Pressure: slide the enemy forward along the beam
+                // axis per tick. takeHit already pushed them away
+                // from the player; this extra slide keeps them
+                // moving even if they have knockbackScale < 1
+                // (guardians, bosses), so the beam feels like FORCE.
+                e.x += dx * 5;
+                e.y += dy * 5;
+                e.x = Math.max(0, Math.min(WORLD_W - e.width, e.x));
+                e.y = Math.max(0, Math.min(WORLD_H - e.height, e.y));
+
+                if (!e.alive) onEnemyDefeated(e);
+                if (typeof cinematicFx !== "undefined") {
+                    cinematicFx.burst(ecx, ecy, "230, 80, 80", 3);
+                }
+                hitAny = true;
+            }
+            // Hit-stop: brief slow-mo on any connecting tick so
+            // each impact registers with weight. Very short so
+            // movement stays responsive.
+            if (hitAny) {
+                specialAttack.slowMoTimer = Math.max(
+                    specialAttack.slowMoTimer, 0.04
+                );
+            }
+        },
+
+        draw(ctx) {
+            if (!this.active) return;
+            const cx = player.x + player.width / 2;
+            const cy = player.y + player.height / 2;
+            const fx = player.facing.x;
+            const fy = player.facing.y;
+            const mag = Math.hypot(fx, fy) || 1;
+            const dx = fx / mag;
+            const dy = fy / mag;
+
+            const crownUp = (typeof crown !== "undefined" && crown.active);
+            const widthMult = crownUp ? 1.4 : 1;
+            const rangeMult = crownUp ? 1.15 : 1;
+            const halfW = this.halfWidth * widthMult;
+            const range = this.range * rangeMult;
+
+            const now = performance.now();
+            const flicker = 0.85 + 0.15 * Math.sin(now * 0.04);
+            const pulse = crownUp ? 1.25 : 1;
+
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate(Math.atan2(dy, dx));
+
+            // Outer glow - wide crimson halo.
+            ctx.globalAlpha = 0.38 * flicker * pulse;
+            ctx.fillStyle = "#c5243a";
+            ctx.fillRect(0, -halfW * 1.8, range, halfW * 3.6);
+            // Main core - bright red body.
+            ctx.globalAlpha = 0.85 * flicker;
+            ctx.fillStyle = "#ff6a6a";
+            ctx.fillRect(0, -halfW, range, halfW * 2);
+            // White-hot center line so the beam reads as a blade.
+            ctx.globalAlpha = flicker;
+            ctx.fillStyle = "#ffeeee";
+            ctx.fillRect(0, -2, range, 4);
+
+            // Origin burst at the player's hand.
+            ctx.globalAlpha = 0.75 * flicker * pulse;
+            ctx.fillStyle = "#ffc0c0";
+            ctx.beginPath();
+            ctx.arc(0, 0, 6 + (crownUp ? 2 : 0), 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.restore();
+        },
+
+        reset() {
+            this.active = false;
+            this.tickTimer = 0;
+        },
+    };
+
     function updateSwordSpinCollision() {
         if (!swordSpin.isActive()) return;
         const cx = player.x + player.width / 2;
@@ -13954,6 +14103,7 @@
         specialAttack.update(dt);
         battlefieldNova.update(dt);
         swordSpin.update(dt);
+        redBeam.update(dt);
         energyBeam.update(dt);
         chargeFx.update(dt);
         playerTrail.update(dt);
@@ -14227,6 +14377,7 @@
         specialAttack.reset();
         battlefieldNova.reset();
         swordSpin.reset();
+        redBeam.reset();
         energyBeam.reset();
         chargeFx.reset();
         playerTrail.reset();
@@ -14418,6 +14569,7 @@
 
         // Sword spin - belongs to the previous run's mid-swing state.
         swordSpin.reset();
+        redBeam.reset();
         energyBeam.reset();
         chargeFx.reset();
         playerTrail.reset();
@@ -15565,6 +15717,10 @@
         // blade trail reads as swung from the player's hand rather
         // than floating above the head.
         swordSpin.draw(ctx, player);
+        // Red beam beneath the player sprite so the body silhouettes
+        // on top of the beam's origin - reads as emitted from the
+        // hand, not floating in front.
+        redBeam.draw(ctx);
         // Charged-energy beam - same world-space layer as the spin.
         // Drawn under the sprite so the player's silhouette reads on
         // top of the beam, selling it as emitted from the character.
