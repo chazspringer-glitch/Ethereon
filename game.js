@@ -1087,24 +1087,65 @@
         y: 0,
         sharpness: 8, // higher = snappier follow
 
-        // Zoom pulse: the world transform reads `scale`. `zoomPulse`
-        // eases toward a peak, holds for `hold` seconds, then eases
-        // back to 1. Ease speeds are tuned so the round trip fits in
-        // under ~0.6s even at high peak values, and re-triggering
-        // during an active pulse replaces the target rather than
-        // stacking (so mashing the input can't runaway-zoom).
+        // Composite zoom: final `scale` = pulseScale * userScale *
+        // battleScale. Each layer eases toward its own target so
+        // short pulses don't fight manual zoom or auto-battle zoom
+        // - they just multiply cleanly.
+        //
+        //   pulseScale   - short camera punches from big attacks.
+        //   userScale    - player's manual zoom level (wheel / pinch
+        //                  / buttons). Lerps to userScaleTarget.
+        //   battleScale  - auto zoom-out when the enemy crowd is
+        //                  large, so big fights read clearly.
         scale: 1,
+        pulseScale: 1,
+        userScale: 1,
+        userScaleTarget: 1,
+        battleScale: 1,
+
         _zoomTarget: 1,
         _zoomSharpness: 8,
         _pulseHold: 0,
+
+        // Manual zoom bounds and step sizes. userMin is set below
+        // 1 so players can see more of the battlefield; userMax
+        // sits just above 1 so "close" feels a little more punchy
+        // without pushing the sprite past the pixelated limit.
+        userMin: 0.65,
+        userMax: 1.20,
+        zoomStep: 0.12,
 
         zoomPulse(peak, hold) {
             this._zoomTarget = peak;
             this._pulseHold = hold;
         },
 
+        // Manual zoom controls (wheel / pinch / buttons). Target
+        // snaps, actual `userScale` lerps toward it in follow().
+        zoomIn() {
+            this.userScaleTarget = Math.min(
+                this.userMax, this.userScaleTarget + this.zoomStep
+            );
+        },
+        zoomOut() {
+            this.userScaleTarget = Math.max(
+                this.userMin, this.userScaleTarget - this.zoomStep
+            );
+        },
+        // Absolute zoom for pinch: directly set the target within
+        // bounds. Used by the pinch handler below.
+        setZoomTarget(v) {
+            this.userScaleTarget = Math.max(
+                this.userMin, Math.min(this.userMax, v)
+            );
+        },
+
         resetZoom() {
             this.scale = 1;
+            this.pulseScale = 1;
+            this.userScale = 1;
+            this.userScaleTarget = 1;
+            this.battleScale = 1;
             this._zoomTarget = 1;
             this._pulseHold = 0;
         },
@@ -1119,15 +1160,33 @@
 
             this.clamp();
 
-            // Zoom easing: decay hold -> flip target back to 1 ->
-            // ease scale toward target with the same frame-rate-
-            // independent exponential smoothing as position.
+            // --- Zoom easing ---
+            // Pulse layer: decay hold, then flip target back to 1.
             if (this._pulseHold > 0) {
                 this._pulseHold = Math.max(0, this._pulseHold - dt);
                 if (this._pulseHold === 0) this._zoomTarget = 1;
             }
             const zt = 1 - Math.exp(-this._zoomSharpness * dt);
-            this.scale += (this._zoomTarget - this.scale) * zt;
+            this.pulseScale += (this._zoomTarget - this.pulseScale) * zt;
+
+            // User layer: slow-ish ease so pinch / wheel feels
+            // smooth, not jitter-snappy.
+            const uzt = 1 - Math.exp(-5 * dt);
+            this.userScale += (this.userScaleTarget - this.userScale) * uzt;
+
+            // Battle layer: auto-zoom out on crowded fights. Only
+            // pulls downward (toward wider view); never zooms in
+            // over the player's manual target. Lerps slowly so a
+            // sudden horde doesn't whiplash the camera.
+            const n = enemies ? enemies.length : 0;
+            const battleTarget = n > 18 ? 0.82
+                               : n > 10 ? 0.90
+                               : 1.0;
+            const bzt = 1 - Math.exp(-2.5 * dt);
+            this.battleScale += (battleTarget - this.battleScale) * bzt;
+
+            // Composite. World transform reads `scale`.
+            this.scale = this.pulseScale * this.userScale * this.battleScale;
         },
 
         snap(target) {
@@ -3007,6 +3066,33 @@
         return _pointerOut;
     }
 
+    // Wheel zoom (desktop). deltaY > 0 = scroll down = zoom out.
+    // Preventdefault so the page doesn't scroll when the canvas is
+    // in the middle of a long page.
+    canvas.addEventListener("wheel", (e) => {
+        if (gameState !== "playing" || paused) return;
+        if (e.deltaY < 0) camera.zoomIn();
+        else if (e.deltaY > 0) camera.zoomOut();
+        e.preventDefault();
+    }, { passive: false });
+
+    // Pinch tracker - tracks two active pointers and computes the
+    // distance ratio between down + current. When pinch is active
+    // the joystick is suppressed so the two-finger gesture doesn't
+    // also drive movement.
+    const pinch = {
+        active: false,
+        idA: null, idB: null,
+        ax: 0, ay: 0, bx: 0, by: 0,
+        startDist: 0,
+        startScaleTarget: 1,
+    };
+    function pinchDist() {
+        const dx = pinch.ax - pinch.bx;
+        const dy = pinch.ay - pinch.by;
+        return Math.hypot(dx, dy);
+    }
+
     canvas.addEventListener("pointerdown", (e) => {
         // First touch / click on mobile unlocks audio.
         sound.resume();
@@ -3133,6 +3219,30 @@
             return;
         }
 
+        // If the joystick is already active and a SECOND finger
+        // lands on an empty area, convert the gesture into a pinch
+        // zoom. Suppress the joystick for the duration so the
+        // two-finger motion doesn't also drive movement.
+        if (!pinch.active && joystick.active &&
+            e.pointerId !== joystick.pointerId) {
+            pinch.active = true;
+            pinch.idA = joystick.pointerId;
+            pinch.idB = e.pointerId;
+            pinch.ax = joystick.stickX ?? joystick.baseX ?? x;
+            pinch.ay = joystick.stickY ?? joystick.baseY ?? y;
+            pinch.bx = x;
+            pinch.by = y;
+            pinch.startDist = pinchDist();
+            pinch.startScaleTarget = camera.userScaleTarget;
+            // Stop the joystick from steering during the pinch.
+            joystick.active = false;
+            joystick.dx = 0;
+            joystick.dy = 0;
+            canvas.setPointerCapture(e.pointerId);
+            e.preventDefault();
+            return;
+        }
+
         if (joystick.onDown(x, y, e.pointerId)) {
             // Keep receiving move/up even if the pointer leaves the
             // canvas, which is especially important for touch drags.
@@ -3142,6 +3252,19 @@
     });
 
     canvas.addEventListener("pointermove", (e) => {
+        if (pinch.active &&
+            (e.pointerId === pinch.idA || e.pointerId === pinch.idB)) {
+            const { x, y } = pointerToCanvas(e);
+            if (e.pointerId === pinch.idA) { pinch.ax = x; pinch.ay = y; }
+            else                           { pinch.bx = x; pinch.by = y; }
+            const d = pinchDist();
+            if (d > 0 && pinch.startDist > 0) {
+                const ratio = d / pinch.startDist;
+                camera.setZoomTarget(pinch.startScaleTarget * ratio);
+            }
+            e.preventDefault();
+            return;
+        }
         if (joystick.pointerId === e.pointerId) {
             const { x, y } = pointerToCanvas(e);
             joystick.onMove(x, y, e.pointerId);
@@ -3150,6 +3273,12 @@
     });
 
     function endPointer(e) {
+        if (pinch.active &&
+            (e.pointerId === pinch.idA || e.pointerId === pinch.idB)) {
+            pinch.active = false;
+            pinch.idA = pinch.idB = null;
+            return;
+        }
         joystick.onUp(e.pointerId);
         attackButton.onUp(e.pointerId);
         weaponSwapButton.onUp(e.pointerId);
@@ -8343,6 +8472,33 @@
     // collision path can target the player exclusively.
     const hostileProjectiles = [];
 
+    // World rule: ENEMY energy never uses the "light" palette
+    // (gold / cyan / white). Those are reserved for the player,
+    // NPC warriors, and town allies. Any caller that passes a
+    // light-ish color gets remapped to a dark / corrupted tone
+    // so the visual identity stays consistent across enemy types.
+    const ENEMY_DARK_PALETTE = [
+        "#b9f0c9",   // sickly green (sentinel)
+        "#c080ff",   // violet (shadow / warden)
+        "#e06666",   // blood red
+        "#ff8040",   // corrupted amber
+    ];
+    function sanitizeEnemyColor(color) {
+        if (!color) return ENEMY_DARK_PALETTE[0];
+        // Very light / golden / cyan tones are remapped. A cheap
+        // heuristic is enough here - anything starting with #ff or
+        // #fff likely reads as "light" to the player.
+        const c = color.toLowerCase();
+        if (c.startsWith("#fff") || c === "#ffd166" ||
+            c === "#8ad9ff" || c === "#eaf7ff" ||
+            c === "#fff6d6") {
+            return ENEMY_DARK_PALETTE[
+                Math.floor(Math.random() * ENEMY_DARK_PALETTE.length)
+            ];
+        }
+        return color;
+    }
+
     function spawnHostileProjectile(fromX, fromY, toX, toY, dmg, color) {
         const dx = toX - fromX;
         const dy = toY - fromY;
@@ -8355,7 +8511,8 @@
             vy: (dy / mag) * speed,
             life: 1.6,
             damage: Math.max(1, dmg | 0),
-            color: color || "#b9f0c9",
+            // Enforce the rule at the single spawn chokepoint.
+            color: sanitizeEnemyColor(color),
             age: 0, alive: true,
         });
     }
@@ -9598,10 +9755,12 @@
 
         configure(level) {
             this.baseOpts = level.enemyOpts ?? {};
-            // Per-zone tuning: caverns 3, shrine 4, abyss 5 - tougher
-            // zones fight through more waves before opening up.
-            const map = { caverns: 3, shrine: 4, abyss: 5 };
-            this.baseWaveCount = level.waveCount ?? map[level.id] ?? 3;
+            // Per-zone tuning bumped to the "longer fight" range:
+            // 8 / 10 / 12 as the base, +strength nudge up to the
+            // 20-wave cap below. Early zones stay manageable; late
+            // zones feel like real campaigns.
+            const map = { caverns: 8, shrine: 10, abyss: 12 };
+            this.baseWaveCount = level.waveCount ?? map[level.id] ?? 6;
             this.perWaveBase = Math.max(3, level.enemyCount ?? 5);
         },
 
@@ -9610,7 +9769,13 @@
         seed() {
             if (isSafeZone()) return;
             const strength = playerStrength();
-            this.totalWaves = this.baseWaveCount + Math.min(2, Math.floor(strength / 4));
+            // Strength bump up to +6 now that base waves are higher.
+            // Hard cap at 20 per spec so campaigns don't become
+            // endurance tests.
+            this.totalWaves = Math.min(
+                20,
+                this.baseWaveCount + Math.min(6, Math.floor(strength / 2))
+            );
             this.waveIndex = 0;
             this.startWave();
             if (currentLevel.boss) {
@@ -9659,9 +9824,16 @@
                 this.onAllWavesCleared();
             } else {
                 this.waveState = "intermission";
-                this.intermissionTimer = 2.5;
+                // Short break every 5 waves. Gives the player a
+                // breather and a chance to reposition + loot after
+                // a sustained push.
+                const longBreak = this.waveIndex % 5 === 0;
+                this.intermissionTimer = longBreak ? 5.0 : 2.5;
                 questLog.showToast(
-                    `Wave ${this.waveIndex} cleared!`, 1.4
+                    longBreak
+                        ? `Wave ${this.waveIndex} cleared - brief reprieve.`
+                        : `Wave ${this.waveIndex} cleared!`,
+                    longBreak ? 2.2 : 1.4
                 );
                 sound.play("levelUp");
             }
@@ -9698,27 +9870,71 @@
             // until a slot opens, so wave clear is still gated on
             // killing the full queued count.
             const MAX_ON_SCREEN = 14;
+            // Burst waves: every 4th wave drops a small cluster of
+            // enemies from multiple compass edges all at once, then
+            // continues the normal stagger. Reads as a coordinated
+            // ambush instead of an endless trickle.
+            const burstWave = (this.waveIndex + 1) % 4 === 0;
+            // Spawn cadence scales with wave depth so later waves
+            // pour in faster. Clamped so the screen never floods.
+            const baseCd = Math.max(0.18,
+                0.32 - this.waveIndex * 0.012);
             if (this.spawnQueue > 0 && enemies.length < MAX_ON_SCREEN) {
                 this.spawnTimer -= dt;
                 if (this.spawnTimer <= 0) {
-                    this.spawnTimer = 0.32;
-                    const slotIdx = this.spawnIndex;
-                    const isRare = this.rareSlots.has(slotIdx);
-                    const base = isRare
-                        ? rareOpts(this.currentOpts)
-                        : this.currentOpts;
-                    // Attach the per-slot faction id so the Enemy
-                    // constructor can layer faction presets.
-                    const faction = this.currentFactions[slotIdx] || null;
-                    const opts = faction
-                        ? Object.assign({}, base, { faction })
-                        : base;
-                    const spot = this.findSpot();
-                    if (spot) spawnEnemy(spot.x, spot.y, opts);
-                    this.spawnQueue--;
-                    this.spawnIndex++;
+                    // Burst wave: spawn up to 3 enemies in a single
+                    // tick from different directions. Regular waves
+                    // keep the 1-per-tick stagger.
+                    const batch = burstWave ? 3 : 1;
+                    for (let b = 0; b < batch; b++) {
+                        if (this.spawnQueue <= 0) break;
+                        if (enemies.length >= MAX_ON_SCREEN) break;
+                        const slotIdx = this.spawnIndex;
+                        const isRare = this.rareSlots.has(slotIdx);
+                        const base = isRare
+                            ? rareOpts(this.currentOpts)
+                            : this.currentOpts;
+                        const faction = this.currentFactions[slotIdx] || null;
+                        const opts = faction
+                            ? Object.assign({}, base, { faction })
+                            : base;
+                        // Burst spawns fan out around the player on
+                        // a specific edge per slot so the ambush
+                        // reads as "from all sides". Regular waves
+                        // use the classic random world-space spot.
+                        const spot = burstWave
+                            ? this.findEdgeSpot(b)
+                            : this.findSpot();
+                        if (spot) spawnEnemy(spot.x, spot.y, opts);
+                        this.spawnQueue--;
+                        this.spawnIndex++;
+                    }
+                    this.spawnTimer = burstWave ? 0.7 : baseCd;
                 }
             }
+        },
+
+        // Cluster spawn: picks a point on one of four compass edges
+        // around the player, ~300px out, so burst-wave enemies come
+        // from distinct directions rather than one hot spot.
+        findEdgeSpot(slot) {
+            const pcx = player.x + player.width / 2;
+            const pcy = player.y + player.height / 2;
+            const side = slot % 4;
+            const dist = 300;
+            let x, y;
+            if (side === 0)      { x = pcx; y = pcy - dist; }
+            else if (side === 1) { x = pcx; y = pcy + dist; }
+            else if (side === 2) { x = pcx - dist; y = pcy; }
+            else                 { x = pcx + dist; y = pcy; }
+            // Small jitter so spawns don't all snap to the exact
+            // cardinal axes.
+            x += (Math.random() - 0.5) * 80;
+            y += (Math.random() - 0.5) * 80;
+            // Clamp to the world.
+            x = Math.max(this.margin, Math.min(WORLD_W - this.margin, x));
+            y = Math.max(this.margin, Math.min(WORLD_H - this.margin, y));
+            return { x, y };
         },
 
         reset() {
@@ -13646,6 +13862,16 @@
         // Inventory toggle - edge-triggered, alive-only.
         if (keysJustPressed["i"] || keysJustPressed["I"]) {
             inventoryOpen = !inventoryOpen;
+        }
+
+        // Keyboard zoom - = / + zoom in, - / _ zoom out. Wheel and
+        // pinch are handled via pointer / wheel listeners; these
+        // are just a keyboard fallback.
+        if (keysJustPressed["="] || keysJustPressed["+"]) {
+            camera.zoomIn();
+        }
+        if (keysJustPressed["-"] || keysJustPressed["_"]) {
+            camera.zoomOut();
         }
 
         // Debug overlay toggle.
