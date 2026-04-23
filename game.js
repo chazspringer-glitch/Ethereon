@@ -424,6 +424,26 @@
                     lockedMessage: 'The shrine gate is sealed. You need a Golden Key.',
                 },
             },
+            // Chapter-3 mid-boss: Throne Warden. The three-phase AI
+            // is gated by `multiPhase: true` so the Boss class's
+            // phase logic fires only for this boss. Spawns only
+            // once the player has actually reached chapter 3 (via
+            // spawnBoss's chapterGate check) so early cavern runs
+            // aren't blocked by a boss the player isn't ready for.
+            boss: {
+                name: "Throne Warden",
+                // South-center of the caverns so the player meets
+                // it mid-zone, not at the entrance.
+                x: 2400 / 2 - 32,
+                y: 1792 / 2 - 32,
+                hp: 60,
+                speed: 58,
+                reward: 400,
+                xpReward: 120,
+                contactDamage: 22,
+                multiPhase: true,
+                chapterGate: "chapter3",
+            },
             npcs: [],
             // Lore discoveries scattered along the cavern path.
             // Each piece reveals a sliver of pre-fall history so
@@ -7691,6 +7711,9 @@
             }
             // Pack bonus accumulator (hunter).
             this._packBonus = 1;
+            // Phase-transition i-frames, used by multi-phase bosses.
+            // Zero on regular enemies so takeHit's gate is a no-op.
+            this.phaseInvincibleTimer = 0;
 
             // --- Variant / visual / behavior layer ---
             // Variants scale stats on top of whatever faction already
@@ -8029,6 +8052,13 @@
         }
 
         takeHit(damage = 1, from = null) {
+            // Multi-phase bosses get a short i-frame window on each
+            // phase transition so the player can't delete the next
+            // phase in the first half-second. No-op on regular enemies.
+            if (this.phaseInvincibleTimer > 0) {
+                this.hitFlash = this.hitFlashDuration * 0.4;
+                return;
+            }
             this.hp -= damage;
             this.hitFlash = this.hitFlashDuration;
             sound.play("enemyHit");
@@ -8132,6 +8162,93 @@
             this.chargeDuration = 0.55;      // dash window
             this.chargeSpeedMultiplier = 4;  // of base speed
             this.recoverDuration = 1.2;      // vulnerable pause
+
+            // Multi-phase mode (Throne Warden). Off by default so
+            // the Shrine Keeper keeps its existing single-phase AI.
+            // When on, HP thresholds at 66% and 33% flip phase state
+            // and retune stalk / windup / recover cadence on the fly.
+            this.multiPhase = !!opts.multiPhase;
+            this.phase = 1;
+            this.phaseInvincibleTimer = 0;    // >0 -> takeHit() is a no-op
+            this.rangedCd = 0;
+            this.targetIndex = 0;             // round-robin: player, squad[0], ...
+            if (this.multiPhase) this._applyPhase(1);
+        }
+
+        _applyPhase(n) {
+            this.phase = n;
+            if (n === 1) {
+                // Slow + heavy: long telegraphs, short stalk bursts,
+                // hits hard but forgiving windows for the player to
+                // learn the pattern.
+                this.speed = 58;
+                this.stalkDuration = 2.0;
+                this.windUpDuration = 0.55;
+                this.recoverDuration = 1.3;
+                this.chargeSpeedMultiplier = 4.0;
+                this.contactDamage = 22;
+                this.rangedCd = Infinity;
+            } else if (n === 2) {
+                // Faster + ranged: shorter cycles plus periodic
+                // projectile volleys between charges so the player
+                // can't just sit outside melee range.
+                this.speed = 86;
+                this.stalkDuration = 1.4;
+                this.windUpDuration = 0.38;
+                this.recoverDuration = 1.0;
+                this.chargeSpeedMultiplier = 4.6;
+                this.contactDamage = 24;
+                this.rangedCd = 1.5;
+            } else {
+                // Aggressive + cinematic: tight windows, big speed,
+                // ranged volleys still firing so the phase reads as
+                // "everything at once". flash + shake on each charge.
+                this.speed = 108;
+                this.stalkDuration = 0.9;
+                this.windUpDuration = 0.28;
+                this.recoverDuration = 0.7;
+                this.chargeSpeedMultiplier = 5.2;
+                this.contactDamage = 28;
+                this.rangedCd = 1.0;
+            }
+        }
+
+        _checkPhaseTransition() {
+            if (!this.multiPhase) return;
+            const frac = this.hp / this.maxHp;
+            const want = frac > 0.66 ? 1 : frac > 0.33 ? 2 : 3;
+            if (want !== this.phase) {
+                const newPhase = want;
+                this._applyPhase(newPhase);
+                // Phase transition cinematic. Short i-frame window
+                // + flash + shake + zoom + toast so the change
+                // reads as a beat, not a stat flicker.
+                this.phaseInvincibleTimer = 0.9;
+                this.behavior = "stalk";
+                this.stateTimer = 0.9;
+                flash.trigger(0.7, 0.35);
+                shake.trigger(18, 0.45);
+                camera.zoomPulse(1.1, 0.3);
+                questLog.showToast(
+                    newPhase === 2
+                        ? `${this.name}: shift - ranged fury!`
+                        : `${this.name}: final stand!`,
+                    2.4
+                );
+                sound.play("super");
+            }
+        }
+
+        _currentTarget(player) {
+            // Round-robin between the player and any live squad
+            // members. Reshuffle each time stalk starts so the
+            // target isn't predictable.
+            const candidates = [player];
+            for (const f of followers) {
+                if (f.hp > 0) candidates.push(f);
+            }
+            const idx = this.targetIndex % candidates.length;
+            return candidates[idx];
         }
 
         update(dt, target) {
@@ -8139,13 +8256,56 @@
             if (this.hitFlash > 0) {
                 this.hitFlash = Math.max(0, this.hitFlash - dt);
             }
+            if (this.phaseInvincibleTimer > 0) {
+                this.phaseInvincibleTimer = Math.max(
+                    0, this.phaseInvincibleTimer - dt
+                );
+            }
+
+            // Multi-phase target routing: rotate between player +
+            // live squad members each stalk cycle. Falls through to
+            // the caller's target when multiPhase is off.
+            const aimedTarget = this.multiPhase
+                ? this._currentTarget(player)
+                : target;
 
             this.stateTimer -= dt;
             this.bobPhase += dt * 3;
 
+            // Phase 2+: ranged volley during stalk / recover windows
+            // so the boss isn't only dangerous at melee.
+            if (this.multiPhase && this.phase >= 2 && this.alive) {
+                this.rangedCd -= dt;
+                if (this.rangedCd <= 0 &&
+                    (this.behavior === "stalk" || this.behavior === "recover")) {
+                    const base = 1.8 - (this.phase - 2) * 0.4;
+                    this.rangedCd = base;
+                    const cx = this.x + this.width / 2;
+                    const cy = this.y + this.height / 2;
+                    const tx = aimedTarget.x + aimedTarget.width / 2;
+                    const ty = aimedTarget.y + aimedTarget.height / 2;
+                    // 1 bolt in phase 2, 3 in phase 3 (a fan pattern).
+                    const volley = this.phase >= 3 ? 3 : 1;
+                    for (let i = 0; i < volley; i++) {
+                        const spread = (i - (volley - 1) / 2) * 0.18;
+                        const dx = tx - cx;
+                        const dy = ty - cy;
+                        const ang = Math.atan2(dy, dx) + spread;
+                        const far = 240;
+                        spawnHostileProjectile(
+                            cx, cy,
+                            cx + Math.cos(ang) * far,
+                            cy + Math.sin(ang) * far,
+                            Math.max(1, Math.round(this.contactDamage * 0.35)),
+                            this.phase >= 3 ? "#ffa040" : "#c080ff"
+                        );
+                    }
+                }
+            }
+
             switch (this.behavior) {
                 case "stalk":
-                    this._stepToward(target, this.speed, dt);
+                    this._stepToward(aimedTarget, this.speed, dt);
                     if (this.stateTimer <= 0) {
                         this.behavior = "windup";
                         this.stateTimer = this.windUpDuration;
@@ -8159,8 +8319,8 @@
                         // Lock in the charge direction at this moment.
                         const cx = this.x + this.width / 2;
                         const cy = this.y + this.height / 2;
-                        const tx = target.x + target.width / 2;
-                        const ty = target.y + target.height / 2;
+                        const tx = aimedTarget.x + aimedTarget.width / 2;
+                        const ty = aimedTarget.y + aimedTarget.height / 2;
                         const dx = tx - cx;
                         const dy = ty - cy;
                         const d = Math.hypot(dx, dy) || 1;
@@ -8169,6 +8329,12 @@
                         this.chargeVy = (dy / d) * s;
                         this.behavior = "charge";
                         this.stateTimer = this.chargeDuration;
+                        // Phase 3 punches in extra weight on each
+                        // charge start so the finale reads cinematic.
+                        if (this.multiPhase && this.phase >= 3) {
+                            shake.trigger(10, 0.18);
+                            flash.trigger(0.25, 0.12);
+                        }
                     }
                     break;
 
@@ -8189,9 +8355,17 @@
                     if (this.stateTimer <= 0) {
                         this.behavior = "stalk";
                         this.stateTimer = this.stalkDuration + Math.random() * 0.8;
+                        // Cycle to the next target after each full
+                        // charge cycle so the boss doesn't tunnel on
+                        // one unit.
+                        if (this.multiPhase) this.targetIndex++;
                     }
                     break;
             }
+
+            // After behavior step, re-check phase thresholds - if a
+            // player hit crossed one last frame, transition now.
+            this._checkPhaseTransition();
         }
 
         _stepToward(target, speed, dt) {
@@ -8293,10 +8467,56 @@
     // restart like the door-lock set.
     const defeatedBosses = new Set();
 
+    // Spawn up to 4 reserve recruits as ally "skirmishers" at the
+    // start of a hostile zone. Each skirmisher is a basic Enemy
+    // instance with ally + neutral flags matching the allied-guardian
+    // contract, so the existing ally AI + damage routing apply with
+    // no new pipeline. Damage and hp are modest so they support the
+    // player rather than trivializing waves.
+    //
+    // Positions fan out in a short arc behind the player so the
+    // battle reads as "you brought a line", not a surprise drop.
+    function spawnReserveSkirmishers() {
+        const reserves = companions.reserveCount();
+        if (reserves <= 0) return;
+        const count = Math.min(4, reserves);
+        const pcx = player.x + player.width / 2;
+        const pcy = player.y + player.height / 2;
+        const slots = [
+            { dx: -64, dy:  40 },
+            { dx:  64, dy:  40 },
+            { dx: -96, dy:   0 },
+            { dx:  96, dy:   0 },
+        ];
+        for (let i = 0; i < count; i++) {
+            const s = slots[i];
+            const e = new Enemy(pcx + s.dx - 16, pcy + s.dy - 16, {
+                hp: 12, speed: 80, contactDamage: 4,
+                reward: 0, xpReward: 0,
+            });
+            // Flip to ally after construction so the normal ally /
+            // neutral collision paths kick in. Also skip the elite
+            // ring + faction tint by leaving faction unset.
+            e.ally = true;
+            e.neutral = false;
+            e.isSkirmisher = true;
+            // Small visual: grey-green tint so they read as friendly
+            // irregulars, not enemies.
+            e.colorTint = "rgba(120, 180, 120, 0.35)";
+            enemies.push(e);
+        }
+    }
+
     function spawnBoss(config, levelId) {
         if (!config) return null;
         if (defeatedBosses.has(levelId)) return null;
         if (enemies.length >= MAX_ENEMIES) return null;
+        // Story gate: if the boss config carries a chapterGate, only
+        // spawn the boss when the player has reached that chapter.
+        // Avoids surfacing a chapter-3 boss during chapter-1 scouting.
+        if (config.chapterGate && !story.atLeast(config.chapterGate)) {
+            return null;
+        }
         const boss = new Boss(config.x, config.y, { ...config, levelId });
         enemies.push(boss);
         return boss;
@@ -8528,6 +8748,11 @@
             if (currentLevel.boss) {
                 spawnBoss(currentLevel.boss, currentLevel.id);
             }
+            // Large-scale battle: reserve recruits spawn as ally
+            // skirmishers in hostile zones. Bounded so the screen
+            // doesn't flood - only as many as 4 at a time, even if
+            // the player has 20 reserves.
+            spawnReserveSkirmishers();
         },
 
         startWave() {
@@ -9308,7 +9533,12 @@
     // up live NPC refs by id.
     const companions = {
         baseMax: 2,
-        hardCap: 6,
+        // Lifetime recruit cap. The live-follower cap below keeps
+        // the formation readable; extras become reserves that appear
+        // as skirmishers in hostile zones and fade in/out with the
+        // player's range.
+        hardCap: 25,
+        activeCap: 6,
 
         maxSize() {
             // Per-chapter growth: chapter1 (idx 0) = 2, +1 per
@@ -9365,13 +9595,39 @@
             npc.attackCooldownTimer = Math.random() * 0.35;
             npc.attackFlashTimer = 0;  // brief on-strike hit-flash cue
 
-            followers.push(npc);
+            // Active-follower cap: only the first N recruits actively
+            // follow the player. Extras are reserves - tracked on
+            // player.squad but parked in their home zone until the
+            // active slot frees up (or a hostile zone promotes them
+            // into a skirmisher). reserve=true on the NPC signals
+            // skip-follower-tick.
+            if (followers.length < this.activeCap) {
+                followers.push(npc);
+                npc.reserve = false;
+            } else {
+                // Reserve: put them back in the home zone's list so
+                // they keep wandering their old spot, but flagged so
+                // future promotions can find them quickly.
+                npc.reserve = true;
+                const home = LEVELS[npc.homeLevelId];
+                if (home && home.npcs && home.npcs.indexOf(npc) === -1) {
+                    npc.x = npc.homeX;
+                    npc.y = npc.homeY;
+                    home.npcs.push(npc);
+                }
+            }
             player.squad.push({
                 id: npc.id, name: npc.name, role: npc.role,
                 squadRole: roleCfg.id,
             });
             snapFollowersToPlayer();
             tutorial.onRecruit();
+        },
+
+        // Count of recruited warriors NOT currently in the active
+        // follower slot - used by HUD + skirmisher spawning.
+        reserveCount() {
+            return Math.max(0, player.squad.length - followers.length);
         },
 
         // Return every active follower to their home zone's npcs
@@ -13031,7 +13287,10 @@
         const n = player.squad.length;
         if (n === 0 && max <= companions.baseMax) return;
 
-        const w = 84;
+        // Width widens when the player has reserves - an extra
+        // "+N res" badge fits inside the same chip.
+        const reserves = companions.reserveCount();
+        const w = reserves > 0 ? 128 : 84;
         const h = 22;
         // Pause button is at (VIEW_W - 48, 12) with w=36, h=36, so
         // it ends near y=48. Tuck the readout just below.
@@ -13055,8 +13314,18 @@
         ctx.textAlign = "right";
         // Bright gold when you have room to recruit, dim when capped.
         const color = n < max ? "#ffd166" : "#e0a050";
-        drawShadowedText(`${n}/${max}`, x + w - 8, y + h / 2,
+        const activeN = Math.min(n, followers.length);
+        // Format: active/cap  [ +res ]  so the player sees both
+        // the live follower count and how many skirmishers are
+        // queued to join battles.
+        drawShadowedText(`${activeN}/${max}`, x + w - 8, y + h / 2,
             color, "bold 13px system-ui, sans-serif");
+        if (reserves > 0) {
+            // Put the reserve badge left of the n/max readout.
+            ctx.textAlign = "right";
+            drawShadowedText(`+${reserves}`, x + w - 40, y + h / 2,
+                "#7ad17a", "bold 12px system-ui, sans-serif");
+        }
         ctx.restore();
     }
 
