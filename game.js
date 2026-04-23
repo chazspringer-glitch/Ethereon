@@ -14005,12 +14005,81 @@
         ctx.textBaseline = "top";
         drawShadowedText("PAUSED", x + w / 2, y + 14,
             "#ffd166", "bold 19px system-ui, sans-serif");
-        drawShadowedText(`Chapter ${story.chapterOrder.indexOf(story.state) + 1} - ${story.title()}`,
+        drawShadowedText(
+            `Chapter ${story.chapterOrder.indexOf(story.state) + 1} - ${story.title()}`,
             x + w / 2, y + 38,
             "#a0a0b8", "11px system-ui, sans-serif");
 
-        // --- Section 1: Missions timeline -------------------------
+        // --- Section: Chapters timeline ---------------------------
+        // Full campaign arc laid out horizontally so the player sees
+        // all six beats at once, with past (green) / current (gold)
+        // / future (dim) coded by color. Sits above missions so it
+        // reads as the top-level "where am I in the story?" map.
         let sy = y + 62;
+        ctx.textAlign = "left";
+        drawShadowedText("CHAPTERS", x + 20, sy,
+            "#8ad9ff", "bold 11px system-ui, sans-serif");
+        sy += 18;
+
+        const curChapterIdx = story.chapterOrder.indexOf(story.state);
+        const chCount = story.chapterOrder.length;
+        const chTrackX = x + 20;
+        const chTrackW = w - 40;
+        const chTrackY = sy + 14;  // dot centerline
+
+        // Connecting line under the dots.
+        ctx.strokeStyle = "rgba(138, 217, 255, 0.35)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(chTrackX + 10, chTrackY);
+        ctx.lineTo(chTrackX + chTrackW - 10, chTrackY);
+        ctx.stroke();
+
+        for (let i = 0; i < chCount; i++) {
+            const chId = story.chapterOrder[i];
+            const info = CHAPTERS[chId] || { title: chId };
+            const cx = chTrackX + 10 + (i / (chCount - 1)) * (chTrackW - 20);
+            const done = i < curChapterIdx;
+            const isHere = i === curChapterIdx;
+            let fill = done ? "#7ad17a" : isHere ? "#ffd166" : "#555562";
+            let rim  = done ? "rgba(122, 209, 122, 0.85)"
+                    : isHere ? "#fff6d6"
+                    : "rgba(85, 85, 98, 0.8)";
+            ctx.fillStyle = fill;
+            ctx.beginPath();
+            ctx.arc(cx, chTrackY, isHere ? 7 : 5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = rim;
+            ctx.lineWidth = isHere ? 2 : 1.25;
+            ctx.beginPath();
+            ctx.arc(cx, chTrackY, isHere ? 9 : 6, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Chapter number above the dot.
+            ctx.textAlign = "center";
+            ctx.textBaseline = "bottom";
+            drawShadowedText(String(i + 1),
+                cx, chTrackY - 8,
+                isHere ? "#ffd166" : done ? "#7ad17a" : "#787888",
+                isHere ? "bold 11px system-ui, sans-serif"
+                       : "bold 10px system-ui, sans-serif");
+        }
+
+        // Current chapter title underneath the track so the player
+        // sees the full chapter name, not just a number.
+        const curTitle = CHAPTERS[story.state]
+            ? CHAPTERS[story.state].title
+            : story.title();
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        drawShadowedText(
+            `${curChapterIdx + 1}/${chCount} - ${curTitle}`,
+            x + w / 2, chTrackY + 14,
+            "#e8e8f0", "bold 11px system-ui, sans-serif");
+
+        sy = chTrackY + 34;
+
+        // --- Section: Missions timeline ---------------------------
         ctx.textAlign = "left";
         drawShadowedText("MISSIONS", x + 20, sy,
             "#8ad9ff", "bold 11px system-ui, sans-serif");
