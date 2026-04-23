@@ -3722,6 +3722,169 @@
     })();
 
     // ---------------------------------------------------------------
+    // Player particle trail
+    //
+    // Tiny bright motes dropped behind the player proportional to
+    // move velocity. Preallocated pool (no per-frame alloc); fades
+    // in ~0.35s. Layered on top of the cloak + aura - cloak handles
+    // the cloth sweep, trail handles the "energy after-image" when
+    // moving fast. burst() is called by charged-attack releases for
+    // an extra punch of brighter motes.
+    // ---------------------------------------------------------------
+    const playerTrail = (function () {
+        const CAP = 16;
+        const pool = new Array(CAP);
+        for (let i = 0; i < CAP; i++) {
+            pool[i] = { x: 0, y: 0, life: 0, maxLife: 0.35, size: 1, alive: false };
+        }
+        function respawn(p, x, y, life, size) {
+            p.x = x; p.y = y;
+            p.life = 0;
+            p.maxLife = life;
+            p.size = size;
+            p.alive = true;
+        }
+        let spawnAccum = 0;
+        return {
+            update(dt) {
+                const speed = Math.hypot(player.vx, player.vy);
+                if (speed > 40) {
+                    spawnAccum += (speed / 80) * dt * 8;
+                    while (spawnAccum >= 1) {
+                        spawnAccum -= 1;
+                        for (const p of pool) {
+                            if (!p.alive) {
+                                const jx = (Math.random() - 0.5) * 10;
+                                const jy = (Math.random() - 0.5) * 6;
+                                respawn(p,
+                                    player.x + player.width / 2 + jx,
+                                    player.y + player.height - 2 + jy,
+                                    0.32 + Math.random() * 0.15,
+                                    1 + Math.random() * 1.2);
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    spawnAccum = 0;
+                }
+                for (const p of pool) {
+                    if (!p.alive) continue;
+                    p.life += dt;
+                    if (p.life >= p.maxLife) p.alive = false;
+                }
+            },
+            burst(count, size, life) {
+                let spawned = 0;
+                for (const p of pool) {
+                    if (spawned >= count) break;
+                    if (p.alive) continue;
+                    const ang = Math.random() * Math.PI * 2;
+                    const r = 10 + Math.random() * 12;
+                    respawn(p,
+                        player.x + player.width / 2 + Math.cos(ang) * r,
+                        player.y + player.height / 2 + Math.sin(ang) * r,
+                        life, size);
+                    spawned++;
+                }
+            },
+            draw(ctx) {
+                for (const p of pool) {
+                    if (!p.alive) continue;
+                    const t = p.life / p.maxLife;
+                    const a = (1 - t) * 0.85;
+                    ctx.globalAlpha = a;
+                    ctx.fillStyle = "rgba(255, 230, 180, 1)";
+                    ctx.fillRect(
+                        Math.round(p.x - p.size / 2),
+                        Math.round(p.y - p.size / 2),
+                        p.size, p.size
+                    );
+                }
+                ctx.globalAlpha = 1;
+            },
+            reset() {
+                for (const p of pool) p.alive = false;
+                spawnAccum = 0;
+            },
+        };
+    })();
+
+    // ---------------------------------------------------------------
+    // Ambient environment particles
+    //
+    // 14 preallocated motes that drift upward across the viewport
+    // with a soft flicker. Palette shifts by zone: warm gold in
+    // safe zones, cool blue in hostile zones, violet in corrupting
+    // zones. Respawns at the bottom of the current viewport so it
+    // follows the camera without any cull bookkeeping.
+    // ---------------------------------------------------------------
+    const ambientParticles = (function () {
+        const CAP = 14;
+        const motes = new Array(CAP);
+        for (let i = 0; i < CAP; i++) {
+            motes[i] = { x: 0, y: 0, vx: 0, vy: 0,
+                         life: 0, maxLife: 1, size: 1, alive: false };
+        }
+        function respawn(m) {
+            m.x = camera.x + Math.random() * VIEW_W;
+            m.y = camera.y + VIEW_H - Math.random() * 40;
+            m.vx = (Math.random() - 0.5) * 8;
+            m.vy = -6 - Math.random() * 10;
+            m.life = 0;
+            m.maxLife = 3 + Math.random() * 2.5;
+            m.size = 1 + Math.random() * 1.2;
+            m.alive = true;
+        }
+        function paletteFor(level) {
+            if (!level) return "255, 220, 150";
+            if (level.corrupting) return "170, 110, 220";
+            if (!level.safe)       return "150, 170, 220";
+            return "255, 220, 150";
+        }
+        return {
+            update(dt) {
+                let live = 0;
+                for (const m of motes) {
+                    if (!m.alive) continue;
+                    m.life += dt;
+                    m.x += m.vx * dt;
+                    m.y += m.vy * dt;
+                    m.vx *= 0.99;
+                    if (m.life >= m.maxLife) m.alive = false;
+                    else live++;
+                }
+                const target = 10;
+                for (const m of motes) {
+                    if (live >= target) break;
+                    if (!m.alive) { respawn(m); live++; }
+                }
+            },
+            draw(ctx) {
+                const rgb = paletteFor(currentLevel);
+                for (const m of motes) {
+                    if (!m.alive) continue;
+                    const frac = m.life / m.maxLife;
+                    const fade = frac < 0.1 ? frac / 0.1
+                               : frac > 0.7 ? 1 - (frac - 0.7) / 0.3
+                               : 1;
+                    const flicker = 0.6 + 0.4 * Math.abs(Math.sin(m.life * 4));
+                    const a = fade * flicker * 0.45;
+                    ctx.fillStyle = `rgba(${rgb}, ${a.toFixed(3)})`;
+                    ctx.fillRect(
+                        Math.round(m.x - m.size / 2),
+                        Math.round(m.y - m.size / 2),
+                        m.size, m.size
+                    );
+                }
+            },
+            reset() {
+                for (const m of motes) m.alive = false;
+            },
+        };
+    })();
+
+    // ---------------------------------------------------------------
     // Corruption
     //
     // A normalized 0..1 value that rises while the player lingers in
@@ -9944,6 +10107,21 @@
         });
     }
 
+    // NPC variant classifier. Pure string-matching over role / id
+    // so the existing NPC configs don't need to be rewritten - we
+    // just infer a category once and cache on the instance.
+    function resolveNpcVariant(n) {
+        if (n._variant) return n._variant;
+        let v = "villager";
+        if (n.role === "warrior")                    v = "warrior";
+        else if (n.id === "elder")                   v = "elder";
+        else if (/merchant|fish|stall|keep|market|smith|carver/i
+            .test(n.id || "") ||
+            /merchant|smith|carver|seller/i.test(n.name || "")) v = "merchant";
+        n._variant = v;
+        return v;
+    }
+
     function drawNpc(ctx, n) {
         const x = Math.round(n.x);
         const y = Math.round(n.y);
@@ -9979,6 +10157,26 @@
         ctx.fillStyle = "#1a1a24";
         ctx.fillRect(x + 13, y + 10 + bob, 2, 2);
         ctx.fillRect(x + 17, y + 10 + bob, 2, 2);
+
+        // Subtle per-variant decoration. Each touch is 1-3 pixels
+        // so the base sprite stays recognizable - warriors gleam a
+        // little, elders wear a richer hat, merchants show a coin
+        // on the sash. Villagers (default) get nothing.
+        const variant = resolveNpcVariant(n);
+        if (variant === "warrior") {
+            // Shoulder gloss - thin white line on the left shoulder.
+            ctx.fillStyle = "rgba(255, 255, 255, 0.55)";
+            ctx.fillRect(x + 9, y + 13 + bob, 4, 1);
+        } else if (variant === "elder") {
+            // Gold hat brim highlight + a small cap jewel.
+            ctx.fillStyle = "#ffd166";
+            ctx.fillRect(x + 10, y + 4 + bob, 12, 1);
+            ctx.fillRect(x + 15, y + 1 + bob, 2, 2);
+        } else if (variant === "merchant") {
+            // Coin pixel on the sash.
+            ctx.fillStyle = "#ffd166";
+            ctx.fillRect(x + 20, y + 19 + bob, 2, 2);
+        }
 
         // Interact hint when in range (world-space bubble with "E").
         // Followers are always within range, so their bubbles would
@@ -12985,18 +13183,16 @@
             const wpn = currentWeapon();
             if (wpn === swordWeapon && level >= 1) {
                 swordSpin.activate(swordWeapon.damage * mult * crownDmg, level);
-                // Expand radius when Crown Mode is active - the spin
-                // footprint visibly grows to match the damage boost.
                 if (crownSize !== 1) swordSpin.radius *= crownSize;
-                // Sword cooldown pacing is the single source of truth
-                // for melee, so all charged sword payoffs latch it.
                 attack.cooldownTimer = attack.cooldown;
                 if (level >= 2) {
                     flash.trigger(0.5, 0.18);
                     shake.trigger(10, 0.25);
+                    playerTrail.burst(10, 2.2, 0.55);
                 } else {
                     flash.trigger(0.3, 0.12);
                     shake.trigger(6, 0.15);
+                    playerTrail.burst(6, 1.8, 0.45);
                 }
             } else if (wpn === energyWeapon && level >= 1) {
                 energyBeam.activate(
@@ -13011,9 +13207,11 @@
                 if (level >= 2) {
                     flash.trigger(0.7, 0.22);
                     shake.trigger(14, 0.32);
+                    playerTrail.burst(12, 2.4, 0.6);
                 } else {
                     flash.trigger(0.45, 0.14);
                     shake.trigger(8, 0.18);
+                    playerTrail.burst(8, 2.0, 0.5);
                 }
             } else {
                 // Tap (level 0) or unhandled weapon - normal fire
@@ -13298,6 +13496,8 @@
         swordSpin.update(dt);
         energyBeam.update(dt);
         chargeFx.update(dt);
+        playerTrail.update(dt);
+        ambientParticles.update(dt);
         shake.update(dt);
         flash.update(dt);
         corruption.update(dt);
@@ -13568,6 +13768,8 @@
         swordSpin.reset();
         energyBeam.reset();
         chargeFx.reset();
+        playerTrail.reset();
+        ambientParticles.reset();
         flash.reset();
         camera.resetZoom();
 
@@ -13756,6 +13958,8 @@
         swordSpin.reset();
         energyBeam.reset();
         chargeFx.reset();
+        playerTrail.reset();
+        ambientParticles.reset();
 
         // Screen shake - any mid-cast impulses clear so respawn
         // isn't still rattling.
@@ -13849,6 +14053,9 @@
         // Night window-glow sits on top of the building faces so
         // the warm light reads against the cooler overall tint.
         worldClock.drawBuildingLights(ctx, currentLevel);
+        // Ambient motes drift above buildings but below NPCs / enemies
+        // so characters still read clearly against the floating dust.
+        ambientParticles.draw(ctx);
 
         // Padlock icon on any still-locked border gate.
         drawLockIndicators(ctx);
@@ -14900,6 +15107,7 @@
         // with "lighter" so it brightens the sprite underneath rather
         // than obscuring it.
         chargeFx.draw(ctx);
+        playerTrail.draw(ctx);
 
         const blinking = player.iframes > 0 &&
             Math.floor(player.iframes * 20) % 2 === 0;
