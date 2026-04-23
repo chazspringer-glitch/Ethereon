@@ -9373,6 +9373,8 @@
     spawner.seed();
     animals.spawnAll();
     maybeSpawnWildLightCreature(currentLevel);
+    ensureCityClustersFor(currentLevel && currentLevel.id);
+    cityChat.reset();
 
     // Collapse the cloak onto the player's starting position and
     // stagger the aura motes so the first drawn frame doesn't show
@@ -9568,6 +9570,8 @@
         // extra distance check needed here.
         animals.update(dt);
         updateLightCreatures(dt);
+        updateChatBubbles(dt);
+        cityChat.tick(dt);
     }
 
     function activeNpcs() {
@@ -11612,6 +11616,273 @@
         }),
     ];
 
+    // ---------------------------------------------------------------
+    // City life - social clustering + chat bubbles + rumors
+    //
+    // Wraps the existing Npc wander/gather machinery:
+    // - CITY_CLUSTERS declares magnet points in each safe zone.
+    // - assignCityClusters walks the roster at level load and flips
+    //   a portion of NPCs into "gather" routines pointed at those
+    //   clusters, so the city naturally pools into small groups
+    //   around the plaza / tavern / market instead of spreading flat.
+    // - cityChat drives occasional NPC-to-NPC bubble exchanges,
+    //   picking a pair of nearby idlers every few seconds.
+    // - cityRumors surfaces one of a rotating pool of flavor lines
+    //   as a floating bubble so the player can just walk past and
+    //   catch the world's mood.
+    //
+    // All of this is mobile-safe: bubbles are a small pool that
+    // fades + splices, zones are static data, and the chat picker
+    // is O(npcs) at a throttled cadence. Nothing runs outside safe
+    // zones, so dungeons stay unaffected.
+    // ---------------------------------------------------------------
+    const CITY_CLUSTERS = {
+        grove: [
+            { id: "plaza",   x: 1600, y: 1220, radius: 90, capacity: 5 },
+            { id: "market",  x: 2320, y: 640,  radius: 80, capacity: 4 },
+            { id: "tavern",  x: 1760, y: 1030, radius: 60, capacity: 3 },
+            { id: "southsq", x: 900,  y: 1720, radius: 80, capacity: 4 },
+        ],
+        port_halen: [
+            { id: "dock",    x: 940,  y: 900,  radius: 90, capacity: 5 },
+            { id: "harbor",  x: 880,  y: 700,  radius: 70, capacity: 3 },
+            { id: "market",  x: 1160, y: 720,  radius: 60, capacity: 3 },
+        ],
+        emberhold: [
+            { id: "forge",   x: 1010, y: 720,  radius: 80, capacity: 4 },
+            { id: "miners",  x: 640,  y: 720,  radius: 70, capacity: 3 },
+            { id: "carver",  x: 1260, y: 760,  radius: 60, capacity: 3 },
+        ],
+    };
+
+    // Flavor bubbles. Each NPC, when idly waiting for something to
+    // do, may emit one of these. Picked at random per-trigger so
+    // the same NPC doesn't keep repeating themselves.
+    const CITY_CHAT_LINES = [
+        "Did you hear what happened below?",
+        "Something is changing...",
+        "Three travelers passed through this morning.",
+        "The fountain water looks brighter today.",
+        "I haven't slept right since the gate reopened.",
+        "They say the shrine hums at night now.",
+        "Keep your head down and your blade clean.",
+        "My cousin swore she saw a wolf of light.",
+        "Trade's slow - the roads east are off-limits.",
+        "A stranger asked about the Elder. Not the first.",
+    ];
+
+    // Rumors the player catches as ambient, chapter-aware lines.
+    // NOT tied to any NPC - they float up over the nearest idle
+    // villager every so often so the city feels like it's talking
+    // to itself. story.missionTag branches surface story-reactive
+    // rumors when available.
+    const CITY_RUMORS = [
+        { minIdx: 0, text: "Strange creatures were seen in the outskirts." },
+        { minIdx: 0, text: "The Elder knows more than they're saying." },
+        { minIdx: 1, text: "Caverns growl deeper than last season." },
+        { minIdx: 2, text: "Key-bearers are few. Keep your guard." },
+        { minIdx: 3, text: "The shrine's gate draws stranger tides." },
+        { minIdx: 4, text: "That crown... it's reacting, isn't it?" },
+        { minIdx: 5, text: "The Abyss didn't close. It only listened." },
+    ];
+
+    // Assigns a fraction of a level's roster to gather routines
+    // pointed at its cluster list. Honors each cluster's capacity
+    // so groups form as sizes 3-6 naturally rather than the whole
+    // crowd piling onto one spot. Warriors + named-quest NPCs keep
+    // their patrol / wander routines untouched so the campaign
+    // flow isn't disrupted.
+    function assignCityClusters(levelId) {
+        const clusters = CITY_CLUSTERS[levelId];
+        const level = LEVELS[levelId];
+        if (!clusters || !level || !level.npcs) return;
+        const fill = clusters.map(c => ({ id: c.id, count: 0 }));
+
+        for (const npc of level.npcs) {
+            if (!npc || npc._clusterAssigned) continue;
+            // Skip warriors + NPCs with existing patrol / gather
+            // contracts so campaign-critical behavior isn't lost.
+            if (npc.role === "warrior") continue;
+            if (npc.routine === "patrol") continue;
+            if (npc.routine === "gather" && npc.gatherPoint) continue;
+
+            // 65% of eligible wanderers get pulled into a cluster.
+            if (Math.random() > 0.65) continue;
+
+            // Pick the cluster with the most capacity remaining so
+            // groups fill in parallel rather than oversaturating one.
+            let pick = null, best = -1;
+            for (let i = 0; i < clusters.length; i++) {
+                const headroom = clusters[i].capacity - fill[i].count;
+                if (headroom > best) { best = headroom; pick = i; }
+            }
+            if (pick == null || best <= 0) continue;
+
+            const c = clusters[pick];
+            npc._clusterAssigned = true;
+            npc.routine = "gather";
+            npc.gatherPoint = { x: c.x, y: c.y };
+            npc.gatherChance = 0.55;
+            npc.gatherJitter = c.radius * 0.7;
+            fill[pick].count++;
+        }
+    }
+
+    // Chat bubbles - ephemeral world-space text attached to an NPC
+    // or fixed world point. Rendered over NPCs in the draw pipeline
+    // and fades out with its timer.
+    const chatBubbles = [];
+    function spawnChatBubble(ownerOrPoint, text, duration = 3.0) {
+        chatBubbles.push({
+            owner: ownerOrPoint.x != null ? null : ownerOrPoint,
+            // Point fallback: used for rumors with no specific owner.
+            px: ownerOrPoint.x ?? 0,
+            py: ownerOrPoint.y ?? 0,
+            text,
+            timer: duration,
+            duration,
+        });
+    }
+    function updateChatBubbles(dt) {
+        for (let i = chatBubbles.length - 1; i >= 0; i--) {
+            chatBubbles[i].timer -= dt;
+            if (chatBubbles[i].timer <= 0) chatBubbles.splice(i, 1);
+        }
+    }
+    function drawChatBubbles(ctx) {
+        if (!chatBubbles.length) return;
+        ctx.save();
+        ctx.textAlign = "center";
+        ctx.textBaseline = "bottom";
+        for (const b of chatBubbles) {
+            const x = b.owner
+                ? Math.round(b.owner.x + b.owner.width / 2)
+                : Math.round(b.px);
+            const y = b.owner
+                ? Math.round(b.owner.y - 2)
+                : Math.round(b.py);
+            const fade = Math.min(1, b.timer / 0.5);
+            ctx.globalAlpha = fade;
+            ctx.font = "11px system-ui, sans-serif";
+            const w = Math.ceil(ctx.measureText(b.text).width) + 12;
+            const h = 18;
+            roundRectPath(ctx, x - w / 2, y - h - 4, w, h, 4);
+            ctx.fillStyle = "rgba(14, 14, 22, 0.9)";
+            ctx.fill();
+            ctx.strokeStyle = "rgba(138, 217, 255, 0.55)";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            drawShadowedText(b.text, x, y - 6,
+                "#e8e8f0", "11px system-ui, sans-serif");
+        }
+        ctx.globalAlpha = 1;
+        ctx.restore();
+    }
+
+    // Chat + rumor ticker. Runs only in safe zones, throttled so
+    // the city chatters at a believable cadence (a bubble every
+    // 6-12s, not every frame).
+    const cityChat = {
+        chatCd: 6 + Math.random() * 6,
+        rumorCd: 18 + Math.random() * 12,
+        face(a, b) {
+            // Point a toward b using the existing animator dir API.
+            if (!a.animator) return;
+            const dx = (b.x + b.width / 2) - (a.x + a.width / 2);
+            const dy = (b.y + b.height / 2) - (a.y + a.height / 2);
+            const d = dirFromVector(dx, dy);
+            if (d !== null) a.animator.setDir(d);
+        },
+        tick(dt) {
+            if (!currentLevel || !currentLevel.safe) return;
+
+            this.chatCd -= dt;
+            if (this.chatCd <= 0) {
+                this.chatCd = 5 + Math.random() * 7;
+                this._tickChat();
+            }
+            this.rumorCd -= dt;
+            if (this.rumorCd <= 0) {
+                this.rumorCd = 16 + Math.random() * 12;
+                this._tickRumor();
+            }
+        },
+        _tickChat() {
+            const list = currentLevel.npcs;
+            if (!list || list.length < 2) return;
+            // Pick a pair that's close AND roughly idle (state
+            // "idle" in their wander state machine).
+            const idlers = [];
+            for (const n of list) {
+                if (n.state === "idle" && !n._isFollower) idlers.push(n);
+            }
+            if (idlers.length < 2) return;
+            // Find a close pair (squared-dist < 80^2).
+            const R2 = 90 * 90;
+            for (let tries = 0; tries < 6; tries++) {
+                const a = idlers[Math.floor(Math.random() * idlers.length)];
+                const b = idlers[Math.floor(Math.random() * idlers.length)];
+                if (a === b) continue;
+                const dx = a.x - b.x, dy = a.y - b.y;
+                if (dx * dx + dy * dy > R2) continue;
+                // Pick two different lines so they're in dialogue.
+                const lineA = CITY_CHAT_LINES[
+                    Math.floor(Math.random() * CITY_CHAT_LINES.length)
+                ];
+                let lineB;
+                do {
+                    lineB = CITY_CHAT_LINES[
+                        Math.floor(Math.random() * CITY_CHAT_LINES.length)
+                    ];
+                } while (lineB === lineA);
+                this.face(a, b);
+                this.face(b, a);
+                // Stagger B's bubble so it reads as a reply.
+                spawnChatBubble(a, lineA, 3.2);
+                setTimeout(() => {
+                    if (b && b.alive !== false) spawnChatBubble(b, lineB, 2.8);
+                }, 1200);
+                return;
+            }
+        },
+        _tickRumor() {
+            const list = currentLevel.npcs;
+            if (!list || !list.length) return;
+            const chapterIdx = Math.max(0, story.chapterOrder.indexOf(story.state));
+            const pool = CITY_RUMORS.filter(r => chapterIdx >= (r.minIdx ?? 0));
+            if (!pool.length) return;
+            // Pick a nearby NPC to the player so the rumor reads
+            // as overhearable, not broadcast.
+            const pcx = player.x + player.width / 2;
+            const pcy = player.y + player.height / 2;
+            let best = null, bestD = 360 * 360;
+            for (const n of list) {
+                if (n._isFollower) continue;
+                const dx = (n.x + n.width / 2) - pcx;
+                const dy = (n.y + n.height / 2) - pcy;
+                const d = dx * dx + dy * dy;
+                if (d < bestD) { best = n; bestD = d; }
+            }
+            if (!best) return;
+            const line = pool[Math.floor(Math.random() * pool.length)].text;
+            spawnChatBubble(best, line, 4.0);
+        },
+        reset() {
+            this.chatCd = 6 + Math.random() * 6;
+            this.rumorCd = 18 + Math.random() * 12;
+            chatBubbles.length = 0;
+        },
+    };
+
+    // Run cluster assignment once per level id. Flag prevents a
+    // re-entry each zone load from re-shuffling routines.
+    const _clustersAssigned = new Set();
+    function ensureCityClustersFor(levelId) {
+        if (_clustersAssigned.has(levelId)) return;
+        _clustersAssigned.add(levelId);
+        assignCityClusters(levelId);
+    }
+
     // Port Halen roster - coastal-city NPCs. Compact configs with
     // keyword-only dialogue to keep the per-NPC data lightweight.
     LEVELS.port_halen.npcs = [
@@ -12930,6 +13201,8 @@
         spawner.seed();
         animals.spawnAll();
         maybeSpawnWildLightCreature(currentLevel);
+        ensureCityClustersFor(currentLevel && currentLevel.id);
+        cityChat.reset();
 
         // Snap the camera to prevent a visible pan from the old spot.
         camera.snap(player);
@@ -13008,6 +13281,8 @@
         spawner.seed();
         animals.spawnAll();
         maybeSpawnWildLightCreature(currentLevel);
+        ensureCityClustersFor(currentLevel && currentLevel.id);
+        cityChat.reset();
 
         // Now WORLD_* are grove dims - warp the player to the
         // grove's center (the main plaza tile).
@@ -13214,6 +13489,7 @@
         // the animals module does its own view-rect cull.
         animals.draw(ctx);
         drawLightCreatures(ctx);
+        drawChatBubbles(ctx);
         // Followers render with the same drawNpc path; they carry
         // the warrior's colors, walk bob, and "E" bubble just like
         // home-zone NPCs so players can still converse with them.
