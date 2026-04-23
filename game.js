@@ -3885,6 +3885,209 @@
     })();
 
     // ---------------------------------------------------------------
+    // Cinematic FX orchestrator
+    //
+    // A single layer on top of the existing shake / flash / camera
+    // zoom / chargeFx / playerTrail systems that composes them into
+    // one call: cinematicFx.impact(x, y, { scale, color }).
+    //
+    // Spec-shape layers:
+    //   core      - world-space effect pool (not used yet; reserved
+    //               for future "main effect" overlays that pair with
+    //               a specific attack).
+    //   particles - short-lived sparks in world space.
+    //   screen    - facade for the existing screen shake / flash /
+    //               zoom, accessed via impact() so callers don't
+    //               need to know the individual modules.
+    //   post      - facade for slow-mo (specialAttack.slowMoTimer).
+    //
+    // Also owns a ground-residue pool for the "lingering glow after
+    // attack" aftertaste. All pools are preallocated; adaptive cap
+    // reduces spawn counts when the enemy roster is crowded so big
+    // fights stay smooth on mobile.
+    // ---------------------------------------------------------------
+    const cinematicFx = (function () {
+        const MAX_SPARKS = 64;
+        const MAX_RESIDUES = 16;
+        const sparks = new Array(MAX_SPARKS);
+        for (let i = 0; i < MAX_SPARKS; i++) {
+            sparks[i] = {
+                x: 0, y: 0, vx: 0, vy: 0,
+                life: 0, maxLife: 0, size: 1,
+                color: "255,220,140", alive: false,
+            };
+        }
+        const residues = new Array(MAX_RESIDUES);
+        for (let i = 0; i < MAX_RESIDUES; i++) {
+            residues[i] = {
+                x: 0, y: 0, r: 0, life: 0, maxLife: 0,
+                color: "255,220,140", alive: false,
+            };
+        }
+
+        // Adaptive cap - if enemies is big, halve spark spawn counts
+        // so a 20-enemy horde doesn't compound into a spark storm.
+        function crowdScale() {
+            return enemies.length > 20 ? 0.5 : 1;
+        }
+
+        // Standard sparks burst from a point. `color` is a CSS rgb
+        // triple string "R,G,B" so the alpha can be templated later.
+        function spawnSparks(x, y, color, count, speed, life) {
+            const n = Math.max(1, Math.round(count * crowdScale()));
+            let spawned = 0;
+            for (const s of sparks) {
+                if (spawned >= n) break;
+                if (s.alive) continue;
+                const ang = Math.random() * Math.PI * 2;
+                const sp = speed * (0.6 + Math.random() * 0.7);
+                s.x = x; s.y = y;
+                s.vx = Math.cos(ang) * sp;
+                s.vy = Math.sin(ang) * sp;
+                s.life = 0;
+                s.maxLife = life * (0.7 + Math.random() * 0.5);
+                s.size = 1 + Math.random() * 1.5;
+                s.color = color;
+                s.alive = true;
+                spawned++;
+            }
+        }
+
+        // Ground residue - a glowing disc that fades over `duration`.
+        function spawnResidue(x, y, color, radius, duration) {
+            for (const r of residues) {
+                if (r.alive) continue;
+                r.x = x; r.y = y;
+                r.r = radius;
+                r.life = 0;
+                r.maxLife = duration;
+                r.color = color;
+                r.alive = true;
+                return;
+            }
+        }
+
+        return {
+            // Layer arrays (spec shape). Exposed for debug + future
+            // extension; modules can push their own effects here.
+            core: [], particles: sparks, screen: [], post: [],
+
+            // Composite impact: shake + flash + zoom + sparks + residue
+            // + optional slow-mo. One call replaces a stack of ad-hoc
+            // calls at each release site.
+            //
+            //   opts.scale    - 0.5-1.5 intensity multiplier (default 1)
+            //   opts.color    - sparks / residue color "R,G,B" string
+            //   opts.sparks   - number of sparks to emit
+            //   opts.residue  - radius for the ground glow (0 = skip)
+            //   opts.slowMo   - seconds of slow-mo (0 = skip)
+            //   opts.flash    - flash intensity 0..1 (default 0.4 * scale)
+            //   opts.shake    - shake magnitude (default 8 * scale)
+            //   opts.zoom     - zoom peak (1.0 = skip)
+            impact(x, y, opts = {}) {
+                const scale = opts.scale ?? 1;
+                const color = opts.color ?? "255, 220, 140";
+                const flashI = opts.flash ?? Math.min(0.9, 0.4 * scale);
+                const shakeM = opts.shake ?? 8 * scale;
+                const sparksN = opts.sparks ?? Math.round(12 * scale);
+                const residueR = opts.residue ?? 0;
+                const slowMoS = opts.slowMo ?? 0;
+                const zoomP = opts.zoom ?? 1.0;
+
+                if (flashI > 0) flash.trigger(flashI, 0.18 + scale * 0.04);
+                if (shakeM > 0) shake.trigger(shakeM, 0.18 + scale * 0.04);
+                if (sparksN > 0) {
+                    spawnSparks(x, y, color, sparksN,
+                        140 + scale * 60, 0.32 + scale * 0.18);
+                }
+                if (residueR > 0) {
+                    spawnResidue(x, y, color, residueR, 1.2 + scale * 0.6);
+                }
+                if (zoomP > 1.0) camera.zoomPulse(zoomP, 0.25);
+                if (slowMoS > 0) {
+                    specialAttack.slowMoTimer = Math.max(
+                        specialAttack.slowMoTimer, slowMoS
+                    );
+                }
+            },
+
+            // Bare spark burst without a full impact (no shake/flash).
+            // Useful for secondary effects like mid-beam pulses.
+            burst(x, y, color, count) {
+                spawnSparks(x, y, color ?? "255, 220, 140",
+                    count ?? 10, 160, 0.4);
+            },
+
+            // Standalone residue without shake/flash. Handy for
+            // "leftover energy" drawn after a beam despawns.
+            residue(x, y, color, radius, duration) {
+                spawnResidue(x, y, color ?? "255, 220, 140",
+                    radius, duration ?? 1.2);
+            },
+
+            update(dt) {
+                for (const s of sparks) {
+                    if (!s.alive) continue;
+                    s.life += dt;
+                    if (s.life >= s.maxLife) { s.alive = false; continue; }
+                    s.x += s.vx * dt;
+                    s.y += s.vy * dt;
+                    // Friction so sparks arc + settle rather than
+                    // fly off like rays.
+                    s.vx *= 0.92;
+                    s.vy *= 0.92;
+                    // Gentle gravity so residues settle downward.
+                    s.vy += 80 * dt;
+                }
+                for (const r of residues) {
+                    if (!r.alive) continue;
+                    r.life += dt;
+                    if (r.life >= r.maxLife) r.alive = false;
+                }
+            },
+
+            // World-space draw - residues first (underneath),
+            // sparks on top.
+            drawWorld(ctx) {
+                for (const r of residues) {
+                    if (!r.alive) continue;
+                    const t = r.life / r.maxLife;
+                    const a = (1 - t) * 0.55;
+                    // Layered radial falloff via two circles - a
+                    // cheap substitute for a gradient that runs
+                    // 2 fillStyle changes per residue.
+                    ctx.globalAlpha = a * 0.4;
+                    ctx.fillStyle = `rgba(${r.color}, 1)`;
+                    ctx.beginPath();
+                    ctx.arc(r.x, r.y, r.r, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.globalAlpha = a * 0.7;
+                    ctx.beginPath();
+                    ctx.arc(r.x, r.y, r.r * 0.55, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.globalAlpha = 1;
+
+                for (const s of sparks) {
+                    if (!s.alive) continue;
+                    const t = s.life / s.maxLife;
+                    const fade = (1 - t) * 0.9;
+                    ctx.fillStyle = `rgba(${s.color}, ${fade.toFixed(3)})`;
+                    ctx.fillRect(
+                        Math.round(s.x - s.size / 2),
+                        Math.round(s.y - s.size / 2),
+                        s.size, s.size
+                    );
+                }
+            },
+
+            reset() {
+                for (const s of sparks) s.alive = false;
+                for (const r of residues) r.alive = false;
+            },
+        };
+    })();
+    // ---------------------------------------------------------------
     // Corruption
     //
     // A normalized 0..1 value that rises while the player lingers in
@@ -13180,20 +13383,29 @@
             const crownDmg  = crown.attackMult;
             const crownSize = crown.sizeMult;
 
+            // Impact bundles: one cinematicFx.impact call replaces
+            // the old scatter of flash / shake / playerTrail.burst
+            // at each release site. Scale + color + counts vary so
+            // charge level 1 reads as a "charge" while level 2 reads
+            // as an "ultimate".
+            const pcx = player.x + player.width / 2;
+            const pcy = player.y + player.height / 2;
             const wpn = currentWeapon();
             if (wpn === swordWeapon && level >= 1) {
                 swordSpin.activate(swordWeapon.damage * mult * crownDmg, level);
                 if (crownSize !== 1) swordSpin.radius *= crownSize;
                 attack.cooldownTimer = attack.cooldown;
-                if (level >= 2) {
-                    flash.trigger(0.5, 0.18);
-                    shake.trigger(10, 0.25);
-                    playerTrail.burst(10, 2.2, 0.55);
-                } else {
-                    flash.trigger(0.3, 0.12);
-                    shake.trigger(6, 0.15);
-                    playerTrail.burst(6, 1.8, 0.45);
-                }
+                cinematicFx.impact(pcx, pcy + 10, {
+                    scale: level >= 2 ? 1.4 : 1.0,
+                    color: "255, 220, 140",
+                    flash: level >= 2 ? 0.5 : 0.3,
+                    shake: level >= 2 ? 10 : 6,
+                    sparks: level >= 2 ? 18 : 10,
+                    residue: level >= 2 ? 70 : 45,
+                    slowMo: level >= 2 ? 0.1 : 0,
+                });
+                playerTrail.burst(level >= 2 ? 10 : 6,
+                    level >= 2 ? 2.2 : 1.8, level >= 2 ? 0.55 : 0.45);
             } else if (wpn === energyWeapon && level >= 1) {
                 energyBeam.activate(
                     energyWeapon.damage * mult * (level >= 2 ? 1.6 : 1.1) * crownDmg,
@@ -13204,15 +13416,18 @@
                     energyBeam.width  *= crownSize;
                 }
                 energyWeapon.cooldownTimer = energyWeapon.cooldownMax;
-                if (level >= 2) {
-                    flash.trigger(0.7, 0.22);
-                    shake.trigger(14, 0.32);
-                    playerTrail.burst(12, 2.4, 0.6);
-                } else {
-                    flash.trigger(0.45, 0.14);
-                    shake.trigger(8, 0.18);
-                    playerTrail.burst(8, 2.0, 0.5);
-                }
+                cinematicFx.impact(pcx, pcy + 10, {
+                    scale: level >= 2 ? 1.6 : 1.1,
+                    color: "180, 220, 255",
+                    flash: level >= 2 ? 0.7 : 0.45,
+                    shake: level >= 2 ? 14 : 8,
+                    sparks: level >= 2 ? 22 : 12,
+                    residue: level >= 2 ? 80 : 48,
+                    slowMo: level >= 2 ? 0.15 : 0,
+                    zoom: level >= 2 ? 1.08 : 1.0,
+                });
+                playerTrail.burst(level >= 2 ? 12 : 8,
+                    level >= 2 ? 2.4 : 2.0, level >= 2 ? 0.6 : 0.5);
             } else {
                 // Tap (level 0) or unhandled weapon - normal fire
                 // with the charge multiplier applied uniformly. Crown
@@ -13498,6 +13713,7 @@
         chargeFx.update(dt);
         playerTrail.update(dt);
         ambientParticles.update(dt);
+        cinematicFx.update(dt);
         shake.update(dt);
         flash.update(dt);
         corruption.update(dt);
@@ -13770,6 +13986,7 @@
         chargeFx.reset();
         playerTrail.reset();
         ambientParticles.reset();
+        cinematicFx.reset();
         flash.reset();
         camera.resetZoom();
 
@@ -13960,6 +14177,7 @@
         chargeFx.reset();
         playerTrail.reset();
         ambientParticles.reset();
+        cinematicFx.reset();
 
         // Screen shake - any mid-cast impulses clear so respawn
         // isn't still rattling.
@@ -15108,6 +15326,10 @@
         // than obscuring it.
         chargeFx.draw(ctx);
         playerTrail.draw(ctx);
+        // Cinematic FX (sparks + residues) draw above the player
+        // sprite but below the world-transform close, so they're
+        // still camera-locked with the world.
+        cinematicFx.drawWorld(ctx);
 
         const blinking = player.iframes > 0 &&
             Math.floor(player.iframes * 20) % 2 === 0;
