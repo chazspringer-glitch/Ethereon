@@ -11617,10 +11617,15 @@
                 multiPhase: true,
                 ...opts,
             });
+            // The Boss super-constructor calls this._applyPhase(1)
+            // before our subclass fields are assigned, so set
+            // giantType FIRST then re-run _applyPhase so the
+            // giant-specific cadence overrides actually install.
             this.giantType = typeCfg;
             this.name = typeCfg.name;
             this.isGiant = true;
             this.color = typeCfg.color;
+            this._applyPhase(this.phase || 1);
             // AoE cadence
             this.aoeTimer = typeCfg.attackCdMax;
             // Support-spawn cadence (per-phase reset).
@@ -11640,7 +11645,13 @@
             // tweaks: faster AoE cadence + larger support spawns
             // as hp drops.
             super._applyPhase(n);
+            // Guard: Boss's super-constructor calls this BEFORE
+            // subclass fields exist, which would throw on the
+            // typeCfg dereference below. The Giant constructor
+            // re-invokes us once giantType is set so the real
+            // tuning still installs.
             const t = this.giantType;
+            if (!t) return;
             if (n === 1) {
                 this.aoeCdMin = t.attackCdMin;
                 this.aoeCdMax = t.attackCdMax;
