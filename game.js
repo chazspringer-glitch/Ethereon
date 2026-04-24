@@ -7196,8 +7196,16 @@
     // Pause-menu state. Rects are screen-space and refreshed each
     // draw so they automatically follow resize without a layout
     // callback. Touch + keyboard both route here via handleAction.
+    // URL opened by the "ETHEREON ANIME" pause-menu tab. External
+    // YouTube link opened in a new tab with noopener for safety -
+    // the game itself is in-memory only, so navigating away would
+    // discard unsaved progress if we used location.href.
+    const ETHEREON_ANIME_URL =
+        "https://youtu.be/sJYVRXRk5CQ?si=qBFWPIdJZETFu3F8";
+
     const pauseMenu = {
         rects: {
+            anime:  { x: 0, y: 0, w: 0, h: 0 },
             resume: { x: 0, y: 0, w: 0, h: 0 },
             save:   { x: 0, y: 0, w: 0, h: 0 },
             load:   { x: 0, y: 0, w: 0, h: 0 },
@@ -7229,6 +7237,26 @@
                 } else {
                     this.setStatus("Load failed.");
                 }
+                return;
+            }
+            if (name === "anime") {
+                // Fire and forget - open in a new tab so the run
+                // doesn't get blown away by a navigation. Some
+                // browsers / embedded webviews may block popups; in
+                // that case we surface a hint instead of silently
+                // doing nothing.
+                let opened = null;
+                try {
+                    opened = window.open(
+                        ETHEREON_ANIME_URL,
+                        "_blank",
+                        "noopener,noreferrer"
+                    );
+                } catch (_err) { opened = null; }
+                this.setStatus(opened
+                    ? "Opening Ethereon anime..."
+                    : "Popup blocked - open YouTube manually.");
+                return;
             }
         },
 
@@ -16414,11 +16442,11 @@
     ];
 
     function drawPauseMenu() {
-        // Bigger panel now that it carries the journal + map. Caps
-        // at 540x620 so it stays readable on desktop without
-        // stretching; clamps to the viewport on mobile.
+        // Bigger panel now that it carries the journal + map + the
+        // anime tab. Caps at 540x720 so it stays readable on desktop
+        // without stretching; clamps to the viewport on mobile.
         const w = Math.min(540, VIEW_W - 16);
-        const h = Math.min(640, VIEW_H - 16);
+        const h = Math.min(720, VIEW_H - 16);
         const x = Math.floor((VIEW_W - w) / 2);
         const y = Math.floor((VIEW_H - h) / 2);
 
@@ -16642,7 +16670,69 @@
 
         sy += mapH + 14;
 
-        // --- Section 3: action rows -------------------------------
+        // --- Section 3: Ethereon anime tab ------------------------
+        // Dedicated "tab" row for the companion anime video. Styled
+        // apart from the save/load rows with a YouTube-red accent +
+        // play glyph so it reads as an EXTERNAL link, not a game
+        // action. Clicking it opens the video in a new browser tab.
+        drawShadowedText("ETHEREON ANIME", x + 20, sy,
+            "#ff4d55", "bold 11px system-ui, sans-serif");
+        sy += 16;
+
+        const animeW = w - 40;
+        const animeH = 46;
+        const animeX = x + 20;
+        const animeHover = Math.sin(performance.now() * 0.004) * 0.5 + 0.5;
+
+        const animeR = pauseMenu.rects.anime;
+        animeR.x = animeX;
+        animeR.y = sy;
+        animeR.w = animeW;
+        animeR.h = animeH;
+
+        ctx.save();
+        roundRectPath(ctx, animeX, sy, animeW, animeH, 7);
+        // Soft crimson tint so the tab reads distinct from the gold
+        // action rows underneath.
+        ctx.fillStyle = "rgba(255, 60, 70, 0.12)";
+        ctx.fill();
+        ctx.strokeStyle = `rgba(255, 77, 85, ${0.55 + animeHover * 0.25})`;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Play-triangle glyph on the left, YouTube-ish red.
+        const pgx = animeX + 18;
+        const pgy = sy + animeH / 2;
+        ctx.fillStyle = "#ff4d55";
+        ctx.beginPath();
+        ctx.moveTo(pgx - 6, pgy - 8);
+        ctx.lineTo(pgx + 8, pgy);
+        ctx.lineTo(pgx - 6, pgy + 8);
+        ctx.closePath();
+        ctx.fill();
+
+        // Title + subline.
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        drawShadowedText("Watch on YouTube",
+            animeX + 36, sy + animeH / 2 - 8,
+            "#ffeff0", "bold 14px system-ui, sans-serif");
+        drawShadowedText("Ethereon - the anime companion",
+            animeX + 36, sy + animeH / 2 + 9,
+            "#c88088", "11px system-ui, sans-serif");
+
+        // External-link glyph on the right so the row clearly reads
+        // as navigation, not an in-game action.
+        ctx.textAlign = "right";
+        ctx.textBaseline = "middle";
+        drawShadowedText("open",
+            animeX + animeW - 14, sy + animeH / 2,
+            "#ff4d55", "bold 11px system-ui, sans-serif");
+        ctx.restore();
+
+        sy += animeH + 14;
+
+        // --- Section 4: action rows -------------------------------
         const rowW = w - 40;
         const rowH = 34;
         const rowX = x + 20;
