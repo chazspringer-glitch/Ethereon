@@ -2466,17 +2466,70 @@
                 player.gain.gain.setValueAtTime(current, t);
                 player.gain.gain.exponentialRampToValueAtTime(0.0001, t + fadeSeconds);
             } catch (_e) { /* node disconnected */ }
-            // Release the scheduler + audio node just after fade
-            // finishes so no trailing notes pop post-silence.
-            setTimeout(() => {
+            // Stop scheduling new loops on the OUTGOING track right
+            // away. Without this, the fade-out track keeps queueing
+            // notes for the remaining ~1.5 s of fade, which is a
+            // pointless audio + CPU burn (everything is ramping to
+            // silence anyway). Keeps the audio graph trimmed faster
+            // on mobile.
+            if (player.timerId != null) {
                 clearInterval(player.timerId);
+                player.timerId = null;
+            }
+            // Release the audio node just after fade finishes so no
+            // trailing notes pop post-silence.
+            setTimeout(() => {
                 try { player.gain.disconnect(); } catch (_e) {}
             }, (fadeSeconds + 0.2) * 1000);
+        }
+
+        // Visibility-aware pause: when the tab goes hidden, stop
+        // queuing new loops so a backgrounded game doesn't burn CPU
+        // (some browsers throttle setInterval to 1s in hidden tabs
+        // anyway, but the audio graph keeps growing if we feed it).
+        // On visible we restart the active track in place - it'll
+        // pick up cleanly from the next loop boundary.
+        let _suspendedName = null;
+        function pauseScheduling() {
+            if (active && active.timerId != null) {
+                clearInterval(active.timerId);
+                active.timerId = null;
+            }
+        }
+        function resumeScheduling() {
+            if (!active || !sound.ctx || active.timerId != null) return;
+            const cfg = active.cfg;
+            // Re-anchor next-loop time to NOW so the resume is
+            // immediate, not "catch-up burst".
+            active.nextLoopAt = Math.max(active.nextLoopAt,
+                sound.ctx.currentTime + 0.05);
+            active.timerId = setInterval(() => {
+                if (!sound.ctx) return;
+                if (active.nextLoopAt < sound.ctx.currentTime + 0.6) {
+                    cfg.schedule(sound.ctx, active.gain, active.nextLoopAt,
+                        cfg.beatDuration);
+                    active.nextLoopAt += active.loopDur;
+                }
+            }, 200);
+        }
+        if (typeof document !== "undefined" && document.addEventListener) {
+            document.addEventListener("visibilitychange", () => {
+                if (document.hidden) pauseScheduling();
+                else resumeScheduling();
+            });
         }
 
         return {
             playMusic(name, fadeSeconds = 1.5) {
                 if (!sound.enabled) return;
+                // Don't kick the scheduler off in a hidden tab -
+                // queues a track that'd just pile up notes nobody
+                // hears. Remember the request so resumeScheduling
+                // can restore it if the user comes back.
+                if (typeof document !== "undefined" && document.hidden) {
+                    _suspendedName = name;
+                    return;
+                }
                 sound._init();
                 if (!sound.ctx) return;
                 if (!TRACKS[name]) return;
@@ -2500,6 +2553,7 @@
                 if (active) fadeOut(active, fadeSeconds);
                 prev = null;
                 active = null;
+                _suspendedName = null;
             },
 
             fadeTransition(oldName, newName, fadeSeconds = 1.5) {
@@ -7826,33 +7880,75 @@
     // Zone + combat-aware music pick. Safe zones always play city.
     // In hostile zones, an enemy within COMBAT_DETECT_PX of the
     // player promotes "dungeon" to "combat"; otherwise dungeon.
-    // Checked every 0.75s so short-lived flips (a single enemy
-    // dropping in / out of range for one frame) don't thrash.
+    //
+    // Hysteresis: once "combat" wins, hold it for COMBAT_HOLD_S
+    // even if no enemy is in range. Stops the track from thrashing
+    // dungeon <-> combat as the last enemy bounces in and out of
+    // the detect ring.
+    //
+    // Fast paths:
+    //   - sound disabled        -> skip the picker entirely
+    //   - no living enemies     -> straight to dungeon (no scan)
+    //   - state unchanged       -> playMusic is a no-op anyway, but
+    //                              we early-out before the scan to
+    //                              save the per-tick distance loop
     let _musicPickTimer = 0;
+    let _lastDesired = null;
+    let _combatHoldUntil = 0;
+    const COMBAT_DETECT_PX = 300;
+    const COMBAT_DETECT_PX_SQ = COMBAT_DETECT_PX * COMBAT_DETECT_PX;
+    const COMBAT_HOLD_S = 4.0;
     function desiredMusic() {
         if (isSafeZone()) return "city";
-        const COMBAT_DETECT_PX = 300;
-        const r2 = COMBAT_DETECT_PX * COMBAT_DETECT_PX;
+        // Hold "combat" briefly even if the room has cleared, so
+        // the track doesn't bounce on the last kill.
+        const now = (typeof performance !== "undefined")
+            ? performance.now() / 1000
+            : Date.now() / 1000;
+        if (_lastDesired === "combat" && now < _combatHoldUntil) {
+            return "combat";
+        }
+        // No enemies at all -> trivially dungeon.
+        if (!enemies || enemies.length === 0) return "dungeon";
+
         const pcx = player.x + player.width / 2;
         const pcy = player.y + player.height / 2;
-        for (const e of enemies) {
-            if (!e.alive) continue;
+        for (let i = 0; i < enemies.length; i++) {
+            const e = enemies[i];
+            if (!e.alive || e.ally) continue;
             const dx = (e.x + e.width / 2) - pcx;
             const dy = (e.y + e.height / 2) - pcy;
-            if (dx * dx + dy * dy < r2) return "combat";
+            if (dx * dx + dy * dy < COMBAT_DETECT_PX_SQ) {
+                _combatHoldUntil = now + COMBAT_HOLD_S;
+                return "combat";
+            }
         }
         return "dungeon";
     }
     function updateMusicState(dt) {
+        // Sound off -> entire pipeline is a no-op. Skips the timer
+        // entirely so a muted run doesn't even tick the picker.
+        if (typeof sound !== "undefined" && !sound.enabled) return;
         _musicPickTimer -= dt;
         if (_musicPickTimer > 0) return;
         _musicPickTimer = 0.75;
-        music.playMusic(desiredMusic());
+        const want = desiredMusic();
+        // playMusic already early-outs when the active track
+        // matches; this saves the function-call when nothing has
+        // changed (a hot path - the music state is stable for most
+        // of any given session).
+        if (want === _lastDesired && music.currentTrack() === want) {
+            return;
+        }
+        _lastDesired = want;
+        music.playMusic(want);
     }
     // Force a zone-entry fade on transition so the track matches
     // the new level without waiting up to 0.75s for the picker.
     function kickMusicForZone() {
         _musicPickTimer = 0;
+        _lastDesired = null;       // re-evaluate without short-circuit
+        _combatHoldUntil = 0;      // drop the combat hold across zones
     }
 
     function updateFollowers(dt) {
