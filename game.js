@@ -740,6 +740,86 @@
             ],
         },
 
+        // --- Tribal biomes ------------------------------------
+        // Three faction-owned outer regions. Each marked with a
+        // `tribalFaction` tag read by tribalSpawner at level load
+        // to populate the zone with its native tribe. Ambient
+        // non-tribal enemies stay at 0 here so the tribe IS the
+        // encounter.
+        //
+        // Mountain Region - bigfoot territory. Neutral by default:
+        // the tribe wanders in peace unless the player strikes.
+        // Palette leans into granite + pine.
+        mountain_region: {
+            id: "mountain_region",
+            name: "Stonewild Reaches",
+            safe: false,
+            cols: 70, rows: 52,
+            baseTile: TILE_STONE,
+            borderTile: TILE_TREE,
+            scatter: [
+                { tile: TILE_TREE,  prob: 0.10 },
+                { tile: TILE_PATH,  prob: 0.05 },
+                { tile: TILE_WATER, prob: 0.02 },
+            ],
+            enemyCount: 0,
+            enemyOpts: {},
+            tribalFaction: "bigfoot",
+            tribalCount: 5,
+            exits: {
+                east: { level: "emberhold", arriveAt: { x: 120, y: 704 } },
+            },
+            npcs: [],
+        },
+
+        // Swamp Region - dogmen pack territory. Hostile on sight:
+        // the tribe's alignment is "hostile" so members spawn as
+        // aggressive enemies. Muddy path / water mix.
+        swamp_region: {
+            id: "swamp_region",
+            name: "Drowned Marsh",
+            safe: false,
+            cols: 64, rows: 48,
+            baseTile: TILE_PATH,
+            borderTile: TILE_TREE,
+            scatter: [
+                { tile: TILE_WATER, prob: 0.22 },
+                { tile: TILE_TREE,  prob: 0.08 },
+                { tile: TILE_GRASS, prob: 0.04 },
+            ],
+            enemyCount: 0,
+            enemyOpts: {},
+            tribalFaction: "dogmen",
+            tribalCount: 6,
+            exits: {
+                west: { level: "port_halen", arriveAt: { x: 1800, y: 400 } },
+            },
+            npcs: [],
+        },
+
+        // Desert Region - reptilian territory. Neutral. Sun-baked
+        // stone floor with occasional chasms.
+        desert_region: {
+            id: "desert_region",
+            name: "Salt Flats",
+            safe: false,
+            cols: 72, rows: 52,
+            baseTile: TILE_GRASS,
+            borderTile: TILE_STONE,
+            scatter: [
+                { tile: TILE_STONE, prob: 0.18 },
+                { tile: TILE_VOID,  prob: 0.04 },
+            ],
+            enemyCount: 0,
+            enemyOpts: {},
+            tribalFaction: "reptilian",
+            tribalCount: 5,
+            exits: {
+                west: { level: "grass_plains", arriveAt: { x: 2400, y: 900 } },
+            },
+            npcs: [],
+        },
+
         // --- Grass Plains: giant biome ------------------------
         // Open-field zone reached via a north exit from the grove.
         // Designed for low ambient pressure (6 baseline mobs across
@@ -763,7 +843,15 @@
             // mob arena. The giantSpawner adds the boss layer.
             enemyCount: 4,
             enemyOpts: { hp: 4, speed: 100, contactDamage: 14 },
-            exits: { south: "grove" },
+            exits: {
+                south: "grove",
+                // East route into the Desert Region - reptilian
+                // territory. Neutral.
+                east: {
+                    level: "desert_region",
+                    arriveAt: { x: 180, y: 900 },
+                },
+            },
             // Marker read by giantSpawner so the module knows where
             // to operate. Skipping it is how every other zone opts
             // out of giant spawns.
@@ -895,6 +983,12 @@
             enemyOpts: {},
             exits: {
                 north: { level: "grove", arriveAt: { x: 1600, y: 2200 } },
+                // East into the Swamp Region - dogmen tribe
+                // territory. Hostile; enter expecting combat.
+                east: {
+                    level: "swamp_region",
+                    arriveAt: { x: 180, y: 900 },
+                },
             },
             npcs: [],
             buildings: [
@@ -972,6 +1066,13 @@
             enemyOpts: {},
             exits: {
                 east: { level: "grove", arriveAt: { x: 96, y: 1152 } },
+                // West opens into the Mountain Region - bigfoot
+                // tribe territory. Neutral by default; attack one
+                // and the whole tribe remembers.
+                west: {
+                    level: "mountain_region",
+                    arriveAt: { x: 2200, y: 900 },
+                },
             },
             npcs: [],
             buildings: [
@@ -3423,14 +3524,17 @@
             // TALK button now shows for every interactable the cascade
             // can route: NPCs (dialogue), wild light creatures
             // (reach out), neutral guardians (ally), city events
-            // (watch), and lore objects. Mobile players no longer
-            // need to rely on an E key for any of these paths.
+            // (watch), tribal recruits (non-hostile tribe members),
+            // and lore objects. Mobile players no longer need to
+            // rely on an E key for any of these paths.
             if (gameState !== "playing") return false;
             return nearestNpc() !== null
                 || (typeof nearestWildLightCreature === "function"
                     && nearestWildLightCreature() !== null)
                 || (typeof nearestNeutralGuardian === "function"
                     && nearestNeutralGuardian() !== null)
+                || (typeof nearestRecruitableTribal === "function"
+                    && nearestRecruitableTribal() !== null)
                 || (typeof nearestCityEvent === "function"
                     && nearestCityEvent() !== null)
                 || nearestLore() !== null;
@@ -3960,6 +4064,14 @@
         // first 2 are LIVE in the world via the boundGiants module
         // and follow the player as autonomous AoE allies.
         specialUnits: [],
+
+        // Tribal recruits from the Mountain / Swamp / Desert
+        // regions. Separate list from specialUnits so giants
+        // don't crowd out bigfoot slots. Cap of 3. Live ally
+        // tribals also exist as flipped Enemy instances in the
+        // enemies array; player.tribals is the snapshot count
+        // used by the HUD + save file.
+        tribals: [],
 
         // Charge-attack state. isCharging flips true on attack-press,
         // accumulates chargeTime (clamped at maxCharge) while held,
@@ -9078,6 +9190,7 @@
                     squad: player.squad.map(m => ({ ...m })),
                     lightCreatures: player.lightCreatures.map(c => ({ ...c })),
                     specialUnits: (player.specialUnits || []).map(u => ({ ...u })),
+                    tribals:      (player.tribals || []).map(t => ({ ...t })),
                     weaponIndex: player.weaponIndex,
                 },
                 stats: {
@@ -9201,6 +9314,20 @@
             if (typeof boundGiants !== "undefined") {
                 boundGiants.reset();
                 boundGiants.spawnActive();
+            }
+            // Tribal recruits - restore the snapshot count. Live
+            // ally instances don't carry across save/load; they
+            // re-recruit naturally on a return visit. Cap defensively.
+            player.tribals = [];
+            if (Array.isArray(data.player.tribals)) {
+                for (const t of data.player.tribals.slice(0, 3)) {
+                    if (!t || !TRIBAL_FACTIONS[t.factionId]) continue;
+                    player.tribals.push({
+                        factionId: t.factionId,
+                        roleId: t.roleId,
+                        name: t.name || TRIBAL_FACTIONS[t.factionId].recruitName,
+                    });
+                }
             }
             // Squad: dismiss any current followers back to their
             // home zones first, then rehire from the snapshot roster
@@ -13187,6 +13314,241 @@
             boundGiants.spawnActive();
         }
         return true;
+    }
+
+    // ---------------------------------------------------------------
+    // Tribal factions + regions
+    //
+    // Three region-bound tribes, each with its own alignment:
+    //   bigfoot   - Mountain Region, NEUTRAL (peaceful until hit)
+    //   dogmen    - Swamp Region,    HOSTILE (attacks on sight)
+    //   reptilian - Desert Region,   NEUTRAL
+    //
+    // Members spawn as Enemy instances with a `tribal` tag. Hostile
+    // members drop into the standard enemy AI. Neutral members
+    // spawn with `neutral: true` + a small wanderRadius so they
+    // patrol their territory and stay passive unless provoked.
+    //
+    // Recruitment: pressing the interact button near a non-hostile
+    // tribal fires reachOutToTribal() which rolls a bind chance.
+    // Successful recruits go into player.tribals (cap 3) and fight
+    // alongside the player in hostile zones via the same ally-
+    // skirmisher pipeline the squad module already uses - no new
+    // combat AI needed.
+    //
+    // Performance: enemies array is capped at MAX_ENEMIES and
+    // existing distance culling covers tribal members. Each
+    // region's tribal count is capped at 6.
+    // ---------------------------------------------------------------
+    const TRIBAL_FACTIONS = {
+        bigfoot: {
+            id: "bigfoot",
+            name: "Bigfoot",
+            region: "mountain_region",
+            alignment: "neutral",
+            color: "#6a4a28",
+            accent: "#3a2418",
+            trim:   "#8c6438",
+            eye:    "#ffd166",
+            hp: 28, speed: 60, damage: 16,
+            kbScale: 0.55,
+            roles: [
+                { id: "scout",   size: 0.82, hpMult: 0.8, speedMult: 1.25, dmgMult: 0.8 },
+                { id: "warrior", size: 1.0,  hpMult: 1.0, speedMult: 1.0,  dmgMult: 1.0 },
+                { id: "elder",   size: 1.2,  hpMult: 1.35, speedMult: 0.82, dmgMult: 0.9 },
+            ],
+            greeting: "The bigfoot regards you from under a heavy brow.",
+            recruitName: "Bigfoot",
+        },
+        dogmen: {
+            id: "dogmen",
+            name: "Dogmen",
+            region: "swamp_region",
+            alignment: "hostile",
+            color: "#585a46",
+            accent: "#2a2c20",
+            trim:   "#788070",
+            eye:    "#e06666",
+            hp: 18, speed: 118, damage: 14,
+            kbScale: 1.0,
+            // Hostile pack: borrow the existing hunter pack-bonus
+            // field so a tight group speed-boosts together.
+            pack: true,
+            roles: [
+                { id: "scout",   size: 0.82, hpMult: 0.85, speedMult: 1.3, dmgMult: 0.9 },
+                { id: "warrior", size: 1.0,  hpMult: 1.0,  speedMult: 1.0, dmgMult: 1.0 },
+                { id: "elder",   size: 1.15, hpMult: 1.3,  speedMult: 0.92, dmgMult: 1.15 },
+            ],
+            greeting: "The dogmen bare their teeth.",
+            recruitName: "Dogman",
+        },
+        reptilian: {
+            id: "reptilian",
+            name: "Reptilian",
+            region: "desert_region",
+            alignment: "neutral",
+            color: "#4a6a34",
+            accent: "#28361a",
+            trim:   "#7ab058",
+            eye:    "#ffd166",
+            hp: 22, speed: 88, damage: 14,
+            kbScale: 0.7,
+            roles: [
+                { id: "scout",   size: 0.82, hpMult: 0.85, speedMult: 1.22, dmgMult: 0.9 },
+                { id: "warrior", size: 1.0,  hpMult: 1.0,  speedMult: 1.0,  dmgMult: 1.0 },
+                { id: "elder",   size: 1.18, hpMult: 1.3,  speedMult: 0.85, dmgMult: 1.0 },
+            ],
+            greeting: "The reptilian watches with amber eyes.",
+            recruitName: "Reptilian",
+        },
+    };
+
+    // Live tribal population of the active zone. Parallel to
+    // `enemies`, but we don't need separate storage - the tribals
+    // are stored inside `enemies` with a `tribal` property. This
+    // set is just a FIND index so the recruit scan is cheap.
+    const tribalSpawner = {
+        _ROLE_PICK: [0.4, 0.85, 1.0],  // scout 40%, warrior 45%, elder 15%
+
+        populate(level) {
+            if (!level || !level.tribalFaction) return;
+            const f = TRIBAL_FACTIONS[level.tribalFaction];
+            if (!f) return;
+            const count = Math.min(
+                level.tribalCount || 4,
+                Math.max(0, MAX_ENEMIES - enemies.length)
+            );
+            for (let i = 0; i < count; i++) this._spawnOne(f);
+        },
+
+        _pickRole(f) {
+            const r = Math.random();
+            if (r < this._ROLE_PICK[0]) return f.roles[0];
+            if (r < this._ROLE_PICK[1]) return f.roles[1];
+            return f.roles[2];
+        },
+
+        _spawnOne(f) {
+            const role = this._pickRole(f);
+            const scale = role.size;
+            const w = Math.round(32 * scale);
+            const h = Math.round(32 * scale);
+            // Inset margin so tribals don't clip on the border
+            // stone / tree ring.
+            const m = 120;
+            const x = m + Math.random() * (WORLD_W - 2 * m - w);
+            const y = m + Math.random() * (WORLD_H - 2 * m - h);
+            // Don't drop on top of the player's arrival spot.
+            const pcx = player.x + player.width / 2;
+            const pcy = player.y + player.height / 2;
+            if (Math.hypot(x - pcx, y - pcy) < 300) {
+                return this._spawnOne(f);  // reroll
+            }
+            const opts = {
+                width: w, height: h,
+                hp: Math.max(1, Math.round(f.hp * role.hpMult)),
+                speed: Math.round(f.speed * role.speedMult),
+                contactDamage: Math.round(f.damage * role.dmgMult),
+                knockbackScale: f.kbScale,
+                reward: 20, xpReward: 16,
+            };
+            const e = spawnEnemy(x, y, opts);
+            if (!e) return;
+            e.tribal = { faction: f, role };
+            // Hostile alignment -> attacks on sight via normal AI.
+            // Neutral -> passive until hit, wanders its home
+            // territory (we reuse the `neutral` flag that guardians
+            // already respect in the Enemy class).
+            if (f.alignment === "hostile") {
+                e.neutral = false;
+                e.ally = false;
+                if (f.pack) {
+                    // Pack speed-boost - reuse the hunter faction's
+                    // `_packBonus` lookup path.
+                    e.faction = { id: "dogmen", pack: true };
+                }
+            } else {
+                e.neutral = true;
+                e.ally = false;
+                // Memory of a home point so wander stays tribal
+                // instead of drifting across the whole map.
+                e.tribalHome = { x, y };
+                e.tribalWanderR = 180;
+            }
+        },
+    };
+
+    // Any tribal within TRIBAL_INTERACT_RANGE of the player that is
+    // NOT hostile. Returned to the TALK button cascade + the Reach
+    // Out banner.
+    const TRIBAL_INTERACT_RANGE = 90;
+    function nearestRecruitableTribal() {
+        const pcx = player.x + player.width / 2;
+        const pcy = player.y + player.height / 2;
+        const r2 = TRIBAL_INTERACT_RANGE * TRIBAL_INTERACT_RANGE;
+        let best = null, bestD = r2;
+        for (const e of enemies) {
+            if (!e || !e.alive || !e.tribal) continue;
+            const f = e.tribal.faction;
+            if (!f || f.alignment === "hostile") continue;
+            if (e.ally) continue;
+            const dx = (e.x + e.width / 2) - pcx;
+            const dy = (e.y + e.height / 2) - pcy;
+            const d = dx * dx + dy * dy;
+            if (d < bestD) { best = e; bestD = d; }
+        }
+        return best;
+    }
+
+    // Reach-out recruitment. Friendly tribes accept more readily;
+    // neutrals need a bit of luck. Capped at 3 live tribal
+    // companions so the player can't snowball the formation.
+    const TRIBAL_CAP = 3;
+    function reachOutToTribal(e) {
+        if (!e || !e.tribal) return;
+        if (!player.tribals) player.tribals = [];
+        if (player.tribals.length >= TRIBAL_CAP) {
+            questLog.showToast("Your tribe stands with you already.", 2.4);
+            return;
+        }
+        const f = e.tribal.faction;
+        const role = e.tribal.role;
+        const succ = f.alignment === "friendly" ? 0.75 : 0.45;
+        if (Math.random() < succ) {
+            // Convert the live enemy instance into an ally: the
+            // existing follower damage routing already handles
+            // ally enemies, so we flip the flags + reassign the
+            // sprite position near the player. No new pipeline.
+            e.ally = true;
+            e.neutral = false;
+            e.contactDamage = 0;
+            const pcx = player.x + player.width / 2;
+            const pcy = player.y + player.height / 2;
+            e.x = pcx - e.width / 2 + (Math.random() - 0.5) * 40;
+            e.y = pcy + 40 + Math.random() * 20;
+            player.tribals.push({
+                factionId: f.id,
+                roleId: role.id,
+                name: `${f.recruitName} ${role.id}`,
+            });
+            questLog.showToast(
+                `${f.recruitName} ${role.id} joins you.`, 2.8
+            );
+            flash.trigger(0.35, 0.25);
+            sound.play("levelUp");
+        } else {
+            questLog.showToast(
+                `The ${f.recruitName.toLowerCase()} retreats into the wild.`,
+                2.0
+            );
+            // Drift away - nudge their wander home farther from
+            // the player so they don't immediately walk back.
+            if (e.tribalHome) {
+                const ang = Math.atan2(e.y - player.y, e.x - player.x);
+                e.tribalHome.x = e.x + Math.cos(ang) * 260;
+                e.tribalHome.y = e.y + Math.sin(ang) * 260;
+            }
+        }
     }
 
     // Spawn up to 4 reserve recruits as ally "skirmishers" at the
@@ -18505,8 +18867,12 @@
                     // lore objects - they're rare and have a short
                     // window before they drift off.
                     const wildLight = nearestWildLightCreature();
+                    const tribal = nearestRecruitableTribal();
                     if (wildLight) {
                         reachOutToLightCreature(wildLight);
+                    } else if (tribal) {
+                        // Non-hostile tribal recruit.
+                        reachOutToTribal(tribal);
                     } else if (nearestCityEvent()) {
                         // City event "Watch" - small coin reward,
                         // one-shot per event.
@@ -19555,6 +19921,12 @@
         spawner.configure(level);
         spawner.reset();
         spawner.seed();
+        // Tribal regions: seed the native faction population. The
+        // spawner checks `level.tribalFaction` internally, so this
+        // is a no-op for any zone without a tribe tag.
+        if (typeof tribalSpawner !== "undefined") {
+            tribalSpawner.populate(currentLevel);
+        }
         animals.spawnAll();
         maybeSpawnWildLightCreature(currentLevel);
         ensureCityClustersFor(currentLevel && currentLevel.id);
@@ -19637,6 +20009,12 @@
         spawner.configure(currentLevel);
         spawner.reset();
         spawner.seed();
+        // Tribal regions: seed the native faction population. The
+        // spawner checks `level.tribalFaction` internally, so this
+        // is a no-op for any zone without a tribe tag.
+        if (typeof tribalSpawner !== "undefined") {
+            tribalSpawner.populate(currentLevel);
+        }
         animals.spawnAll();
         maybeSpawnWildLightCreature(currentLevel);
         ensureCityClustersFor(currentLevel && currentLevel.id);
@@ -19685,6 +20063,10 @@
         player.specialUnits = [];
         if (typeof boundGiants !== "undefined") boundGiants.reset();
         if (typeof giantSpawner !== "undefined") giantSpawner.reset();
+        // Tribal recruits - fresh run clears the roster; the
+        // live ally Enemy instances are already cleared by the
+        // enemies.length = 0 earlier in this reset.
+        player.tribals = [];
         // Leaderboard - fresh run zeroes the live stats but keeps
         // the persistent top-10 board intact so the player still
         // sees their prior best between runs.
