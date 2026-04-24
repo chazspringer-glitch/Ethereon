@@ -335,44 +335,53 @@
                     interior: "tavern_interior",
                     entry: { x: 256, y: 288 },
                 },
-                // Residential district (SW). Three houses flank the
-                // path courtyard. All visual-only for now.
+                // Residential district (SW). Each house now opens
+                // into a shared `home_interior` template - small
+                // room with a resident NPC appended at load.
                 {
-                    id: "house_1",
-                    label: "",
+                    id: "house_1", label: "",
                     x: 560, y: 1600, w: 128, h: 100,
                     doorX: 612, doorY: 1678, doorW: 24, doorH: 22,
                     wall: "#a08060", roof: "#6a4a2a",
+                    interior: "home_interior",
+                    entry: { x: 192, y: 200 },
+                    returnAt: { x: 624, y: 1710 },
                 },
                 {
-                    id: "house_2",
-                    label: "",
+                    id: "house_2", label: "",
                     x: 740, y: 1680, w: 128, h: 96,
                     doorX: 792, doorY: 1754, doorW: 24, doorH: 22,
                     wall: "#96765a", roof: "#603c22",
+                    interior: "home_interior",
+                    entry: { x: 192, y: 200 },
+                    returnAt: { x: 804, y: 1784 },
                 },
                 {
-                    id: "house_3",
-                    label: "",
+                    id: "house_3", label: "",
                     x: 720, y: 1500, w: 120, h: 90,
                     doorX: 770, doorY: 1570, doorW: 24, doorH: 20,
                     wall: "#a88a6a", roof: "#744830",
+                    interior: "home_interior",
+                    entry: { x: 192, y: 200 },
+                    returnAt: { x: 782, y: 1598 },
                 },
-                // Two more residences tightening up the SW quarter -
-                // visual only, now collision-solid via the new rule.
                 {
-                    id: "house_4",
-                    label: "",
+                    id: "house_4", label: "",
                     x: 380, y: 1580, w: 118, h: 92,
                     doorX: 428, doorY: 1652, doorW: 24, doorH: 20,
                     wall: "#927860", roof: "#5c3826",
+                    interior: "home_interior",
+                    entry: { x: 192, y: 200 },
+                    returnAt: { x: 440, y: 1682 },
                 },
                 {
-                    id: "house_5",
-                    label: "",
+                    id: "house_5", label: "",
                     x: 880, y: 1620, w: 126, h: 96,
                     doorX: 934, doorY: 1696, doorW: 24, doorH: 20,
                     wall: "#b09580", roof: "#6e4838",
+                    interior: "home_interior",
+                    entry: { x: 192, y: 200 },
+                    returnAt: { x: 946, y: 1724 },
                 },
                 // Market stalls around the NE plaza - small wooden
                 // stands with a striped awning, no interior. Serve
@@ -417,6 +426,8 @@
                     doorX: 1554, doorY: 778, doorW: 32, doorH: 22,
                     wall: "#5a4436", roof: "#2e1f18",
                     accent: "#d05a2a",   // forge-glow trim
+                    interior: "forge_interior",
+                    entry: { x: 224, y: 220 },
                 },
                 // Craftsman's workshop (carver / weaver) - west of
                 // the plaza, tightens the gap to the guild.
@@ -425,6 +436,8 @@
                     x: 980, y: 1260, w: 150, h: 110,
                     doorX: 1030, doorY: 1352, doorW: 32, doorH: 22,
                     wall: "#6b553c", roof: "#3c2a1e",
+                    interior: "workshop_interior",
+                    entry: { x: 208, y: 200 },
                 },
                 // East guard post - flanks the road to the caverns
                 // so the player passes a live guard on their way
@@ -435,6 +448,8 @@
                     doorX: 2876, doorY: 1154, doorW: 26, doorH: 18,
                     wall: "#4a4e62", roof: "#22263a",
                     accent: "#8ad9ff",
+                    interior: "guardpost_interior",
+                    entry: { x: 176, y: 170 },
                 },
                 // South guard post - mirrors the east post near the
                 // Port Halen exit.
@@ -444,6 +459,12 @@
                     doorX: 1496, doorY: 2074, doorW: 26, doorH: 18,
                     wall: "#4a4e62", roof: "#22263a",
                     accent: "#8ad9ff",
+                    interior: "guardpost_interior",
+                    entry: { x: 176, y: 170 },
+                    // Custom return: re-route the interior's south
+                    // exit so the south post drops the player back
+                    // at this door, not the east post's door.
+                    returnAt: { x: 1508, y: 2100 },
                 },
                 // Training grounds - an armory / sparring shack
                 // anchoring the training dummies rendered in the
@@ -453,6 +474,8 @@
                     x: 1800, y: 1320, w: 140, h: 96,
                     doorX: 1846, doorY: 1400, doorW: 32, doorH: 22,
                     wall: "#525a6a", roof: "#2e3548",
+                    interior: "training_interior",
+                    entry: { x: 208, y: 230 },
                 },
                 // Extra market stalls packed around the NE plaza -
                 // produce + cloth + pottery. Tightens the market
@@ -484,12 +507,18 @@
                     x: 460, y: 1450, w: 124, h: 92,
                     doorX: 510, doorY: 1522, doorW: 24, doorH: 20,
                     wall: "#9a806a", roof: "#5f3e2a",
+                    interior: "home_interior",
+                    entry: { x: 192, y: 200 },
+                    returnAt: { x: 522, y: 1552 },
                 },
                 {
                     id: "house_7", label: "",
                     x: 600, y: 1420, w: 120, h: 88,
                     doorX: 648, doorY: 1488, doorW: 24, doorH: 20,
                     wall: "#b39a7c", roof: "#6d4832",
+                    interior: "home_interior",
+                    entry: { x: 192, y: 200 },
+                    returnAt: { x: 660, y: 1518 },
                 },
                 // Tavern-flank cottage so the tavern isn't isolated.
                 {
@@ -497,6 +526,9 @@
                     x: 1880, y: 820, w: 110, h: 82,
                     doorX: 1920, doorY: 882, doorW: 24, doorH: 20,
                     wall: "#a08060", roof: "#6a4a2a",
+                    interior: "home_interior",
+                    entry: { x: 192, y: 200 },
+                    returnAt: { x: 1932, y: 912 },
                 },
             ],
         },
@@ -707,6 +739,16 @@
             baseTile: TILE_PATH,
             borderTile: TILE_STONE,
             scatter: [],
+            // Water zone - lets the light-creature spawner roll
+            // sea species (seal / dolphin) and marks the harbor
+            // for boats + sea-creature surface spawns.
+            water: true,
+            waterSpawnBand: {
+                x1: 300, y1: 1200,
+                x2: 1620, y2: 1540,
+            },
+            // Boat dock target: where the boat rests when docked.
+            dockTarget: { x: 928, y: 1180 },
             tileFn(c, r, cols, rows) {
                 const cx = Math.floor(cols / 2);
                 const plazaY = 14;
@@ -912,6 +954,108 @@
                     level: "grove",
                     arriveAt: { x: 1350, y: 950 },
                 },
+            },
+            npcs: [],
+            buildings: [],
+            isInterior: true,
+        },
+
+        // --- Generic shared interiors ----------------------------
+        // Used by every non-specialty building the player can now
+        // enter - houses, workshop, stalls with roofs, etc. Each is
+        // small (12x8 tiles = 384x256 px) so the enter-an-empty-
+        // room experience is a quick beat, not a dungeon.
+        //
+        // Same `exits.south` shape as the shop / tavern / guild
+        // interiors so `maybeEnterBuilding` / `transitionTo` paths
+        // just work.
+        home_interior: {
+            id: "home_interior",
+            name: "Home",
+            safe: true,
+            cols: 12, rows: 8,
+            baseTile: TILE_PATH,
+            borderTile: TILE_STONE,
+            scatter: [],
+            enemyCount: 0,
+            enemyOpts: {},
+            // `arriveAt` here is unused - all grove houses rely on
+            // their `entry` to drop the player inside. The exit
+            // back to grove is set dynamically at transition time
+            // by the building's `returnTo` helper, because each
+            // house has a different door position in the world.
+            exits: {
+                south: { level: "grove", arriveAt: { x: 800, y: 1728 } },
+            },
+            npcs: [],
+            buildings: [],
+            isInterior: true,
+        },
+        forge_interior: {
+            id: "forge_interior",
+            name: "The Forge",
+            safe: true,
+            cols: 14, rows: 9,
+            baseTile: TILE_STONE,
+            borderTile: TILE_STONE,
+            scatter: [],
+            enemyCount: 0,
+            enemyOpts: {},
+            exits: {
+                south: { level: "grove", arriveAt: { x: 1570, y: 820 } },
+            },
+            npcs: [],
+            buildings: [],
+            isInterior: true,
+        },
+        workshop_interior: {
+            id: "workshop_interior",
+            name: "Workshop",
+            safe: true,
+            cols: 13, rows: 8,
+            baseTile: TILE_PATH,
+            borderTile: TILE_STONE,
+            scatter: [],
+            enemyCount: 0,
+            enemyOpts: {},
+            exits: {
+                south: { level: "grove", arriveAt: { x: 1045, y: 1390 } },
+            },
+            npcs: [],
+            buildings: [],
+            isInterior: true,
+        },
+        guardpost_interior: {
+            id: "guardpost_interior",
+            name: "Guard Post",
+            safe: true,
+            cols: 11, rows: 7,
+            baseTile: TILE_PATH,
+            borderTile: TILE_STONE,
+            scatter: [],
+            enemyCount: 0,
+            enemyOpts: {},
+            // Default return is the east guard post - the south
+            // post patches the exit on transition (see hook below).
+            exits: {
+                south: { level: "grove", arriveAt: { x: 2888, y: 1180 } },
+            },
+            npcs: [],
+            buildings: [],
+            isInterior: true,
+        },
+        training_interior: {
+            id: "training_interior",
+            name: "Training Hall",
+            safe: true,
+            cols: 13, rows: 9,
+            baseTile: TILE_PATH,
+            borderTile: TILE_STONE,
+            scatter: [],
+            enemyCount: 0,
+            enemyOpts: {},
+            exits: {
+                south: { level: "grove", arriveAt: { x: 1858, y: 1425 } },
             },
             npcs: [],
             buildings: [],
@@ -5961,7 +6105,49 @@
             healRate: 5,       // hp/sec restored to followers in aura
             auraRadius: 90,
         },
+        // --- Sea creatures --------------------------------------
+        // Rare "Reach out" targets that only surface in water
+        // zones (port_halen). Tamed specimens cross land and sea
+        // via `aquatic: true`, which lets the NPC + creature
+        // collision code skip the water block for them.
+        //
+        // Balance intent: surface less often than land species,
+        // recruit harder (15% base vs 40%), hit as hard as a Wolf
+        // of Light when they connect so rolling one is a real win.
+        seal: {
+            id: "seal",
+            name: "Tide Seal",
+            color: "#a0d8f0",
+            auraColor: "rgba(160, 216, 240, 0.40)",
+            maxHp: 30, speed: 140,
+            engageRange: 240, preferredRange: 28,
+            attackRange: 36, attackDamage: 3, attackCooldown: 0.60,
+            kind: "melee",
+            biome: "water",
+            aquatic: true,
+            rareRecruit: true,
+        },
+        dolphin: {
+            id: "dolphin",
+            name: "Mist Dolphin",
+            color: "#bec8f0",
+            auraColor: "rgba(190, 200, 240, 0.38)",
+            maxHp: 24, speed: 160,
+            engageRange: 320, preferredRange: 180,
+            attackRange: 240, attackDamage: 2, attackCooldown: 0.9,
+            kind: "ranged",
+            biome: "water",
+            aquatic: true,
+            rareRecruit: true,
+        },
     };
+
+    // Species id pools for the spawner. Land species are the
+    // default; water species only roll in zones with `water:
+    // true` (see LEVELS.port_halen below) so dolphins don't
+    // surface in the caverns.
+    const LAND_SPECIES_IDS = ["wolf", "bird", "stag"];
+    const WATER_SPECIES_IDS = ["seal", "dolphin"];
 
     // Live creatures in the world. Each entry is a plain object -
     // avoids a class hierarchy since these don't share enough with
@@ -5991,24 +6177,56 @@
 
         // Pick a species, slightly weighted by chapter so early runs
         // see more wolves (basic) and late runs see more stags
-        // (support).
+        // (support). Water zones (port_halen) get a small chance
+        // of rolling a sea species instead - rare surface, rare
+        // recruit, so rolling one is a real event.
         const chapterIdx = Math.max(0, story.chapterOrder.indexOf(story.state));
         const r = Math.random();
         let speciesId;
-        if (chapterIdx < 2)      speciesId = r < 0.6 ? "wolf" : r < 0.85 ? "bird" : "stag";
-        else if (chapterIdx < 4) speciesId = r < 0.4 ? "wolf" : r < 0.75 ? "bird" : "stag";
-        else                     speciesId = r < 0.3 ? "wolf" : r < 0.6  ? "bird" : "stag";
+        const waterZone = !!(level.water);
+        if (waterZone && Math.random() < 0.35) {
+            // Sea species pick - 50/50 seal vs dolphin.
+            speciesId = Math.random() < 0.5 ? "seal" : "dolphin";
+        } else if (chapterIdx < 2) {
+            speciesId = r < 0.6 ? "wolf" : r < 0.85 ? "bird" : "stag";
+        } else if (chapterIdx < 4) {
+            speciesId = r < 0.4 ? "wolf" : r < 0.75 ? "bird" : "stag";
+        } else {
+            speciesId = r < 0.3 ? "wolf" : r < 0.6  ? "bird" : "stag";
+        }
         const species = LIGHT_SPECIES[speciesId];
+        const aquatic = !!species.aquatic;
 
-        // Drop into one of the four outskirts with a small random
-        // offset so the spawn point feels curated, not grid-snapped.
-        const m = 140;
-        const edge = Math.floor(Math.random() * 4);
         let x, y;
-        if (edge === 0)      { x = m + Math.random() * (WORLD_W - 2*m); y = m; }
-        else if (edge === 1) { x = m + Math.random() * (WORLD_W - 2*m); y = WORLD_H - m; }
-        else if (edge === 2) { x = m; y = m + Math.random() * (WORLD_H - 2*m); }
-        else                 { x = WORLD_W - m; y = m + Math.random() * (WORLD_H - 2*m); }
+        if (aquatic && waterZone && level.waterSpawnBand) {
+            // Surface in the harbor water band. waterSpawnBand is
+            // a {x1, y1, x2, y2} world-space rect of legal spawn
+            // positions set on the level. Sample a few times and
+            // only keep the pick when it lands on a water tile so
+            // the creature doesn't surface on the dock or a stall.
+            const b = level.waterSpawnBand;
+            let picked = false;
+            for (let i = 0; i < 12; i++) {
+                const sx = b.x1 + Math.random() * (b.x2 - b.x1);
+                const sy = b.y1 + Math.random() * (b.y2 - b.y1);
+                if (tileAtWorld(sx, sy) === TILE_WATER) {
+                    x = sx; y = sy; picked = true; break;
+                }
+            }
+            if (!picked) {
+                // All samples rolled onto the dock - skip this spawn
+                // tick. Harmless: the next zone load will try again.
+                return;
+            }
+        } else {
+            // Default: pick an outskirts edge.
+            const m = 140;
+            const edge = Math.floor(Math.random() * 4);
+            if (edge === 0)      { x = m + Math.random() * (WORLD_W - 2*m); y = m; }
+            else if (edge === 1) { x = m + Math.random() * (WORLD_W - 2*m); y = WORLD_H - m; }
+            else if (edge === 2) { x = m; y = m + Math.random() * (WORLD_H - 2*m); }
+            else                 { x = WORLD_W - m; y = m + Math.random() * (WORLD_H - 2*m); }
+        }
 
         lightCreatures.push({
             species,
@@ -6023,6 +6241,7 @@
             wanderX: x, wanderY: y,
             wanderTimer: 0,
             fleeTimer: 0,
+            aquatic,
         });
     }
 
@@ -6113,9 +6332,14 @@
         }
         // Story-boosted chance: 40% base + 8% per chapter advanced,
         // capped at 80%. Early-game recruits are earned; late-game
-        // recruits almost always succeed.
+        // recruits almost always succeed. SEA species use a much
+        // lower base (15% + 5%/chapter, cap 45%) so rolling one is
+        // a real event - they're rare to surface AND rare to bond.
         const chapterIdx = Math.max(0, story.chapterOrder.indexOf(story.state));
-        const succ = Math.min(0.8, 0.4 + chapterIdx * 0.08);
+        const rare = !!c.species.rareRecruit;
+        const succ = rare
+            ? Math.min(0.45, 0.15 + chapterIdx * 0.05)
+            : Math.min(0.8, 0.4 + chapterIdx * 0.08);
         if (Math.random() < succ) {
             c.state = "follow";
             c.hp = c.species.maxHp;
@@ -6391,6 +6615,225 @@
     function resetLightCreatures() {
         lightCreatures.length = 0;
     }
+
+    // ---------------------------------------------------------------
+    // Harbor boats
+    //
+    // A tiny state-machine that cycles a single boat in and out of
+    // the Port Halen dock. When docked, two or three "passenger"
+    // NPCs walk down the gangway onto the plaza, mingle briefly,
+    // then the boat pulls away. Purely cosmetic - no gameplay hook
+    // beyond the visible animation, but it sells the city as a
+    // working harbor.
+    //
+    // Only one boat is ever live. The module no-ops outside
+    // `port_halen` so leaving the harbor doesn't race against land
+    // updates.
+    // ---------------------------------------------------------------
+    const boats = {
+        // Active boat: null until spawnIfReady creates one.
+        current: null,
+        spawnTimer: 6.0,   // countdown to next arrival after a depart
+        passengers: [],    // transient NPC refs during disembark
+
+        _newBoat() {
+            const level = currentLevel;
+            const dock = level && level.dockTarget;
+            if (!dock) return null;
+            // Boat spawns offshore south of the dock + a little
+            // east/west jitter so successive boats don't follow the
+            // same perfect line.
+            const startX = dock.x + (Math.random() - 0.5) * 160;
+            const startY = WORLD_H + 80;
+            return {
+                x: startX, y: startY,
+                width: 96, height: 48,
+                dockX: dock.x - 48,  // center the boat on the dock
+                dockY: dock.y,
+                state: "approach",
+                timer: 0,
+                departDir: Math.random() < 0.5 ? -1 : 1,
+                bob: Math.random() * Math.PI * 2,
+            };
+        },
+
+        spawn() {
+            if (!currentLevel || !currentLevel.water) return;
+            if (this.current) return;
+            this.current = this._newBoat();
+            this.passengers.length = 0;
+        },
+
+        _spawnPassengers(boat) {
+            // 2-3 passengers walking off the boat. They're ordinary
+            // NPCs that wander onto the plaza for a bit. We push
+            // them into the active level's npcs list so the normal
+            // draw + cull machinery handles them.
+            const level = currentLevel;
+            if (!level || !level.npcs) return;
+            const count = 2 + Math.floor(Math.random() * 2);
+            for (let i = 0; i < count; i++) {
+                const npc = new Npc({
+                    id: `passenger_${Date.now()}_${i}`,
+                    name: "Traveler",
+                    // Spawn on the boat's deck, then they path
+                    // toward the plaza via travel routine.
+                    x: boat.x + 30 + i * 14,
+                    y: boat.y + 10,
+                    width: 32, height: 32,
+                    interactRange: 48, speed: 32,
+                    wanderRadius: 50,
+                    idleMin: 0.4, idleMax: 1.2,
+                    walkMin: 4.0, walkMax: 8.0,
+                    role: "traveler",
+                    routine: "travel",
+                    destinations: [
+                        { x: 920, y: 560 },    // harbor office area
+                        { x: 1130, y: 660 },   // fishmarket
+                        { x: 930, y: 450 },    // plaza
+                    ],
+                    colors: {
+                        robe: ["#6a7a90", "#8a7260", "#5a8a7a", "#806a80"][i % 4],
+                        trim: "#2a3240",
+                        sash: "#e8c878",
+                        hat: "#1a222e",
+                    },
+                    dialogue: {
+                        greeting: '"Good to feel dry land. Long voyage."',
+                        options: [{ label: "Goodbye.", close: true }],
+                    },
+                });
+                level.npcs.push(npc);
+                this.passengers.push(npc);
+            }
+        },
+
+        _despawnPassengers() {
+            const level = currentLevel;
+            if (!level || !level.npcs) { this.passengers.length = 0; return; }
+            for (const p of this.passengers) {
+                const idx = level.npcs.indexOf(p);
+                if (idx >= 0) level.npcs.splice(idx, 1);
+            }
+            this.passengers.length = 0;
+        },
+
+        update(dt) {
+            if (!currentLevel || !currentLevel.water) {
+                // Outside a harbor zone - clear state so a leftover
+                // boat from a previous visit doesn't drift across
+                // the world map.
+                this.current = null;
+                this.passengers.length = 0;
+                this.spawnTimer = 6.0;
+                return;
+            }
+            // No active boat - tick toward the next arrival.
+            if (!this.current) {
+                this.spawnTimer -= dt;
+                if (this.spawnTimer <= 0) {
+                    this.spawn();
+                    this.spawnTimer = 40 + Math.random() * 20;
+                }
+                return;
+            }
+            const b = this.current;
+            b.timer += dt;
+            b.bob += dt * 1.8;
+
+            if (b.state === "approach") {
+                // Move linearly toward the dock target. Simple lerp
+                // is fine for a one-shot animation.
+                const dx = b.dockX - b.x;
+                const dy = b.dockY - b.y;
+                const d = Math.hypot(dx, dy);
+                const v = 60; // px / sec
+                if (d < v * dt) {
+                    b.x = b.dockX;
+                    b.y = b.dockY;
+                    b.state = "docked";
+                    b.timer = 0;
+                    this._spawnPassengers(b);
+                } else {
+                    b.x += (dx / d) * v * dt;
+                    b.y += (dy / d) * v * dt;
+                }
+            } else if (b.state === "docked") {
+                // Sit for 14 seconds while passengers disembark.
+                if (b.timer > 14) {
+                    b.state = "depart";
+                    b.timer = 0;
+                }
+            } else if (b.state === "depart") {
+                // Drift off-screen. Direction was randomized at
+                // spawn so successive boats head different ways.
+                const v = 50;
+                b.x += b.departDir * v * dt;
+                b.y += v * 0.6 * dt;  // angle out to sea
+                if (b.y > WORLD_H + 60 ||
+                    b.x < -120 || b.x > WORLD_W + 120) {
+                    this.current = null;
+                    this._despawnPassengers();
+                    this.spawnTimer = 30 + Math.random() * 20;
+                }
+            }
+        },
+
+        draw(ctx) {
+            if (!this.current) return;
+            const b = this.current;
+            const wobble = Math.sin(b.bob) * 1.5;
+            const cx = Math.round(b.x);
+            const cy = Math.round(b.y + wobble);
+
+            ctx.save();
+            // Hull
+            ctx.fillStyle = "#5a3a22";
+            ctx.beginPath();
+            ctx.moveTo(cx + 6,  cy + 20);
+            ctx.lineTo(cx + 90, cy + 20);
+            ctx.lineTo(cx + 82, cy + 42);
+            ctx.lineTo(cx + 14, cy + 42);
+            ctx.closePath();
+            ctx.fill();
+            // Hull trim
+            ctx.fillStyle = "#8c5a3c";
+            ctx.fillRect(cx + 10, cy + 20, 78, 4);
+            // Deck
+            ctx.fillStyle = "#d6b070";
+            ctx.fillRect(cx + 16, cy + 24, 66, 4);
+            // Mast
+            ctx.fillStyle = "#3a2612";
+            ctx.fillRect(cx + 46, cy - 10, 4, 32);
+            // Sail
+            ctx.fillStyle = "#f0e8d0";
+            ctx.beginPath();
+            ctx.moveTo(cx + 50, cy - 8);
+            ctx.lineTo(cx + 80, cy + 14);
+            ctx.lineTo(cx + 50, cy + 14);
+            ctx.closePath();
+            ctx.fill();
+            // Sail stripe
+            ctx.fillStyle = "#c86a3a";
+            ctx.fillRect(cx + 52, cy + 2, 24, 3);
+
+            // Small splash wake when moving.
+            if (b.state !== "docked") {
+                ctx.globalAlpha = 0.7;
+                ctx.fillStyle = "#a0d8f0";
+                ctx.fillRect(cx + 6,  cy + 44, 10, 2);
+                ctx.fillRect(cx + 82, cy + 44, 8,  2);
+                ctx.globalAlpha = 1;
+            }
+            ctx.restore();
+        },
+
+        reset() {
+            this.current = null;
+            this.passengers.length = 0;
+            this.spawnTimer = 6.0;
+        },
+    };
 
     // ---------------------------------------------------------------
     // Squad roles
@@ -10842,8 +11285,72 @@
             // the day so this is a no-op otherwise.
             const step = Math.min(dist, this.speed * worldClock.npcSpeedMult() * dt);
             const inv = 1 / dist;
-            this.x += dx * inv * step;
-            this.y += dy * inv * step;
+            const stepX = dx * inv * step;
+            const stepY = dy * inv * step;
+
+            // Collision: try the full step, then axis-aligned slides,
+            // then give up and go idle. Aquatic NPCs (boat crew, sea
+            // creatures) opt out via `this.aquatic = true` so they
+            // can still cross water without triggering the reject.
+            const checkWater = !this.aquatic;
+            const nx = this.x + stepX;
+            const ny = this.y + stepY;
+            const blockedFull = this._moveBlocked(nx, ny, checkWater);
+            if (!blockedFull) {
+                this.x = nx;
+                this.y = ny;
+            } else if (!this._moveBlocked(nx, this.y, checkWater)) {
+                this.x = nx;
+            } else if (!this._moveBlocked(this.x, ny, checkWater)) {
+                this.y = ny;
+            } else {
+                // Dead stop - drop back to idle so the next cycle
+                // picks a fresh, hopefully clear target.
+                this.state = "idle";
+                this.stateTimer = this.idleMin * 0.5 + Math.random() * 0.6;
+                this._path = null;
+                this._pathStep = 0;
+            }
+        }
+
+        _moveBlocked(x, y, checkWater) {
+            // Small wrapper so aquatic actors can skip the water
+            // sample but still respect building collision.
+            if (!checkWater) {
+                // Temporarily treat the actor as non-aquatic for
+                // building-only check by calling the same helper
+                // and then undoing the water sample manually is
+                // more complex than just doing a building-only
+                // pass inline here.
+                const level = currentLevel;
+                if (!level) return false;
+                const buildings = level.buildings;
+                if (!buildings || buildings.length === 0) return false;
+                const ax1 = x;
+                const ay1 = y;
+                const ax2 = x + this.width;
+                const ay2 = y + this.height;
+                for (const b of buildings) {
+                    if (b.stall) continue;
+                    const bx1 = b.x + 2;
+                    const by1 = b.y + 2;
+                    const bx2 = b.x + b.w - 2;
+                    const by2 = b.y + b.h - 2;
+                    if (ax1 >= bx2 || ax2 <= bx1 ||
+                        ay1 >= by2 || ay2 <= by1) continue;
+                    if (b.doorX != null) {
+                        const dx1 = b.doorX - 2;
+                        const dy1 = b.doorY - 2;
+                        const dx2 = b.doorX + b.doorW + 2;
+                        const dy2 = b.doorY + b.doorH + 2;
+                        if (!(ax1 >= dx2 || ax2 <= dx1 ||
+                              ay1 >= dy2 || ay2 <= dy1)) continue;
+                    }
+                    return true;
+                }
+                return false;
+            }
+            return npcCollidesAt(x, y, this.width, this.height);
         }
 
         _pickWanderTarget() {
@@ -10958,6 +11465,7 @@
         // extra distance check needed here.
         animals.update(dt);
         updateLightCreatures(dt);
+        boats.update(dt);
         updateChatBubbles(dt);
         cityChat.tick(dt);
         worldClock.update(dt);
@@ -13255,6 +13763,160 @@
         }),
     ];
 
+    // --- New specialty interiors ---------------------------------
+    // Forge - strong Smith recruit + an apprentice. Smith is melee,
+    // chapter 2 gate: he won't leave the anvil until the player has
+    // proven themselves in the caverns.
+    LEVELS.forge_interior.npcs = [
+        new Npc({
+            id: "smith_master", name: "Forgemaster",
+            role: "warrior",
+            squadRole: "melee",
+            recruitChapter: "chapter2",
+            x: 230 - 16, y: 130, width: 32, height: 32,
+            interactRange: 60,
+            wanderRadius: 22, speed: 18,
+            colors: { robe: "#3a2418", trim: "#1a0c06", sash: "#d05a2a", hat: "#24140a" },
+            dialogue: {
+                greeting: {
+                    chapter1: '"Back to your blade, traveler. Mine is already hot."',
+                    chapter2: '"Caverns changed you. Good. I sharpen what survives."',
+                    chapter4: '"Shrine\'s still. I\'d fight beside one who can do that."',
+                    chapter5: '"Hero of the grove in my forge? The iron sings."',
+                },
+                options: [
+                    { label: "Who are you?",
+                      response: "Forgemaster. I was a guardsman once, before the hammer." },
+                    { label: "Any advice?",
+                      response: "Strike true, follow through. Same on an anvil as on a neck." },
+                    { label: "Fight with me.", action: recruitInteract },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+        new Npc({
+            id: "smith_apprentice", name: "Apprentice",
+            x: 340, y: 180, width: 32, height: 32,
+            interactRange: 52,
+            wanderRadius: 24, speed: 22,
+            colors: { robe: "#5a3e28", trim: "#2a1a0c", sash: "#e8a458", hat: "#2a1808" },
+            dialogue: {
+                greeting: '"Bellows, sparks, bruised thumbs. The apprentice\'s trilogy."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+    ];
+
+    // Training hall - Arms Master recruit. Strong melee, chapter 3
+    // gate (unlocked once the player has the golden key, so their
+    // commitment to the cause is clear).
+    LEVELS.training_interior.npcs = [
+        new Npc({
+            id: "arms_master", name: "Arms Master",
+            role: "warrior",
+            squadRole: "melee",
+            recruitChapter: "chapter3",
+            x: 210 - 16, y: 150, width: 32, height: 32,
+            interactRange: 60,
+            wanderRadius: 30, speed: 26,
+            colors: { robe: "#3a2a1a", trim: "#1a0e08", sash: "#d0a050", hat: "#2a1a0c" },
+            dialogue: {
+                greeting: {
+                    chapter1: '"Drills at dawn. Come back with a blade that trusts you."',
+                    chapter3: '"A key-bearer in my hall. Show me steel, champion."',
+                    chapter5: '"You ARE the drill, now. Train me, if there\'s breath left."',
+                },
+                options: [
+                    { label: "Any tips?",
+                      response: "Hold ground on the first swing. Heroes fall in the second." },
+                    { label: "Fight with me.", action: recruitInteract },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+        new Npc({
+            id: "drill_trainee", name: "Trainee",
+            x: 320, y: 200, width: 32, height: 32,
+            interactRange: 50, wanderRadius: 40, speed: 42,
+            idleMin: 0.3, idleMax: 0.8,
+            colors: { robe: "#4a5060", trim: "#252a38", sash: "#c0c8d8", hat: "#1a1f2c" },
+            dialogue: {
+                greeting: '"Another rep. Another rep. Ten more after this."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+    ];
+
+    // Guard post - Sergeant recruit. Ranged kind, chapter 2 gate.
+    // Shared interior between the east and south posts, so the
+    // sergeant is the same NPC from either door.
+    LEVELS.guardpost_interior.npcs = [
+        new Npc({
+            id: "sergeant", name: "Sergeant",
+            role: "warrior",
+            squadRole: "ranged",
+            recruitChapter: "chapter2",
+            x: 176 - 16, y: 110, width: 32, height: 32,
+            interactRange: 58,
+            wanderRadius: 24, speed: 22,
+            colors: { robe: "#2e3548", trim: "#141824", sash: "#8ad9ff", hat: "#0a0f18" },
+            dialogue: {
+                greeting: {
+                    chapter1: '"Orders keep the walls standing. Respect them."',
+                    chapter2: '"Caverns on your sword. I\'d rather fight beside that."',
+                    chapter5: '"Hero on the watch. Drinks are mine tonight."',
+                },
+                options: [
+                    { label: "What do you watch?",
+                      response: "Gates east and south. What slips past us slips onto somebody\'s plate." },
+                    { label: "Fight with me.", action: recruitInteract },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+    ];
+
+    // Workshop - a carver NPC telling shop stories. Non-recruitable
+    // but a chatty ambient NPC so the interior feels lived in.
+    LEVELS.workshop_interior.npcs = [
+        new Npc({
+            id: "carver", name: "Carver",
+            x: 208 - 16, y: 120, width: 32, height: 32,
+            interactRange: 58, wanderRadius: 20, speed: 16,
+            colors: { robe: "#6b553c", trim: "#32220e", sash: "#d6a86a", hat: "#2a1a0c" },
+            dialogue: {
+                greeting: '"Work the grain. Grain works back. That\'s the trade."',
+                options: [
+                    { label: "What do you make?",
+                      response: "Tool handles, bowls, the odd charm. None of it\'s for sale yet." },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+    ];
+
+    // Homes - a single resident appended at load. The same interior
+    // template is reused by every house in the grove, so the NPC
+    // represents "whichever house you just stepped into" (this is
+    // fine - the player only enters one home at a time, and the
+    // greeting is generic on purpose).
+    LEVELS.home_interior.npcs = [
+        new Npc({
+            id: "resident", name: "Resident",
+            x: 192 - 16, y: 110, width: 32, height: 32,
+            interactRange: 58, wanderRadius: 18, speed: 14,
+            colors: { robe: "#8a7658", trim: "#4a3a22", sash: "#c6a272", hat: "#2a1a0c" },
+            dialogue: {
+                greeting: '"Ah - you must be the one the Elder spoke of. Welcome."',
+                options: [
+                    { label: "Sorry to intrude.",
+                      response: "No matter. Ethereon opens for those who open their swords." },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+    ];
+
     // ---------------------------------------------------------------
     // City life - social clustering + chat bubbles + rumors
     //
@@ -14527,6 +15189,20 @@
                 nextY < b.doorY + b.doorH &&
                 nextY + player.height > b.doorY
             ) {
+                // Shared interiors (home_interior, guardpost_interior)
+                // are used by many buildings with different door
+                // positions. Patch the interior's return-exit so the
+                // player walks back out through the SAME door, not
+                // the template's default.
+                if (b.returnAt) {
+                    const interior = LEVELS[b.interior];
+                    if (interior && interior.exits && interior.exits.south) {
+                        interior.exits.south.arriveAt = {
+                            x: b.returnAt.x,
+                            y: b.returnAt.y,
+                        };
+                    }
+                }
                 transitionTo(b.interior, null, b.entry);
                 return true;
             }
@@ -14567,6 +15243,72 @@
                 }
             }
             return true;
+        }
+        return false;
+    }
+
+    // Sample-based tile lookup in world coordinates. Reads the cached
+    // `world.data` grid so it stays cheap on every NPC tick. Returns
+    // `TILE_STONE` outside the world (same as getTile's OOB branch)
+    // so callers can treat out-of-bounds as solid if needed.
+    function tileAtWorld(wx, wy) {
+        const col = Math.floor(wx / TILE);
+        const row = Math.floor(wy / TILE);
+        return world.getTile(col, row);
+    }
+
+    // Collision check for NPCs and other AI actors. Checks the
+    // building roster AND the water tile map. Stalls are skipped
+    // (they're awning-only sprites NPCs can step under) and building
+    // door rects are an exception so NPCs assigned to a building's
+    // door can stand on the threshold without clipping.
+    //
+    // Water check samples the four inner corners of the actor rect
+    // so diagonal corner pokes into a water tile still count as a
+    // collision. Cheap: 4 grid reads + building box iteration.
+    function npcCollidesAt(x, y, w, h) {
+        const level = currentLevel;
+        if (!level) return false;
+        // Buildings
+        const buildings = level.buildings;
+        if (buildings && buildings.length > 0) {
+            const ax1 = x;
+            const ay1 = y;
+            const ax2 = x + w;
+            const ay2 = y + h;
+            for (const b of buildings) {
+                if (b.stall) continue;
+                const bx1 = b.x + 2;
+                const by1 = b.y + 2;
+                const bx2 = b.x + b.w - 2;
+                const by2 = b.y + b.h - 2;
+                if (ax1 >= bx2 || ax2 <= bx1 ||
+                    ay1 >= by2 || ay2 <= by1) continue;
+                // Door rect is a free pass so NPC routes through a
+                // doorway (interior transition or stationed at door)
+                // don't wall off.
+                if (b.doorX != null) {
+                    const dx1 = b.doorX - 2;
+                    const dy1 = b.doorY - 2;
+                    const dx2 = b.doorX + b.doorW + 2;
+                    const dy2 = b.doorY + b.doorH + 2;
+                    if (!(ax1 >= dx2 || ax2 <= dx1 ||
+                          ay1 >= dy2 || ay2 <= dy1)) continue;
+                }
+                return true;
+            }
+        }
+        // Water: sample 4 inner corners. Inset 2px so brushing the
+        // shore doesn't read as standing in it.
+        const corners = [
+            [x + 2,     y + 2],
+            [x + w - 2, y + 2],
+            [x + 2,     y + h - 2],
+            [x + w - 2, y + h - 2],
+        ];
+        for (let i = 0; i < 4; i++) {
+            const px = corners[i][0], py = corners[i][1];
+            if (tileAtWorld(px, py) === TILE_WATER) return true;
         }
         return false;
     }
@@ -15383,6 +16125,7 @@
         // Tamed ones rehire next to the player from snapshots so
         // the roster carries over.
         resetLightCreatures();
+        boats.reset();
         for (const snap of player.lightCreatures) rehireLightCreature(snap);
         attack.active = false;
         attack.timer = 0;
@@ -15517,6 +16260,7 @@
         // creature carryover. Next zone seed re-rolls a spawn.
         player.lightCreatures.length = 0;
         resetLightCreatures();
+        boats.reset();
         drops.length = 0;
         inventoryOpen = false;
 
@@ -15714,6 +16458,7 @@
         // Ambient critters + birds draw below the player layer;
         // the animals module does its own view-rect cull.
         animals.draw(ctx);
+        boats.draw(ctx);
         drawLightCreatures(ctx);
         drawChatBubbles(ctx);
         cityEvents.draw(ctx);
