@@ -7888,6 +7888,11 @@
         let bestD = r2;
         for (const e of enemies) {
             if (!e.alive) continue;
+            // Skip allies (player-bound giants, recruited
+            // skirmishers) and neutrals (forest guardians until
+            // provoked). Without this gate, recruited NPCs would
+            // chase + shoot the player's own bound colossi.
+            if (e.ally || e.neutral) continue;
             const dx = (e.x + e.width / 2) - fcx;
             const dy = (e.y + e.height / 2) - fcy;
             const d = dx * dx + dy * dy;
@@ -7902,6 +7907,14 @@
     // player's energy weapon).
     function performFollowerAttack(f) {
         if (!f.target || !f.target.alive) return;
+        // Defense in depth: if a target flipped to ally / neutral
+        // between target-pick and attack-fire (the player just
+        // bound a giant, a guardian was pacified, etc.), drop the
+        // target so the follower doesn't friendly-fire.
+        if (f.target.ally || f.target.neutral) {
+            f.target = null;
+            return;
+        }
         const role = f.roleCfg;
         const fcx = f.x + f.width / 2;
         const fcy = f.y + f.height / 2;
