@@ -20865,10 +20865,14 @@
         // leaderboard + yesterday's champions. The anime row and
         // Resume / Save / Load rows are PINNED to the bottom so
         // they stay visible on both tabs regardless of how tall
-        // the tab content gets. Caps at 540x760 so the pinned
-        // actions always sit above the fold on mobile.
+        // the tab content gets.
+        //
+        // Panel caps at 540x860 so the FULL 15-mission journal
+        // list has room to render without being clipped by the
+        // pinned action block. On shorter viewports the height
+        // clamps to VIEW_H - 16, pinned actions still win.
         const w = Math.min(540, VIEW_W - 16);
-        const h = Math.min(760, VIEW_H - 16);
+        const h = Math.min(860, VIEW_H - 16);
         const x = Math.floor((VIEW_W - w) / 2);
         const y = Math.floor((VIEW_H - h) / 2);
 
@@ -21001,10 +21005,11 @@
         sy = chTrackY + 34;
 
         // --- Section: Missions timeline ---------------------------
-        // Compact window: progress summary + current mission + up
-        // to 4 upcoming. Keeps the journal tab short enough that
-        // the pinned actions sit cleanly below the world map on
-        // phone-width screens.
+        // Full 15-mission list with a completion summary in the
+        // header. The journal tab scrolls visually via the taller
+        // panel; Resume / Save / Load stay pinned at the bottom
+        // of the panel regardless of journal-content height (see
+        // the `sy = y + h - ...` reassignment below the tabs).
         ctx.textAlign = "left";
         const totalMissions = missions.list.length;
         const curIdx = missions.currentMissionIndex;
@@ -21020,15 +21025,8 @@
         ctx.textAlign = "left";
         sy += 18;
 
-        // Windowed view: current + next 4 (up to 5 rows total).
-        const windowStart = Math.min(
-            Math.max(0, curIdx),
-            Math.max(0, totalMissions - 5)
-        );
-        const windowEnd = Math.min(totalMissions, windowStart + 5);
         const missionRowH = 20;
-        let drawn = 0;
-        for (let i = windowStart; i < windowEnd; i++) {
+        for (let i = 0; i < totalMissions; i++) {
             const m = missions.list[i];
             const isCurrent = i === curIdx && !m.completed;
             const done = m.completed;
@@ -21038,14 +21036,13 @@
                         : "#a0a0b8";
             drawShadowedText(
                 `${icon}  ${i + 1}. ${m.name}`,
-                x + 28, sy + drawn * missionRowH,
+                x + 28, sy + i * missionRowH,
                 color,
                 isCurrent ? "bold 12px system-ui, sans-serif"
                           : "12px system-ui, sans-serif"
             );
-            drawn++;
         }
-        sy += drawn * missionRowH + 14;
+        sy += totalMissions * missionRowH + 14;
 
         // --- Section 2: World map ---------------------------------
         drawShadowedText("WORLD MAP", x + 20, sy,
