@@ -290,6 +290,10 @@
                 // just inside each destination's matching edge.
                 south: { level: "port_halen", arriveAt: { x: 940,  y: 96 } },
                 west:  { level: "emberhold",  arriveAt: { x: 1620, y: 696 } },
+                // North gate to the Verdant Plains - giant biome.
+                // Drops the player just inside the south edge of
+                // the plains so they read into the open field.
+                north: { level: "grass_plains", arriveAt: { x: 1280, y: 1820 } },
             },
             npcs: [],  // filled in after NPC_TEMPLATES
             // City buildings. The shop sits in the market district
@@ -732,6 +736,53 @@
                     kind: "book",
                     x: 1400, y: 1100,
                     text: '"\'They told us the Heart was placed here to be kept. I think now it was placed here to be forgotten.\'"',
+                },
+            ],
+        },
+
+        // --- Grass Plains: giant biome ------------------------
+        // Open-field zone reached via a north exit from the grove.
+        // Designed for low ambient pressure (6 baseline mobs across
+        // a large 80x60 = 2560x1920 map) so the rare GIANTS the
+        // giantSpawner module rolls in remain the headline event.
+        // After defeat, a giant can be BOUND to the player's
+        // specialUnits party (capped at 5 stored, 2 active).
+        grass_plains: {
+            id: "grass_plains",
+            name: "Verdant Plains",
+            safe: false,
+            cols: 80, rows: 60,
+            baseTile: TILE_GRASS,
+            borderTile: TILE_TREE,
+            scatter: [
+                { tile: TILE_TREE,  prob: 0.018 },
+                { tile: TILE_STONE, prob: 0.012 },
+                { tile: TILE_PATH,  prob: 0.008 },
+            ],
+            // Few small enemies - this is the giant's stage, not a
+            // mob arena. The giantSpawner adds the boss layer.
+            enemyCount: 4,
+            enemyOpts: { hp: 4, speed: 100, contactDamage: 14 },
+            exits: { south: "grove" },
+            // Marker read by giantSpawner so the module knows where
+            // to operate. Skipping it is how every other zone opts
+            // out of giant spawns.
+            giantSpawn: true,
+            // Giant arena center - spawns aim toward this point
+            // with a wide jitter so each fight feels different.
+            giantSpawnCenter: { x: 1280, y: 960 },
+            giantSpawnJitter: 480,
+            npcs: [],
+            lore: [
+                {
+                    id: "plains_1", name: "Standing Stone",
+                    kind: "statue", x: 720, y: 540,
+                    text: '"Six stones once stood here, one for each colossus. Now five lie shattered in the grass."',
+                },
+                {
+                    id: "plains_2", name: "Worn Lorebook",
+                    kind: "book", x: 1880, y: 1240,
+                    text: '"\'They were the world\'s first guardians. They sleep when they wish to. They wake when we deserve them.\'"',
                 },
             ],
         },
@@ -3734,6 +3785,12 @@
         // the Light Herd never competes with the main formation.
         lightCreatures: [],
         maxLightCreatures: 3,
+
+        // Special units (giants bound after defeat). Each entry is
+        // a snapshot { typeId, hp, maxHp }. Cap of 5 stored; the
+        // first 2 are LIVE in the world via the boundGiants module
+        // and follow the player as autonomous AoE allies.
+        specialUnits: [],
 
         // Charge-attack state. isCharging flips true on attack-press,
         // accumulates chargeTime (clamped at maxCharge) while held,
@@ -7989,6 +8046,42 @@
         if (typeof chapterTwo !== "undefined") {
             chapterTwo.onEnemyKilled(enemy);
         }
+        // Giants: skip the standard "boss defeated" toast (Giant
+        // already shows a name banner) and route straight into the
+        // BIND prompt. Don't add to defeatedBosses - the spawner
+        // re-rolls giants over time, so the giant slot isn't a
+        // one-and-done lock.
+        if (enemy.isGiant && !enemy.ally) {
+            const cfg = enemy.giantType;
+            sound.play("levelUp");
+            flash.trigger(0.5, 0.3);
+            shake.trigger(10, 0.3);
+            // Open the bind prompt after a short pause so the
+            // death frame plays out cleanly first.
+            setTimeout(() => {
+                if (typeof dialogue === "undefined" || !dialogue.open) return;
+                dialogue.open({
+                    name: cfg.name,
+                    dialogue: {
+                        greeting:
+                            `The ${cfg.name} kneels. Its essence trembles. Bind it to your service?`,
+                        options: [
+                            {
+                                label: "Bind Giant.",
+                                action: () => bindGiant(cfg.id),
+                            },
+                            { label: "Let it pass.", close: true },
+                        ],
+                    },
+                });
+            }, 600);
+            return;
+        }
+
+        // Ally giants that die don't trigger boss-defeat side
+        // effects (zone seal, chapter advance, victory toast) -
+        // they're an ally death, not a boss kill.
+        if (enemy.ally && enemy.isGiant) return;
         if (enemy.isBoss && enemy.levelId) {
             defeatedBosses.add(enemy.levelId);
             questLog.showToast(`${enemy.name} defeated!`, 2.6);
@@ -8021,6 +8114,10 @@
         const cx = enemy.x + enemy.width / 2;
         const cy = enemy.y + enemy.height / 2;
 
+        // Ally bosses (bound giants) drop nothing on death - the
+        // loot would trickle the player wealth from their own
+        // sacrificed unit, which feels odd.
+        if (enemy.ally) return;
         // Bosses always leave a purse plus a potion and a pair of
         // magic orbs - a big reward for the long fight. Coins arc
         // out in a short circle so pickup feels like a burst.
@@ -8321,6 +8418,7 @@
                     items: player.items.map(s => ({ ...s })),
                     squad: player.squad.map(m => ({ ...m })),
                     lightCreatures: player.lightCreatures.map(c => ({ ...c })),
+                    specialUnits: (player.specialUnits || []).map(u => ({ ...u })),
                     weaponIndex: player.weaponIndex,
                 },
                 stats: {
@@ -8427,6 +8525,24 @@
                 }
             }
             if (typeof itemBar !== "undefined") itemBar.bind();
+            // Special units - restore bound giants. Cap defensively
+            // at 5 in case a hand-edited save sneaks more through.
+            player.specialUnits = [];
+            if (Array.isArray(data.player.specialUnits)) {
+                for (const u of data.player.specialUnits.slice(0, 5)) {
+                    if (u && GIANT_TYPES[u.typeId]) {
+                        player.specialUnits.push({
+                            typeId: u.typeId,
+                            hp: Math.max(1, u.hp ?? GIANT_TYPES[u.typeId].hp),
+                            maxHp: GIANT_TYPES[u.typeId].hp,
+                        });
+                    }
+                }
+            }
+            if (typeof boundGiants !== "undefined") {
+                boundGiants.reset();
+                boundGiants.spawnActive();
+            }
             // Squad: dismiss any current followers back to their
             // home zones first, then rehire from the snapshot roster
             // so the live followers array matches the save's squad.
@@ -11399,6 +11515,642 @@
     // respawn every time the player revisits their room. Cleared on
     // restart like the door-lock set.
     const defeatedBosses = new Set();
+
+    // ---------------------------------------------------------------
+    // Giants - rare colossi that roam the Verdant Plains
+    //
+    // Six elemental types, each with a unique signature attack and
+    // a thematic aura. Built on the existing Boss class so phase
+    // logic, hp bar, and death routing all work out-of-the-box;
+    // the Giant subclass adds the size, AoE attack cadence, and
+    // the BIND prompt that fires after defeat.
+    //
+    // Spawning is gated by `level.giantSpawn` so only the plains
+    // level rolls them. One giant lives at a time; the spawner
+    // picks a random type, drops it near the arena center, then
+    // waits 90-150 s after defeat before rolling the next.
+    //
+    // Bound giants live on `player.specialUnits` (cap 5 stored,
+    // 2 active in combat). Active giants follow the player as
+    // autonomous allies via `boundGiants` below.
+    // ---------------------------------------------------------------
+    const GIANT_TYPES = {
+        storm:  {
+            id: "storm",  name: "Storm Giant",
+            color: "#7ec0ff", aura: "rgba(126, 192, 255, 0.45)",
+            // Storm + void are the FAST giants per spec; the others
+            // are slow, heavy-step colossi.
+            hp: 280, speed: 88, contactDamage: 26,
+            attack: "ranged",      // bolt strike at long range
+            attackRange: 320, attackCdMin: 1.4, attackCdMax: 2.4,
+            attackDamage: 16,
+            supports: 0,           // skirmishers spawned per phase
+            arenaSize: 110,
+        },
+        earth:  {
+            id: "earth", name: "Earth Giant",
+            color: "#a8804a", aura: "rgba(168, 128, 74, 0.5)",
+            hp: 360, speed: 38, contactDamage: 30,
+            attack: "slam",        // close radial AoE
+            attackRange: 130, attackCdMin: 2.4, attackCdMax: 3.6,
+            attackDamage: 22,
+            supports: 2,           // spawns 2 small earth shards
+            arenaSize: 130,
+        },
+        fire:   {
+            id: "fire",  name: "Fire Giant",
+            color: "#e85a30", aura: "rgba(232, 90, 48, 0.5)",
+            hp: 320, speed: 50, contactDamage: 28,
+            attack: "blast",       // medium radial blast on cooldown
+            attackRange: 200, attackCdMin: 2.0, attackCdMax: 3.0,
+            attackDamage: 20,
+            supports: 1,
+            arenaSize: 120,
+        },
+        void:   {
+            id: "void",  name: "Void Giant",
+            color: "#9c50d0", aura: "rgba(156, 80, 208, 0.55)",
+            hp: 260, speed: 92, contactDamage: 26,
+            attack: "ranged",
+            attackRange: 360, attackCdMin: 1.2, attackCdMax: 2.2,
+            attackDamage: 18,
+            supports: 1,
+            arenaSize: 110,
+        },
+        water:  {
+            id: "water", name: "Tide Giant",
+            color: "#5cc8c0", aura: "rgba(92, 200, 192, 0.45)",
+            hp: 300, speed: 44, contactDamage: 24,
+            attack: "tide",        // wide ring AoE
+            attackRange: 160, attackCdMin: 2.6, attackCdMax: 3.8,
+            attackDamage: 18,
+            supports: 1,
+            arenaSize: 130,
+        },
+        light:  {
+            id: "light", name: "Light Giant",
+            color: "#ffd166", aura: "rgba(255, 209, 102, 0.5)",
+            hp: 340, speed: 46, contactDamage: 26,
+            attack: "blast",
+            attackRange: 220, attackCdMin: 1.8, attackCdMax: 2.8,
+            attackDamage: 22,
+            supports: 0,           // pure DPS, no minions
+            arenaSize: 130,
+        },
+    };
+
+    // Subclass of Boss with the giant-specific size, AoE cadence,
+    // optional support-spawn, and the on-death "Bind Giant" hook.
+    // Uses the existing multi-phase machinery for the headline
+    // pacing - phase 1/2/3 retunes attackCd + AoE damage as hp
+    // drops, so the fight escalates the same way the Throne
+    // Warden does.
+    class Giant extends Boss {
+        constructor(x, y, typeCfg, opts = {}) {
+            super(x, y, {
+                width: 96, height: 96,
+                hp: typeCfg.hp,
+                speed: typeCfg.speed,
+                reward: 700, xpReward: 240,
+                contactDamage: typeCfg.contactDamage,
+                knockbackScale: 0.12,
+                multiPhase: true,
+                ...opts,
+            });
+            this.giantType = typeCfg;
+            this.name = typeCfg.name;
+            this.isGiant = true;
+            this.color = typeCfg.color;
+            // AoE cadence
+            this.aoeTimer = typeCfg.attackCdMax;
+            // Support-spawn cadence (per-phase reset).
+            this.supportTimer = 8.0;
+            // Live AoE telegraph ring + active hit pulse.
+            this.telegraphTimer = 0;
+            this.telegraphMax = 0.6;
+            this.aoeFlashTimer = 0;
+            this.aoeFlashMax = 0.35;
+            // Aura bob phase for draw.
+            this.auraPhase = Math.random() * Math.PI * 2;
+        }
+
+        _applyPhase(n) {
+            // Reuse the parent's phase tuning for stalk/charge so
+            // base behavior survives, then layer giant-specific
+            // tweaks: faster AoE cadence + larger support spawns
+            // as hp drops.
+            super._applyPhase(n);
+            const t = this.giantType;
+            if (n === 1) {
+                this.aoeCdMin = t.attackCdMin;
+                this.aoeCdMax = t.attackCdMax;
+            } else if (n === 2) {
+                this.aoeCdMin = t.attackCdMin * 0.75;
+                this.aoeCdMax = t.attackCdMax * 0.75;
+            } else {
+                this.aoeCdMin = t.attackCdMin * 0.55;
+                this.aoeCdMax = t.attackCdMax * 0.55;
+            }
+        }
+
+        update(dt, target) {
+            // Ally giants take a SHORTCUT path: positional move is
+            // handled by boundGiants.update (formation behind the
+            // player), and combat is just the AoE cadence striking
+            // the nearest HOSTILE enemy. Skipping super.update
+            // avoids the Boss class's player-targeting stalk loop
+            // that would otherwise drag a bound giant TOWARD the
+            // player to attack them.
+            if (this.ally) {
+                if (!this.alive) return;
+                if (this.hitFlash > 0) this.hitFlash = Math.max(0, this.hitFlash - dt);
+                this._tickAoEAlly(dt);
+                if (this.aoeFlashTimer > 0) this.aoeFlashTimer -= dt;
+                return;
+            }
+
+            super.update(dt, target);
+            if (!this.alive) return;
+
+            // Telegraph countdown -> fire AoE on zero.
+            if (this.telegraphTimer > 0) {
+                this.telegraphTimer -= dt;
+                if (this.telegraphTimer <= 0) this._fireAoE();
+            } else {
+                this.aoeTimer -= dt;
+                if (this.aoeTimer <= 0) {
+                    this.telegraphTimer = this.telegraphMax;
+                    this.aoeTimer = this.aoeCdMin +
+                        Math.random() * (this.aoeCdMax - this.aoeCdMin);
+                }
+            }
+            if (this.aoeFlashTimer > 0) this.aoeFlashTimer -= dt;
+
+            // Support-spawn loop. Skips when the type has supports=0.
+            if (this.giantType.supports > 0 && this.phase >= 2) {
+                this.supportTimer -= dt;
+                if (this.supportTimer <= 0) {
+                    this._spawnSupports();
+                    this.supportTimer = 14 + Math.random() * 6;
+                }
+            }
+        }
+
+        // Ally version of the AoE loop - same telegraph rhythm but
+        // damages every nearby hostile instead of the player. Used
+        // by bound giants. Cooldown resets through the same fields
+        // so damage cadence reads identical to the wild version.
+        _tickAoEAlly(dt) {
+            if (this.telegraphTimer > 0) {
+                this.telegraphTimer -= dt;
+                if (this.telegraphTimer <= 0) this._fireAoEAlly();
+            } else {
+                this.aoeTimer -= dt;
+                if (this.aoeTimer <= 0) {
+                    this.telegraphTimer = this.telegraphMax;
+                    this.aoeTimer = this.aoeCdMin +
+                        Math.random() * (this.aoeCdMax - this.aoeCdMin);
+                }
+            }
+        }
+
+        _fireAoEAlly() {
+            const t = this.giantType;
+            const cx = this.x + this.width / 2;
+            const cy = this.y + this.height / 2;
+            this.aoeFlashTimer = this.aoeFlashMax;
+
+            // Pick the nearest hostile within range. Without a
+            // target, the cooldown still ticks - the giant just
+            // doesn't fire blindly.
+            let target = null, bestD = t.attackRange * t.attackRange;
+            for (const e of enemies) {
+                if (!e.alive || e.ally || e.neutral) continue;
+                const ex = e.x + e.width / 2;
+                const ey = e.y + e.height / 2;
+                const dx = ex - cx, dy = ey - cy;
+                const d = dx * dx + dy * dy;
+                if (d < bestD) { bestD = d; target = e; }
+            }
+            if (!target) return;
+
+            if (t.attack === "ranged") {
+                const tx = target.x + target.width / 2;
+                const ty = target.y + target.height / 2;
+                // Reuse the player's projectile pipeline so the
+                // bolt routes hits through the existing damage
+                // path. Color tint matches the wild attack.
+                projectiles.push({
+                    x: cx - 6, y: cy - 6, w: 12, h: 12,
+                    vx: ((tx - cx) / Math.hypot(tx - cx, ty - cy)) * 420,
+                    vy: ((ty - cy) / Math.hypot(tx - cx, ty - cy)) * 420,
+                    life: 0.9,
+                    damage: t.attackDamage,
+                    color: t.color,
+                    age: 0, alive: true,
+                });
+                return;
+            }
+
+            // AoE - hit every hostile within range.
+            const r2 = t.attackRange * t.attackRange;
+            for (const e of enemies) {
+                if (!e.alive || e.ally || e.neutral) continue;
+                const ex = e.x + e.width / 2;
+                const ey = e.y + e.height / 2;
+                const dx = ex - cx, dy = ey - cy;
+                if (dx * dx + dy * dy > r2) continue;
+                e.takeHit(t.attackDamage, { x: cx, y: cy });
+                if (!e.alive) onEnemyDefeated(e);
+            }
+            shake.trigger(4, 0.12);
+            if (typeof cinematicFx !== "undefined") {
+                cinematicFx.burst(cx, cy, "255, 220, 140", 4);
+            }
+        }
+
+        _fireAoE() {
+            const t = this.giantType;
+            const cx = this.x + this.width / 2;
+            const cy = this.y + this.height / 2;
+            this.aoeFlashTimer = this.aoeFlashMax;
+
+            if (t.attack === "ranged") {
+                // Direct strike at the player using the existing
+                // hostile projectile system - uses the giant's
+                // tinted color so each type reads distinct.
+                const tx = player.x + player.width / 2;
+                const ty = player.y + player.height / 2;
+                spawnHostileProjectile(cx, cy, tx, ty,
+                    t.attackDamage, t.color);
+                return;
+            }
+
+            // AoE: damage the player if they're inside the radius.
+            const r = t.attackRange;
+            const px = player.x + player.width / 2;
+            const py = player.y + player.height / 2;
+            const d = Math.hypot(px - cx, py - cy);
+            if (d <= r) {
+                damagePlayer(t.attackDamage, { x: cx, y: cy });
+            }
+            // Visible impact: shake + brief flash so the AoE reads
+            // as connecting even from across the screen.
+            shake.trigger(7, 0.18);
+            if (typeof cinematicFx !== "undefined") {
+                cinematicFx.burst(cx, cy, "230, 80, 80", 6);
+            }
+        }
+
+        _spawnSupports() {
+            const t = this.giantType;
+            for (let i = 0; i < t.supports; i++) {
+                const ang = Math.random() * Math.PI * 2;
+                const r = 80 + Math.random() * 30;
+                const sx = this.x + this.width / 2 + Math.cos(ang) * r;
+                const sy = this.y + this.height / 2 + Math.sin(ang) * r;
+                spawnEnemy(
+                    Math.max(60, Math.min(WORLD_W - 60, sx)),
+                    Math.max(60, Math.min(WORLD_H - 60, sy)),
+                    {
+                        hp: 4, speed: 110, contactDamage: 12,
+                        reward: 8, xpReward: 6,
+                    }
+                );
+            }
+        }
+
+        draw(ctx) {
+            const x = Math.round(this.x);
+            const y = Math.round(this.y);
+            const cx = x + this.width / 2;
+            const cy = y + this.height / 2;
+            const t = this.giantType;
+
+            // Aura halo - large and breathing.
+            this.auraPhase += 0.04;
+            const auraR = (this.giantType.arenaSize) +
+                Math.sin(this.auraPhase) * 6;
+            ctx.save();
+            ctx.globalAlpha = 0.25;
+            ctx.fillStyle = t.aura;
+            ctx.beginPath();
+            ctx.arc(cx, cy + 6, auraR, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+            ctx.restore();
+
+            // AoE telegraph ring.
+            if (this.telegraphTimer > 0) {
+                const frac = 1 - (this.telegraphTimer / this.telegraphMax);
+                const r = 24 + frac * t.attackRange;
+                ctx.save();
+                ctx.globalAlpha = 0.45 + 0.4 * frac;
+                ctx.strokeStyle = t.color;
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(cx, cy, r, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.restore();
+            }
+            // AoE impact ring - one frame of solid white-on-color.
+            if (this.aoeFlashTimer > 0) {
+                const f = this.aoeFlashTimer / this.aoeFlashMax;
+                ctx.save();
+                ctx.globalAlpha = f * 0.55;
+                ctx.fillStyle = t.color;
+                ctx.beginPath();
+                ctx.arc(cx, cy, t.attackRange * (1.05 - f), 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+
+            // Body - chunky 96x96 silhouette with elemental color +
+            // dark trim. A few colored highlights sell the scale.
+            ctx.fillStyle = "rgba(0, 0, 0, 0.32)";
+            ctx.beginPath();
+            ctx.ellipse(cx, y + this.height + 4, 38, 8, 0, 0, Math.PI * 2);
+            ctx.fill();
+            // Legs
+            ctx.fillStyle = "#1a1a24";
+            ctx.fillRect(x + 24, y + 64, 16, 28);
+            ctx.fillRect(x + 56, y + 64, 16, 28);
+            // Body
+            ctx.fillStyle = t.color;
+            ctx.fillRect(x + 16, y + 28, 64, 44);
+            // Body shadow lower
+            ctx.fillStyle = "rgba(0, 0, 0, 0.25)";
+            ctx.fillRect(x + 16, y + 60, 64, 12);
+            // Pauldrons
+            ctx.fillStyle = "#1a1a24";
+            ctx.fillRect(x + 8,  y + 28, 16, 14);
+            ctx.fillRect(x + 72, y + 28, 16, 14);
+            // Arms
+            ctx.fillStyle = t.color;
+            ctx.fillRect(x + 6,  y + 42, 14, 26);
+            ctx.fillRect(x + 76, y + 42, 14, 26);
+            // Head
+            ctx.fillStyle = "#2a2a36";
+            ctx.fillRect(x + 32, y + 6, 32, 26);
+            // Glowing eyes (elemental color)
+            ctx.fillStyle = t.color;
+            ctx.fillRect(x + 38, y + 14, 6, 4);
+            ctx.fillRect(x + 52, y + 14, 6, 4);
+
+            // Hit-flash overlay
+            if (this.hitFlash > 0) {
+                ctx.save();
+                ctx.globalCompositeOperation = "source-atop";
+                ctx.globalAlpha = Math.min(1, this.hitFlash * 8) * 0.7;
+                ctx.fillStyle = "#ffffff";
+                ctx.fillRect(x, y, this.width, this.height);
+                ctx.restore();
+            }
+
+            // HP pip uses the parent draw helper if available; we
+            // hand-roll a thicker bar so giants read clearly.
+            const barW = 84, barH = 6;
+            const bx = cx - barW / 2;
+            const by = y - 12;
+            ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+            ctx.fillRect(bx - 1, by - 1, barW + 2, barH + 2);
+            ctx.fillStyle = "#1a1a24";
+            ctx.fillRect(bx, by, barW, barH);
+            const frac = Math.max(0, this.hp / this.maxHp);
+            ctx.fillStyle = t.color;
+            ctx.fillRect(bx, by, barW * frac, barH);
+
+            // Name banner
+            ctx.font = "bold 11px system-ui, sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "bottom";
+            ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+            ctx.fillText(this.name, cx + 1, by - 3 + 1);
+            ctx.fillStyle = t.color;
+            ctx.fillText(this.name, cx, by - 3);
+        }
+    }
+
+    // Giant spawner - one giant at a time in any level marked
+    // `giantSpawn: true`. Idle in every other zone.
+    const giantSpawner = {
+        current: null,
+        // Cooldown after a defeat / despawn before rolling the next
+        // giant. First spawn after entering the plains is faster
+        // (4 s) so the player isn't waiting forever to see one.
+        spawnTimer: 4.0,
+        respawnMin: 90,
+        respawnMax: 150,
+        _typeIds: ["storm", "earth", "fire", "void", "water", "light"],
+        _bag: [],
+
+        _pickType() {
+            // Rotating bag - shuffle when empty so all six get
+            // their turn before any repeats.
+            if (this._bag.length === 0) {
+                this._bag = this._typeIds.slice();
+                for (let i = this._bag.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [this._bag[i], this._bag[j]] =
+                        [this._bag[j], this._bag[i]];
+                }
+            }
+            return this._bag.pop();
+        },
+
+        update(dt) {
+            const lvl = currentLevel;
+            if (!lvl || !lvl.giantSpawn) {
+                // Outside a giant zone - clear so a leftover boss
+                // doesn't drift between worlds.
+                if (this.current) this.current = null;
+                return;
+            }
+            // Stale ref check - if our giant died or got removed
+            // from the enemies array, mark it gone and start the
+            // respawn timer.
+            if (this.current && (!this.current.alive ||
+                enemies.indexOf(this.current) === -1)) {
+                this.current = null;
+                this.spawnTimer = this.respawnMin +
+                    Math.random() * (this.respawnMax - this.respawnMin);
+            }
+            if (this.current) return;
+
+            this.spawnTimer -= dt;
+            if (this.spawnTimer > 0) return;
+
+            // Don't surface a giant on top of the player. The
+            // arena center + jitter usually puts spawn well clear,
+            // but if it lands too close we wait a moment and try
+            // again next frame.
+            const center = lvl.giantSpawnCenter || {
+                x: WORLD_W / 2, y: WORLD_H / 2,
+            };
+            const jitter = lvl.giantSpawnJitter || 320;
+            const sx = center.x + (Math.random() - 0.5) * jitter * 2;
+            const sy = center.y + (Math.random() - 0.5) * jitter * 2;
+            const px = player.x + player.width / 2;
+            const py = player.y + player.height / 2;
+            if (Math.hypot(sx - px, sy - py) < 220) {
+                this.spawnTimer = 0.5;
+                return;
+            }
+            if (enemies.length >= MAX_ENEMIES) {
+                this.spawnTimer = 0.8;
+                return;
+            }
+
+            const typeId = this._pickType();
+            const cfg = GIANT_TYPES[typeId];
+            const giant = new Giant(
+                Math.max(80, Math.min(WORLD_W - 176, sx)),
+                Math.max(80, Math.min(WORLD_H - 176, sy)),
+                cfg, { levelId: lvl.id }
+            );
+            enemies.push(giant);
+            this.current = giant;
+            // Announce + small camera punch so the player turns
+            // toward the spawn.
+            questLog.showToast(
+                `${cfg.name} stirs in the plains.`, 3.0
+            );
+            shake.trigger(5, 0.25);
+        },
+
+        reset() {
+            this.current = null;
+            this.spawnTimer = 4.0;
+            this._bag = [];
+        },
+    };
+
+    // Bound giants - special-units ally module. Each bound giant
+    // sits on player.specialUnits as a snapshot { typeId, hp,
+    // maxHp }. The first `activeCap` are LIVE in the world as
+    // ally Giant instances that follow the player and AoE-strike
+    // the nearest hostile. Extras are reserves that wait for a
+    // slot.
+    const boundGiants = {
+        activeCap: 2,
+        live: [],          // live Giant instances (max activeCap)
+
+        // Promote stored snapshots into live ally giants up to the
+        // active cap. Called on zone load so the player's bound
+        // colossi visibly follow them.
+        spawnActive() {
+            this.live.length = 0;
+            const px = player.x + player.width / 2;
+            const py = player.y + player.height / 2;
+            const slots = Math.min(this.activeCap,
+                player.specialUnits.length);
+            for (let i = 0; i < slots; i++) {
+                const snap = player.specialUnits[i];
+                const cfg = GIANT_TYPES[snap.typeId];
+                if (!cfg) continue;
+                const ang = (i / Math.max(1, slots)) * Math.PI * 2 +
+                    Math.PI / 2;
+                const sx = px + Math.cos(ang) * 110 - 48;
+                const sy = py + Math.sin(ang) * 110 - 48;
+                const g = new Giant(
+                    Math.max(40, Math.min(WORLD_W - 136, sx)),
+                    Math.max(40, Math.min(WORLD_H - 136, sy)),
+                    cfg, { levelId: currentLevel ? currentLevel.id : null }
+                );
+                // Ally flags - existing Enemy.update + collision
+                // pipeline already gates ally-vs-player collisions
+                // via `e.ally`.
+                g.ally = true;
+                g.neutral = false;
+                g.contactDamage = 0;
+                g.hp = Math.max(1, snap.hp ?? cfg.hp);
+                g.maxHp = cfg.hp;
+                enemies.push(g);
+                this.live.push(g);
+            }
+        },
+
+        update(dt) {
+            if (this.live.length === 0) return;
+            const px = player.x + player.width / 2;
+            const py = player.y + player.height / 2;
+            for (let i = this.live.length - 1; i >= 0; i--) {
+                const g = this.live[i];
+                if (!g.alive) {
+                    // Drop the dead ally from the live list so we
+                    // don't keep ticking it; the snapshot stays in
+                    // player.specialUnits with whatever hp remains
+                    // so the next zone re-spawns them.
+                    this.live.splice(i, 1);
+                    continue;
+                }
+                // Trail the player at a fixed offset so they don't
+                // overlap. Allies don't telegraph AoE - their attack
+                // cadence runs on the same Giant.update cycle, but
+                // _fireAoE damages enemies INSTEAD of the player.
+                const ang = (i / Math.max(1, this.live.length)) *
+                    Math.PI * 2 + Math.PI / 2;
+                const tx = px + Math.cos(ang) * 110;
+                const ty = py + Math.sin(ang) * 110;
+                const dx = tx - (g.x + g.width / 2);
+                const dy = ty - (g.y + g.height / 2);
+                const d = Math.hypot(dx, dy);
+                if (d > 12) {
+                    const step = Math.min(d, g.giantType.speed * 1.4 * dt);
+                    g.x += (dx / d) * step;
+                    g.y += (dy / d) * step;
+                }
+            }
+        },
+
+        // Save the live giants' hp back to their snapshots so
+        // damage carries across zone transitions.
+        sync() {
+            const n = Math.min(this.live.length,
+                player.specialUnits.length);
+            for (let i = 0; i < n; i++) {
+                player.specialUnits[i].hp = this.live[i].hp;
+            }
+        },
+
+        reset() {
+            this.live.length = 0;
+        },
+    };
+
+    // Bind a defeated giant to the player. Called from the post-
+    // defeat prompt below. Capped so the player can't stack the
+    // entire pantheon. Returns true if accepted.
+    function bindGiant(typeId) {
+        if (!player.specialUnits) player.specialUnits = [];
+        if (player.specialUnits.length >= 5) {
+            questLog.showToast(
+                "Your special-unit roster is full.", 2.4
+            );
+            return false;
+        }
+        const cfg = GIANT_TYPES[typeId];
+        if (!cfg) return false;
+        player.specialUnits.push({
+            typeId, hp: cfg.hp, maxHp: cfg.hp,
+        });
+        questLog.showToast(
+            `${cfg.name} is bound to you.`, 3.0
+        );
+        sound.play("levelUp");
+        flash.trigger(0.6, 0.3);
+        // If the active slots aren't full, push the new bind into
+        // the world so the player sees them right away.
+        if (boundGiants.live.length < boundGiants.activeCap) {
+            // Re-spawn from snapshots so the formation is correct.
+            for (const g of boundGiants.live) {
+                const idx = enemies.indexOf(g);
+                if (idx >= 0) enemies.splice(idx, 1);
+            }
+            boundGiants.spawnActive();
+        }
+        return true;
+    }
 
     // Spawn up to 4 reserve recruits as ally "skirmishers" at the
     // start of a hostile zone. Each skirmisher is a basic Enemy
@@ -16690,6 +17442,11 @@
         playerPulse.update(dt);
         shake.update(dt);
         if (typeof chapterTwo !== "undefined") chapterTwo.tick(dt);
+        // Giants - rare colossi only roll in zones with
+        // `giantSpawn: true`. Bound giants follow the player in
+        // every zone as ally units.
+        if (typeof giantSpawner !== "undefined") giantSpawner.update(dt);
+        if (typeof boundGiants !== "undefined") boundGiants.update(dt);
         flash.update(dt);
         corruption.update(dt);
         crown.update(dt);
@@ -16960,7 +17717,16 @@
         // the roster carries over.
         resetLightCreatures();
         boats.reset();
+        // Sync any in-flight giant hp back to player.specialUnits
+        // BEFORE clearing live refs, then re-spawn fresh ally
+        // giants in the new zone so the formation snaps cleanly.
+        if (typeof boundGiants !== "undefined") {
+            boundGiants.sync();
+            boundGiants.reset();
+        }
+        if (typeof giantSpawner !== "undefined") giantSpawner.reset();
         for (const snap of player.lightCreatures) rehireLightCreature(snap);
+        if (typeof boundGiants !== "undefined") boundGiants.spawnActive();
         attack.active = false;
         attack.timer = 0;
         attack.cooldownTimer = 0;
@@ -17109,6 +17875,11 @@
         player.lightCreatures.length = 0;
         resetLightCreatures();
         boats.reset();
+        // Special units - fresh run = no bound giants. Reset both
+        // the snapshot list and the in-world ally roster.
+        player.specialUnits = [];
+        if (typeof boundGiants !== "undefined") boundGiants.reset();
+        if (typeof giantSpawner !== "undefined") giantSpawner.reset();
         drops.length = 0;
         inventoryOpen = false;
 
