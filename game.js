@@ -553,6 +553,16 @@
                     keyId: "gold_key",
                     lockedMessage: 'The shrine gate is sealed. You need a Golden Key.',
                 },
+                // South seam to the Deeper Caverns. Stays hidden
+                // (no toast) until the player is on the awakening
+                // arc; before that, the locked message keeps it
+                // from spoiling the chapter 1 flow.
+                south: {
+                    level: "deeper_caverns",
+                    chapterGate: "awakening",
+                    lockedMessage:
+                        "The floor is solid here. For now.",
+                },
             },
             // Chapter-3 mid-boss: Throne Warden. The three-phase AI
             // is gated by `multiPhase: true` so the Boss class's
@@ -722,6 +732,67 @@
                     kind: "book",
                     x: 1400, y: 1100,
                     text: '"\'They told us the Heart was placed here to be kept. I think now it was placed here to be forgotten.\'"',
+                },
+            ],
+        },
+
+        // --- Chapter 2: Deeper Caverns -------------------------
+        // Mission 14 destination. Tight layout (smaller world),
+        // heavier enemy baseline, faster spawn cadence, and the
+        // Abyss Herald boss for Mission 15.
+        //
+        // Reached from the caverns via the east gate when the
+        // player is on mission 14+ (gated in the caverns exit
+        // patch below). The Herald carries `multiPhase: true`
+        // for the 3-phase finale the arc builds toward.
+        deeper_caverns: {
+            id: "deeper_caverns",
+            name: "Deeper Caverns",
+            safe: false,
+            // Corrupting zone - the dark presses harder here than
+            // in the caverns, matching the crown-awakened arc.
+            corrupting: true,
+            cols: 60, rows: 44,
+            baseTile: TILE_STONE,
+            borderTile: TILE_STONE,
+            scatter: [
+                { tile: TILE_VOID,  prob: 0.10 },
+                { tile: TILE_WATER, prob: 0.04 },
+                { tile: TILE_STONE, prob: 0.04 },
+            ],
+            // Pressure dial: more enemies than caverns (7) + shrine
+            // (6) baselines, higher speed, hurt harder on contact.
+            enemyCount: 10,
+            enemyOpts: {
+                hp: 8, speed: 130,
+                contactDamage: 20, reward: 35, xpReward: 24,
+            },
+            exits: { west: "caverns" },
+            boss: {
+                name: "Abyss Herald",
+                // Centered in the zone. Player walks in from the
+                // west and meets the Herald mid-room.
+                x: 60 * 32 / 2 - 32,
+                y: 44 * 32 / 2 - 32,
+                hp: 75,
+                speed: 68,
+                reward: 600,
+                xpReward: 180,
+                contactDamage: 26,
+                multiPhase: true,
+                chapterGate: "awakening",
+            },
+            npcs: [],
+            lore: [
+                {
+                    id: "deeper_1", name: "Dark Glyph", kind: "statue",
+                    x: 520, y: 620,
+                    text: '"The glyph spells a word that unmakes itself as you read it."',
+                },
+                {
+                    id: "deeper_2", name: "Herald\'s Chain", kind: "relic",
+                    x: 1380, y: 980,
+                    text: '"A chain that thrums like it remembers what it once held."',
                 },
             ],
         },
@@ -4623,9 +4694,17 @@
             activeDuration: 8.0,
             pulsePhase: 0,
 
+            // Awakening-chapter upgrade. Flipped on by awaken()
+            // at Mission 13. Boosts the burn numbers, tints the
+            // glow violet, and shortens the energy ramp so the
+            // player gets more Crown Mode passes through Chapter
+            // 2's harder waves. Dormant means "chapter 1 rules".
+            awakened: false,
+            awakenPulse: 0,
+
             // Per-frame multipliers consumed by the attack systems.
             // 1.0 when Crown Mode is dormant; 1.4x damage + 1.3x
-            // size when active.
+            // size when active (1.6x / 1.45x once awakened).
             attackMult: 1,
             sizeMult: 1,
 
@@ -4663,6 +4742,23 @@
                 return true;
             },
 
+            // Mission 13 trigger - Crown Awakens. One-shot, idempotent.
+            // Drops a cinematic beat, kicks the energy bar to full
+            // for the moment, and keeps awakened=true for the rest
+            // of the run so later missions ride the upgraded curve.
+            awaken() {
+                if (this.awakened) return false;
+                this.awakened = true;
+                this.awakenPulse = 0;
+                this.energy = this.max;
+                this.activate();
+                flash.trigger(0.85, 0.4);
+                shake.trigger(14, 0.35);
+                camera.zoomPulse(1.12, 0.5);
+                questLog.showToast("The crown awakens.", 3.4);
+                return true;
+            },
+
             // Resolve level from story chapter. Runs every update -
             // cheap, and it keeps the crown synced to chapter
             // advances without a separate event hook.
@@ -4679,6 +4775,7 @@
             update(dt) {
                 this._refreshLevel();
                 this.pulsePhase += dt;
+                if (this.awakened) this.awakenPulse += dt;
 
                 if (this.active) {
                     this.activeTimer = Math.max(0, this.activeTimer - dt);
@@ -4686,9 +4783,12 @@
                 }
 
                 // Dynamic attack / size multipliers that the weapon
-                // dispatch reads at activation time.
-                this.attackMult = this.active ? 1.4 : 1;
-                this.sizeMult   = this.active ? 1.3 : 1;
+                // dispatch reads at activation time. Awakened state
+                // scales the burn a step higher since Chapter 2
+                // throws denser waves.
+                const awakenBoost = this.awakened ? 1.15 : 1;
+                this.attackMult = this.active ? 1.4 * awakenBoost : 1;
+                this.sizeMult   = this.active ? 1.3 * (this.awakened ? 1.12 : 1) : 1;
 
                 // Sparkle pool: the number of live sparkles steps
                 // with level, so level 4 has twice the shimmer as
@@ -4719,12 +4819,31 @@
                 const basePulse = 0.9 + 0.1 * Math.sin(this.pulsePhase * 2);
                 const lvlGlow = 0.35 + lvl * 0.12;
                 const activeBoost = this.active ? 1.5 : 1;
-                const glowR = (18 + lvl * 4) * basePulse * activeBoost;
+                // Awakened state scales the halo a touch larger and
+                // pulses faster so the post-mission-13 crown reads
+                // as upgraded at a glance.
+                const awakenScale = this.awakened
+                    ? (1.2 + 0.08 * Math.sin(this.awakenPulse * 4))
+                    : 1;
+                const glowR = (18 + lvl * 4) * basePulse * activeBoost * awakenScale;
                 ctx.save();
                 ctx.globalAlpha = Math.min(1, lvlGlow * activeBoost);
                 ctx.drawImage(glow,
                     cx - glowR, cy - glowR + 8,
                     glowR * 2, glowR * 2);
+                // Violet overlay on the awakened halo - additive so
+                // the gold reads underneath, not replaced. Adds a
+                // second breathing ring outside the gold one.
+                if (this.awakened) {
+                    const vR = glowR * 1.15;
+                    ctx.globalCompositeOperation = "lighter";
+                    ctx.globalAlpha = 0.35 + 0.15 * Math.sin(this.awakenPulse * 3);
+                    ctx.fillStyle = "#b070ff";
+                    ctx.beginPath();
+                    ctx.arc(cx, cy + 8, vR * 0.45, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.globalCompositeOperation = "source-over";
+                }
                 ctx.globalAlpha = 1;
 
                 // Crown sprite. A gold trapezoid base + three
@@ -4947,6 +5066,10 @@
         chapter4: { id: "chapter4", title: "Into the Shrine" },
         chapter5: { id: "chapter5", title: "Victory" },
         chapter6: { id: "chapter6", title: "The Deeper Dark" },
+        // Post-abyss arc. The story picks up AFTER the player has
+        // surfaced from Chapter 6. Drives corrupted-faction spawns,
+        // crown awakening, and the Abyss Herald finale.
+        awakening: { id: "awakening", title: "The Awakening" },
     };
 
     const STORY_STORAGE_KEY = "ethereon.storyState";
@@ -4961,6 +5084,7 @@
         // Ordered list drives `atLeast` and enforces one-way advance.
         chapterOrder: [
             "chapter1", "chapter2", "chapter3", "chapter4", "chapter5", "chapter6",
+            "awakening",
         ],
 
         is(id) { return this.state === id; },
@@ -5074,6 +5198,27 @@
               completed: false, chapter: "chapter5", tag: "keeper_fallen" },
             { id: 7, name: "Descend into the Abyss",
               completed: false, chapter: "chapter6", tag: "abyss_entered" },
+            // --- Chapter 2: The Awakening (post-abyss arc) --------
+            // Each mission fires a scripted dialogue BEAT at start
+            // (see MISSION_BEATS) so key moments read as cinematic
+            // rather than just objective-text. Completion triggers
+            // live in event hooks (zone entry, wave end, boss kill).
+            { id: 8, name: "Return from the Abyss",
+              completed: false, chapter: "awakening", tag: "return_grove" },
+            { id: 9, name: "The Grove Has Changed",
+              completed: false, chapter: null,        tag: "grove_changed" },
+            { id: 10, name: "Investigate the Disturbance",
+              completed: false, chapter: null,        tag: "disturbance_investigated" },
+            { id: 11, name: "New Creatures Emerge",
+              completed: false, chapter: null,        tag: "emerge_survived" },
+            { id: 12, name: "Survive the Corruption Waves",
+              completed: false, chapter: null,        tag: "corruption_survived" },
+            { id: 13, name: "The Crown Awakens",
+              completed: false, chapter: null,        tag: "crown_awakened" },
+            { id: 14, name: "Enter the Deeper Caverns",
+              completed: false, chapter: null,        tag: "deeper_entered" },
+            { id: 15, name: "Defeat the Abyss Herald",
+              completed: false, chapter: null,        tag: "herald_fallen" },
         ],
         currentMissionIndex: 0,
 
@@ -5121,8 +5266,26 @@
             if (index + 1 < this.list.length) {
                 this.currentMissionIndex = index + 1;
                 newMissionBanner.show(this.list[this.currentMissionIndex].name);
+                // Scripted beat for the new mission - cinematic
+                // one-liner. Skips gracefully if no beat is defined
+                // for the id. Rendered via the existing scripted
+                // dialogue system so it composes with modals cleanly.
+                this._fireBeat(this.list[this.currentMissionIndex].id);
             }
             return true;
+        },
+
+        _fireBeat(id) {
+            const beat = (typeof MISSION_BEATS !== "undefined")
+                ? MISSION_BEATS[id] : null;
+            if (!beat || !beat.length) return;
+            if (typeof scriptedDialogue !== "undefined" &&
+                scriptedDialogue && scriptedDialogue.play) {
+                // Defer by a frame so the mission banner shows first
+                // and the scripted line doesn't overlap the
+                // mission-complete toast.
+                setTimeout(() => { scriptedDialogue.play(beat); }, 800);
+            }
         },
 
         completeById(id) {
@@ -5318,6 +5481,164 @@
                 "It was this.",
             ],
         },
+        awakening: {
+            title: "Chapter 2 - The Awakening",
+            lines: [
+                "You climb out of the deep with dust in your eyes.",
+                "The grove breathes, but it breathes differently now.",
+                "Something climbed out with you. And it is getting louder.",
+            ],
+        },
+    };
+
+    // ---------------------------------------------------------------
+    // Chapter 2 "The Awakening" orchestrator
+    //
+    // Owns the mission 8-15 progression hooks. Other subsystems
+    // (zone transition, enemy defeat, boss kill, wave system) call
+    // into this module so the arc's state lives in exactly one place
+    // instead of spraying condition checks across the codebase.
+    //
+    // Mission gates (simple and player-friendly):
+    //   8  Return from the Abyss   - player enters grove with
+    //                                 mission 7 already done
+    //   9  The Grove Has Changed   - auto-advances 6 s after 8
+    //   10 Investigate Disturbance - auto-advances 10 s after 9
+    //                                 (or the Elder talk below)
+    //   11 New Creatures Emerge    - 5 corrupted kills
+    //   12 Survive Corruption Waves- 10 more corrupted kills
+    //   13 Crown Awakens           - auto-advances on 12 end,
+    //                                 then crown.awaken()
+    //   14 Enter Deeper Caverns    - zone entry of `deeper_caverns`
+    //   15 Defeat Abyss Herald     - boss name match in the
+    //                                 enemy-defeat path
+    // ---------------------------------------------------------------
+    const chapterTwo = {
+        corruptedKills: 0,
+        // Delay accumulators for timer-gated missions.
+        _pending: null,  // { missionId, remaining }
+        _m11Needed: 5,
+        _m12Needed: 10,
+
+        inAwakening() {
+            return typeof story !== "undefined" && story.atLeast &&
+                story.atLeast("awakening");
+        },
+
+        isCurrent(id) {
+            return missions.canTrigger && missions.canTrigger(id);
+        },
+
+        _schedule(missionId, secs) {
+            this._pending = { missionId, remaining: secs };
+        },
+
+        tick(dt) {
+            if (!this._pending) return;
+            this._pending.remaining -= dt;
+            if (this._pending.remaining <= 0) {
+                const id = this._pending.missionId;
+                this._pending = null;
+                if (this.isCurrent(id)) {
+                    missions.completeById(id);
+                    // Chain the timer-gated follow-ups so the arc
+                    // self-advances through the contemplative beats
+                    // instead of waiting on a player input.
+                    if (id === 9) this._schedule(10, 10.0);
+                }
+            }
+        },
+
+        onZoneEntered(levelId) {
+            if (!levelId) return;
+            // Mission 8: returning to the grove after descending
+            // into the abyss (mission 7 complete).
+            if (this.isCurrent(8) && levelId === "grove") {
+                missions.completeById(8);
+                // Queue mission 9 auto-advance so the next beat
+                // plays without requiring another zone trip.
+                this._schedule(9, 6.0);
+            }
+            // Mission 14: entering the Deeper Caverns.
+            if (this.isCurrent(14) && levelId === "deeper_caverns") {
+                missions.completeById(14);
+            }
+            // Step mission 9 -> 10 if the Elder is in this zone
+            // (grove) - on revisit, advance the arc so the player
+            // isn't stuck waiting forever.
+            if (this.isCurrent(9) && levelId === "grove") {
+                this._schedule(10, 10.0);
+            }
+        },
+
+        // Called when the player speaks to the Village Elder. Short
+        // circuits mission 10's timer so the conversation drives
+        // the arc forward.
+        onElderSpoken() {
+            if (this.isCurrent(10)) {
+                missions.completeById(10);
+            }
+        },
+
+        onEnemyKilled(enemy) {
+            if (!enemy || !enemy.faction) return;
+            if (enemy.faction.id !== "corrupted") return;
+            if (this.isCurrent(11) || this.isCurrent(12)) {
+                this.corruptedKills++;
+            }
+            if (this.isCurrent(11) &&
+                this.corruptedKills >= this._m11Needed) {
+                missions.completeById(11);
+                this.corruptedKills = 0;
+            } else if (this.isCurrent(12) &&
+                this.corruptedKills >= this._m12Needed) {
+                missions.completeById(12);
+                this.corruptedKills = 0;
+                // Mission 13 fires immediately after 12 - the crown
+                // AWAKENS here. Scheduled so the beat reads right
+                // after the "mission complete" toast clears.
+                this._schedule(13, 1.8);
+                setTimeout(() => {
+                    if (typeof crown !== "undefined") crown.awaken();
+                }, 1700);
+            }
+        },
+
+        onHeraldKilled() {
+            if (this.isCurrent(15)) {
+                missions.completeById(15);
+                // End-of-arc beat + unlock the next chapter slot
+                // for future content.
+                setTimeout(() => {
+                    if (typeof scriptedDialogue !== "undefined") {
+                        scriptedDialogue.play([{
+                            speaker: "Elder",
+                            text: "This isn't just corruption... it's awakening.",
+                        }]);
+                    }
+                }, 2000);
+            }
+        },
+
+        reset() {
+            this.corruptedKills = 0;
+            this._pending = null;
+        },
+    };
+
+    // Per-mission scripted dialogue beats. Fired at mission START
+    // via scriptedDialogue.play() (called from the mission advance
+    // hook below). Short one-liners - cinematic, not menu. Beats
+    // tied to a boss use the Abyss Herald's name.
+    const MISSION_BEATS = {
+        8:  [{ speaker: "??",      text: "You're back... but something followed you." }],
+        9:  [{ speaker: "Elder",   text: "The grove... it's not the same." }],
+        10: [{ speaker: "Elder",   text: "Go. Find what the dark has stirred." }],
+        11: [{ speaker: "Scout",   text: "They didn't come with claws. They came wrong." }],
+        12: [{ speaker: "Captain", text: "Corruption is rising. Hold the line." }],
+        13: [{ speaker: "Crown",   text: "It's no longer reacting... it's choosing you." }],
+        14: [{ speaker: "Elder",   text: "The deeper caverns. Don't come back quiet." }],
+        15: [{ speaker: "Herald",  text: "You were not meant to survive." }],
     };
 
     const cinematic = {
@@ -7313,6 +7634,11 @@
         // pool, so around 20 kills fills Crown Mode at baseline.
         // Boss kills push the crown harder as a reward beat.
         crown.add(enemy && enemy.isBoss ? 40 : 5);
+        // Chapter 2 "Awakening" arc - count corrupted-faction kills
+        // so missions 11 / 12 can auto-progress.
+        if (typeof chapterTwo !== "undefined") {
+            chapterTwo.onEnemyKilled(enemy);
+        }
         if (enemy.isBoss && enemy.levelId) {
             defeatedBosses.add(enemy.levelId);
             questLog.showToast(`${enemy.name} defeated!`, 2.6);
@@ -7322,6 +7648,10 @@
             story.advance("chapter5");
             // Mission 6: Shrine Keeper falls.
             if (enemy.levelId === "shrine") missions.completeById(6);
+            // Chapter 2 - Mission 15: Abyss Herald falls.
+            if (enemy.name === "Abyss Herald") {
+                if (typeof chapterTwo !== "undefined") chapterTwo.onHeraldKilled();
+            }
             // Shrine specifically unlocks the Abyss. A second toast
             // queues after the defeat banner so the player knows a
             // new path just opened behind them.
@@ -9605,6 +9935,24 @@
             speedScale: 0.55,
             damageScale: 1.6,
         },
+        // Awakening-chapter faction. Faster than base, occasional
+        // lunge-dash towards the player, violet+crimson tint to
+        // read as "corrupted" without borrowing any light-energy
+        // palette. Only spawns when story.atLeast("awakening").
+        corrupted: {
+            id: "corrupted",
+            name: "Corrupted",
+            tint: "rgba(110, 30, 130, 0.55)",
+            pack: true,
+            dash: true,             // occasional lunge toward player
+            dashMin: 2.2,
+            dashMax: 4.0,
+            dashSpeedMult: 2.4,
+            dashDuration: 0.32,
+            hpScale: 1.15,
+            speedScale: 1.25,
+            damageScale: 1.1,
+        },
     };
 
     // Hostile projectiles owned by enemy factions (sentinel bolts).
@@ -10010,6 +10358,31 @@
                 }
             }
 
+            // Corrupted dash: periodic lunge toward the target. The
+            // actual move is applied via a speed multiplier for
+            // `dashDuration` seconds, so collision / hitstop /
+            // knockback all still work naturally. Timer rolls from
+            // dashMin..dashMax between lunges.
+            if (this.faction && this.faction.dash && !this.ally) {
+                this.dashTimer = (this.dashTimer ?? 0) - dt;
+                if (this.dashActiveTimer > 0) {
+                    this.dashActiveTimer -= dt;
+                    if (this.dashActiveTimer <= 0) this.dashMult = 1;
+                }
+                if (this.dashTimer <= 0 && this.dashActiveTimer <= 0) {
+                    this.dashMult = this.faction.dashSpeedMult || 2.2;
+                    this.dashActiveTimer = this.faction.dashDuration || 0.3;
+                    this.dashTimer =
+                        (this.faction.dashMin || 2.0) +
+                        Math.random() *
+                        ((this.faction.dashMax || 3.5) -
+                         (this.faction.dashMin || 2.0));
+                    // Tiny blink so the player reads the dash as
+                    // telegraphed, not random.
+                    this.hitFlash = Math.max(this.hitFlash, 0.08);
+                }
+            }
+
             // Hunter pack bonus: proximity to other hunters boosts
             // speed. Counted here instead of in synergies because
             // the pack stat is intrinsic to the hunter's AI.
@@ -10030,7 +10403,8 @@
             // Sentinel: hold preferred distance from the target +
             // fire on cooldown when within line of sight range.
             let moveStep = this.speed * (this.buffMult || 1) *
-                           (this._packBonus || 1) * dt;
+                           (this._packBonus || 1) *
+                           (this.dashMult || 1) * dt;
             let wantsMove = dist > 0.5;
             if (this.faction && this.faction.ranged && !this.ally) {
                 const pref = this.faction.preferredRange || 200;
@@ -10777,6 +11151,15 @@
         // Weights sum to 100. Rebalanced by strength so late-game
         // waves skew toward the harder factions without dropping
         // variety completely.
+        //
+        // Awakening chapter: 35% of picks are forced to "corrupted"
+        // before the normal table rolls, so the post-abyss arc
+        // visibly shifts the enemy mix. `story.atLeast` is cheap
+        // (array.indexOf on ~7 items) so per-slot gating is fine.
+        if (typeof story !== "undefined" && story.atLeast &&
+            story.atLeast("awakening") && Math.random() < 0.35) {
+            return "corrupted";
+        }
         let wShadow, wHunter, wSentinel, wGuardian;
         if (strength < 2) {
             wShadow = 55; wHunter = 35; wSentinel = 8;  wGuardian = 2;
@@ -10941,9 +11324,24 @@
             this.rareSlots = cfg.rareSlots;
             this.currentFactions = cfg.factions || [];
             this.waveState = "active";
-            questLog.showToast(
-                `Wave ${this.waveIndex + 1} / ${this.totalWaves}`, 1.8
-            );
+            // Awakening chapter: surface "Corruption Incoming" +
+            // a subtle screen shake so wave starts read as rising
+            // pressure, not just a counter tick. Pre-awakening
+            // keeps the simple wave count so Chapter 1 pacing is
+            // untouched.
+            const awaken = typeof story !== "undefined" && story.atLeast &&
+                story.atLeast("awakening");
+            if (awaken) {
+                questLog.showToast(
+                    `Corruption Incoming  -  Wave ${this.waveIndex + 1} / ${this.totalWaves}`,
+                    2.2
+                );
+                if (typeof shake !== "undefined") shake.trigger(5, 0.22);
+            } else {
+                questLog.showToast(
+                    `Wave ${this.waveIndex + 1} / ${this.totalWaves}`, 1.8
+                );
+            }
         },
 
         onEnemyDefeated(enemy) {
@@ -15343,6 +15741,10 @@
                 // is run-scoped, so restarts re-seal the door until
                 // the player fells the boss again.
                 requiresBoss: exit.requiresBoss ?? null,
+                // Gate the exit on story progression - the awakening
+                // seam stays sealed until the player has actually
+                // reached that chapter.
+                chapterGate: exit.chapterGate ?? null,
                 lockedMessage: exit.lockedMessage ?? null,
             };
         }
@@ -15386,6 +15788,13 @@
     function tryUnlock(fromLevelId, dir, exit) {
         if (exit.requiresBoss &&
             !defeatedBosses.has(exit.requiresBoss)) {
+            return false;
+        }
+        // Story gate - exit is sealed until the player has reached
+        // the named chapter. Re-entering after advancing past the
+        // gate is free (no consumable).
+        if (exit.chapterGate &&
+            !(story.atLeast && story.atLeast(exit.chapterGate))) {
             return false;
         }
         if (!exit.keyId) return true;
@@ -15868,6 +16277,7 @@
         ambientParticles.update(dt);
         cinematicFx.update(dt);
         shake.update(dt);
+        if (typeof chapterTwo !== "undefined") chapterTwo.tick(dt);
         flash.update(dt);
         corruption.update(dt);
         crown.update(dt);
@@ -16081,6 +16491,13 @@
         currentLevel = level;
         world.load(level);
 
+        // Chapter 2 hook: this is the single place zone identity
+        // changes, so it owns the "entered X" signal for the
+        // awakening arc.
+        if (typeof chapterTwo !== "undefined") {
+            chapterTwo.onZoneEntered(id);
+        }
+
         // Explicit arrival point (used by interiors / building
         // entries) wins over side-based warp.
         if (arriveAt && typeof arriveAt.x === "number") {
@@ -16282,6 +16699,11 @@
         // Missions track the same campaign beats as story chapters,
         // so a fresh run rewinds them too.
         missions.reset();
+        if (typeof chapterTwo !== "undefined") chapterTwo.reset();
+        if (typeof crown !== "undefined") {
+            crown.awakened = false;
+            crown.awakenPulse = 0;
+        }
 
         // Lore discoveries - same persistence contract as story.
         loreLog.reset();
@@ -16566,6 +16988,31 @@
         // the flash + cinematic so a special-attack freeze-frame +
         // pause still reads correctly.
         if (paused) drawPauseMenu();
+
+        // Awakening chapter environmental shift - drops a subtle
+        // violet vignette over hostile zones so Chapter 2 reads as
+        // visibly heavier than Chapter 1. Drawn BELOW the flash so
+        // the big impact frames still pop on top. Skipped entirely
+        // when the arc hasn't started or the player is in a safe
+        // zone (cities stay clean).
+        if (typeof story !== "undefined" && story.atLeast &&
+            story.atLeast("awakening") &&
+            currentLevel && !currentLevel.safe) {
+            const pulse = 0.18 + 0.06 *
+                Math.sin(performance.now() * 0.0015);
+            ctx.save();
+            // Edge-biased tint: corners darker than center so the
+            // shift reads as atmospheric pressure, not a flat filter.
+            const grad = ctx.createRadialGradient(
+                VIEW_W / 2, VIEW_H / 2, 60,
+                VIEW_W / 2, VIEW_H / 2, Math.max(VIEW_W, VIEW_H) * 0.7
+            );
+            grad.addColorStop(0,   `rgba(60, 20, 80, ${(pulse * 0.25).toFixed(3)})`);
+            grad.addColorStop(1,   `rgba(30, 8, 60, ${pulse.toFixed(3)})`);
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+            ctx.restore();
+        }
 
         // Full-screen flash overlay - drawn above the HUD so the
         // impact frame briefly whites out everything. Idle frames
