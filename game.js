@@ -3240,6 +3240,91 @@
     };
 
     // ---------------------------------------------------------------
+    // Mega Tri Beam button (touch / pointer)
+    //
+    // Sits to the LEFT of the NOVA button on the same row, but only
+    // renders when megaTriBeam.canActivate() reports true. That
+    // means: in a hostile zone, with at least 3 nearby followers,
+    // enough magic + crown energy, and the ult off cooldown. A
+    // hidden button can't be tapped, so accidental misfires during
+    // exploration are impossible.
+    // ---------------------------------------------------------------
+    const megaTriBeamButton = {
+        x: 0, y: 0,
+        radius: 38,
+
+        layout() {
+            // Same row as NOVA, one column to the left.
+            this.x = VIEW_W - 178;
+            this.y = VIEW_H - 260;
+        },
+
+        pressed: false,
+        pointerId: null,
+        justPressed: false,
+
+        visible() {
+            if (gameState !== "playing") return false;
+            return typeof megaTriBeam !== "undefined" &&
+                megaTriBeam.canActivate();
+        },
+
+        contains(x, y) {
+            const dx = x - this.x;
+            const dy = y - this.y;
+            return dx * dx + dy * dy <= this.radius * this.radius;
+        },
+
+        onDown(x, y, pointerId) {
+            if (!this.visible()) return false;
+            if (this.pressed) return false;
+            if (!this.contains(x, y)) return false;
+            this.pressed = true;
+            this.pointerId = pointerId;
+            this.justPressed = true;
+            return true;
+        },
+
+        onUp(pointerId) {
+            if (this.pointerId !== pointerId) return;
+            this.pressed = false;
+            this.pointerId = null;
+        },
+
+        consumeJustPressed() {
+            const v = this.justPressed;
+            this.justPressed = false;
+            return v;
+        },
+
+        draw(ctx) {
+            if (!this.visible()) return;
+            const cy = this.y + (this.pressed ? 2 : 0);
+            ctx.save();
+            ctx.globalAlpha = this.pressed ? 0.95 : 0.78;
+            ctx.fillStyle = "#ffd166";
+            ctx.beginPath();
+            ctx.arc(this.x, cy, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 0.95;
+            ctx.strokeStyle = "#fff6d6";
+            ctx.lineWidth = this.pressed ? 4 : 3;
+            ctx.beginPath();
+            ctx.arc(this.x, cy, this.radius, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = "#1a1a24";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.font = "bold 17px system-ui, sans-serif";
+            ctx.fillText("≡", this.x, cy - 7);
+            ctx.font = "bold 10px system-ui, sans-serif";
+            ctx.fillText("TRI", this.x, cy + 8);
+            ctx.restore();
+        },
+    };
+
+    // ---------------------------------------------------------------
     // Pause button (touch / pointer)
     //
     // Tiny top-right square. Toggles the paused flag when tapped.
@@ -3407,6 +3492,7 @@
         superPowerButton.layout();
         specialButton.layout();
         novaButton.layout();
+        megaTriBeamButton.layout();
         interactButton.layout();
         pauseButton.layout();
         if (typeof itemBar !== "undefined") itemBar.layout();
@@ -3420,6 +3506,7 @@
     powerButton.layout();
     specialButton.layout();
     novaButton.layout();
+    megaTriBeamButton.layout();
     interactButton.layout();
     pauseButton.layout();
     // itemBar is defined further down in the IIFE; the onLayout
@@ -3662,6 +3749,11 @@
             e.preventDefault();
             return;
         }
+        if (megaTriBeamButton.onDown(x, y, e.pointerId)) {
+            canvas.setPointerCapture(e.pointerId);
+            e.preventDefault();
+            return;
+        }
         if (specialButton.onDown(x, y, e.pointerId)) {
             canvas.setPointerCapture(e.pointerId);
             e.preventDefault();
@@ -3754,6 +3846,7 @@
         superPowerButton.onUp(e.pointerId);
         specialButton.onUp(e.pointerId);
         novaButton.onUp(e.pointerId);
+        megaTriBeamButton.onUp(e.pointerId);
         interactButton.onUp(e.pointerId);
         restartButton.onUp(e.pointerId);
         pauseButton.onUp(e.pointerId);
@@ -7973,6 +8066,12 @@
             if (f.attackFlashTimer > 0)
                 f.attackFlashTimer = Math.max(0, f.attackFlashTimer - dt);
 
+            // Mega Tri Beam lock: while the group ult is charging or
+            // firing, the participating followers are puppeted by
+            // megaTriBeam._formUp. Skip their AI here so they don't
+            // wander out of the formation. Timers above still tick.
+            if (f._megaBeamLock) continue;
+
             // State machine: retreat has priority. Regenerate while
             // retreating; once healed above recoverThreshold, drop
             // back to follow.
@@ -9675,6 +9774,352 @@
             }
 
             ctx.restore();
+        },
+    };
+
+    // ---------------------------------------------------------------
+    // Mega Tri Beam - group ultimate
+    //
+    // A cinematic team-up attack. Requires 3+ nearby followers + a
+    // chunk of magic + a chunk of crown energy. The participating
+    // followers freeze in a fan formation behind the player, the
+    // group charges briefly, and the player unleashes a wide layered
+    // beam in their facing (or auto-target) direction.
+    //
+    // Scaling rewards bigger squads:
+    //   3 followers - base length / width / damage
+    //   4 followers - +33% width
+    //   5+ followers - +33% length AND +40% damage on top of the
+    //                  width bonus
+    //
+    // State machine: idle -> charge -> fire -> recover -> idle.
+    // Cooldown lives outside the state machine so a stale tap can
+    // be rejected immediately without re-entering charge.
+    // ---------------------------------------------------------------
+    const megaTriBeam = {
+        state: "idle",     // idle | charge | fire | recover
+        timer: 0,
+        cooldown: 0,
+        cooldownDuration: 12.0,
+        chargeDuration: 0.7,
+        fireDuration: 0.65,
+        recoverDuration: 0.35,
+
+        // Resource cost
+        magicCost: 60,
+        crownCost: 50,
+
+        // Squad gating
+        minSquad: 3,
+        nearbyRadius: 220,
+
+        // Beam geometry - rolled at activate() based on squad size.
+        length: 600,
+        halfWidth: 30,
+        damagePerTick: 10,
+        tickInterval: 0.1,
+        tickTimer: 0,
+
+        // Captured at activate / fire-start so the beam doesn't
+        // drift if the player turns mid-attack.
+        dirX: 0, dirY: 1,
+        originX: 0, originY: 0,
+
+        // Live participants (a SUBSET of followers - the first N
+        // that satisfied the proximity check). Tracked so we can
+        // unlock them on recovery without scanning followers again.
+        participants: [],
+
+        countNearby() {
+            if (typeof followers === "undefined" || followers.length === 0) return 0;
+            const px = player.x + player.width / 2;
+            const py = player.y + player.height / 2;
+            const r2 = this.nearbyRadius * this.nearbyRadius;
+            let n = 0;
+            for (const f of followers) {
+                if (!f || f.hp <= 0) continue;
+                const dx = (f.x + f.width / 2) - px;
+                const dy = (f.y + f.height / 2) - py;
+                if (dx * dx + dy * dy <= r2) n++;
+            }
+            return n;
+        },
+
+        canActivate() {
+            if (this.state !== "idle") return false;
+            if (this.cooldown > 0) return false;
+            if (player.magic < this.magicCost) return false;
+            if (typeof crown !== "undefined" && crown.energy < this.crownCost) {
+                return false;
+            }
+            return this.countNearby() >= this.minSquad;
+        },
+
+        activate() {
+            if (!this.canActivate()) return false;
+            // Roll beam params from the squad size present RIGHT
+            // NOW. Locked for the cast - reinforcements arriving
+            // mid-fire don't grow the beam.
+            const count = this.countNearby();
+            this.length = 580;
+            this.halfWidth = 32;
+            this.damagePerTick = 10;
+            if (count >= 4) {
+                this.halfWidth = 44;          // +37% wider
+            }
+            if (count >= 5) {
+                this.length = 800;            // +37% longer
+                this.damagePerTick = 14;      // +40% damage
+            }
+
+            // Direction snapshot - prefer auto-target so the team-
+            // up locks onto the priority enemy if there is one.
+            let fx = player.facing.x, fy = player.facing.y;
+            if (typeof autoTarget !== "undefined" && autoTarget.aimDir) {
+                const aim = autoTarget.aimDir();
+                if (aim) { fx = aim.x; fy = aim.y; }
+            }
+            const mag = Math.hypot(fx, fy) || 1;
+            this.dirX = fx / mag;
+            this.dirY = fy / mag;
+
+            // Capture participants - the SAME followers the count
+            // sampled, in the same order, so the formation is
+            // deterministic. Lock them so updateFollowers leaves
+            // them alone for the duration.
+            this.participants.length = 0;
+            const px = player.x + player.width / 2;
+            const py = player.y + player.height / 2;
+            const r2 = this.nearbyRadius * this.nearbyRadius;
+            for (const f of followers) {
+                if (!f || f.hp <= 0) continue;
+                const dx = (f.x + f.width / 2) - px;
+                const dy = (f.y + f.height / 2) - py;
+                if (dx * dx + dy * dy <= r2) {
+                    this.participants.push(f);
+                    f._megaBeamLock = true;
+                }
+            }
+
+            this.state = "charge";
+            this.timer = this.chargeDuration;
+            // Light camera punch at charge start - tells the player
+            // the cast actually fired.
+            if (typeof camera !== "undefined" && camera.zoomPulse) {
+                camera.zoomPulse(0.94, this.chargeDuration);
+            }
+            sound.play("attack");
+            questLog.showToast(
+                `Mega Tri Beam x${count}`, 1.6
+            );
+            return true;
+        },
+
+        update(dt) {
+            if (this.cooldown > 0) {
+                this.cooldown = Math.max(0, this.cooldown - dt);
+            }
+            if (this.state === "idle") return;
+            this.timer -= dt;
+
+            if (this.state === "charge") {
+                this._formUp();
+                if (this.timer <= 0) {
+                    // Spend resources at FIRE moment, not at charge
+                    // start - lets the player abort by death / damage
+                    // mid-charge without burning the bar.
+                    player.magic = Math.max(0,
+                        player.magic - this.magicCost);
+                    if (typeof crown !== "undefined") {
+                        crown.energy = Math.max(0,
+                            crown.energy - this.crownCost);
+                    }
+                    this.originX = player.x + player.width / 2;
+                    this.originY = player.y + player.height / 2;
+                    this.tickTimer = 0;
+                    this.state = "fire";
+                    this.timer = this.fireDuration;
+                    if (typeof shake !== "undefined") shake.trigger(14, 0.4);
+                    if (typeof flash !== "undefined") flash.trigger(0.7, 0.22);
+                }
+                return;
+            }
+
+            if (this.state === "fire") {
+                this._formUp();
+                this.tickTimer -= dt;
+                if (this.tickTimer <= 0) {
+                    this.tickTimer = this.tickInterval;
+                    this._dealDamage();
+                }
+                if (this.timer <= 0) {
+                    this.state = "recover";
+                    this.timer = this.recoverDuration;
+                }
+                return;
+            }
+
+            // recover - hold the formation a moment, then release.
+            this._formUp();
+            if (this.timer <= 0) {
+                this._releaseParticipants();
+                this.state = "idle";
+                this.cooldown = this.cooldownDuration;
+            }
+        },
+
+        _formUp() {
+            if (this.participants.length === 0) return;
+            const px = player.x + player.width / 2;
+            const py = player.y + player.height / 2;
+            // Backward = -dir, perpendicular = (-dy, dx)
+            const back = 36;
+            const sx = -this.dirY, sy = this.dirX;
+            const n = this.participants.length;
+            for (let i = 0; i < n; i++) {
+                const f = this.participants[i];
+                const offset = (i - (n - 1) / 2) * 38;
+                const tx = px - this.dirX * back + sx * offset - f.width / 2;
+                const ty = py - this.dirY * back + sy * offset - f.height / 2;
+                f.x = tx;
+                f.y = ty;
+                if (f.facing) {
+                    f.facing.x = this.dirX;
+                    f.facing.y = this.dirY;
+                }
+            }
+        },
+
+        _dealDamage() {
+            // Beam check is bounded by length + halfWidth so distant
+            // enemies short-circuit on the along-axis test (single
+            // dot product per enemy, no sqrt).
+            const cx = this.originX;
+            const cy = this.originY;
+            const dx = this.dirX, dy = this.dirY;
+            const halfW = this.halfWidth + 12;
+            const range = this.length;
+            let hitAny = false;
+            for (let i = 0; i < enemies.length; i++) {
+                const e = enemies[i];
+                if (!e.alive || e.ally || e.neutral) continue;
+                const ecx = e.x + e.width / 2;
+                const ecy = e.y + e.height / 2;
+                const rx = ecx - cx;
+                const ry = ecy - cy;
+                const along = rx * dx + ry * dy;
+                if (along < 0 || along > range) continue;
+                const perp = Math.abs(-rx * dy + ry * dx);
+                if (perp > halfW) continue;
+
+                e.takeHit(this.damagePerTick, { x: cx, y: cy });
+                // Strong knockback - shoves enemies down the beam.
+                e.x += dx * 10;
+                e.y += dy * 10;
+                e.x = Math.max(0, Math.min(WORLD_W - e.width, e.x));
+                e.y = Math.max(0, Math.min(WORLD_H - e.height, e.y));
+                if (!e.alive) onEnemyDefeated(e);
+                hitAny = true;
+            }
+            // Slight hit-stop on every connecting tick. Reuses the
+            // specialAttack slow-mo timer (the enemy-dt scale reads
+            // from it) so we don't allocate a new slow-mo system.
+            if (hitAny && typeof specialAttack !== "undefined") {
+                specialAttack.slowMoTimer = Math.max(
+                    specialAttack.slowMoTimer, 0.06
+                );
+            }
+        },
+
+        _releaseParticipants() {
+            for (const f of this.participants) {
+                if (f) f._megaBeamLock = false;
+            }
+            this.participants.length = 0;
+        },
+
+        draw(ctx) {
+            if (this.state === "idle") return;
+
+            // Charging halo around the player - reads as energy
+            // gathering for the cast. Cheap: one fill + one stroke.
+            if (this.state === "charge") {
+                const cx = player.x + player.width / 2;
+                const cy = player.y + player.height / 2;
+                const frac = 1 - (this.timer / this.chargeDuration);
+                const pulse = 0.7 + 0.3 *
+                    Math.sin(performance.now() * 0.025);
+                const r = (28 + frac * 28) * pulse;
+                ctx.save();
+                ctx.globalAlpha = 0.35 + 0.45 * frac;
+                ctx.fillStyle = "#ffd166";
+                ctx.beginPath();
+                ctx.arc(cx, cy, r, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = Math.min(1, 0.4 + 0.6 * frac);
+                ctx.strokeStyle = "#fff6d6";
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(cx, cy, r * 1.45, 0, Math.PI * 2);
+                ctx.stroke();
+                // Convergence rays from each participant - one line
+                // per participant max, so the count is bounded.
+                ctx.globalAlpha = 0.55;
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = "#fff6a0";
+                for (const f of this.participants) {
+                    const fx = f.x + f.width / 2;
+                    const fy = f.y + f.height / 2;
+                    ctx.beginPath();
+                    ctx.moveTo(fx, fy);
+                    ctx.lineTo(cx, cy);
+                    ctx.stroke();
+                }
+                ctx.restore();
+                return;
+            }
+
+            // Beam (fire + recover both render so the tail visibly
+            // dissipates instead of cutting hard).
+            const isRecover = this.state === "recover";
+            const cx = this.originX;
+            const cy = this.originY;
+            const recoverFade = isRecover
+                ? this.timer / this.recoverDuration
+                : 1;
+            const flicker = 0.8 + 0.2 *
+                Math.sin(performance.now() * 0.05);
+
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate(Math.atan2(this.dirY, this.dirX));
+
+            // Layered beam: outer halo -> mid body -> hot core.
+            ctx.globalAlpha = 0.4 * flicker * recoverFade;
+            ctx.fillStyle = "#ffd166";
+            ctx.fillRect(0, -this.halfWidth * 1.9,
+                this.length, this.halfWidth * 3.8);
+            ctx.globalAlpha = 0.85 * flicker * recoverFade;
+            ctx.fillStyle = "#fff6a0";
+            ctx.fillRect(0, -this.halfWidth, this.length, this.halfWidth * 2);
+            ctx.globalAlpha = flicker * recoverFade;
+            ctx.fillStyle = "#ffffff";
+            ctx.fillRect(0, -3, this.length, 6);
+            // Origin burst.
+            ctx.globalAlpha = 0.75 * flicker * recoverFade;
+            ctx.fillStyle = "#ffeebd";
+            ctx.beginPath();
+            ctx.arc(0, 0, 9, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        },
+
+        reset() {
+            this._releaseParticipants();
+            this.state = "idle";
+            this.timer = 0;
+            this.cooldown = 0;
+            this.tickTimer = 0;
         },
     };
 
@@ -17274,6 +17719,18 @@
         if (keyboardNova || touchNova) {
             battlefieldNova.activate();
         }
+
+        // Mega Tri Beam - group ultimate. Edge-triggered on T or
+        // the on-screen TRI button. The button only renders when
+        // the conditions are met (3+ nearby followers, magic, crown,
+        // off cooldown), so a stray tap during exploration can't
+        // spend resources accidentally.
+        const keyboardTri = keysJustPressed["t"] || keysJustPressed["T"];
+        const touchTri = (typeof megaTriBeamButton !== "undefined")
+            ? megaTriBeamButton.consumeJustPressed() : false;
+        if (keyboardTri || touchTri) {
+            megaTriBeam.activate();
+        }
     }
 
     // ---------------------------------------------------------------
@@ -17541,6 +17998,7 @@
         autoTarget.update(dt);
         redBeam.update(dt);
         energyBeam.update(dt);
+        megaTriBeam.update(dt);
         chargeFx.update(dt);
         playerTrail.update(dt);
         ambientParticles.update(dt);
@@ -17845,6 +18303,7 @@
         swordSpin.reset();
         redBeam.reset();
         energyBeam.reset();
+        megaTriBeam.reset();
         autoTarget.reset();
         chargeFx.reset();
         playerTrail.reset();
@@ -18063,6 +18522,7 @@
         swordSpin.reset();
         redBeam.reset();
         energyBeam.reset();
+        megaTriBeam.reset();
         autoTarget.reset();
         chargeFx.reset();
         playerTrail.reset();
@@ -18271,6 +18731,7 @@
         superPowerButton.draw(ctx);
         specialButton.draw(ctx);
         novaButton.draw(ctx);
+        megaTriBeamButton.draw(ctx);
         interactButton.draw(ctx);
         if (gameState === "playing") pauseButton.draw(ctx);
         // Quick-use item bar - bottom-center HUD strip. Always
@@ -19257,6 +19718,10 @@
         // Drawn under the sprite so the player's silhouette reads on
         // top of the beam, selling it as emitted from the character.
         energyBeam.draw(ctx);
+        // Mega Tri Beam - group ult. Layered halo + wide beam.
+        // Drawn beneath the sprite so the player silhouette reads
+        // on top, same as the other beam modules.
+        megaTriBeam.draw(ctx);
         // Charge buildup halo + converging motes. Halo composites
         // with "lighter" so it brightens the sprite underneath rather
         // than obscuring it.
