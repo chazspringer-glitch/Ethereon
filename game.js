@@ -5162,6 +5162,12 @@
         if (player.hp <= 0) {
             player.alive = false;
             gameState = "gameover";
+            // Final score submission - the run is done, so flush
+            // the last stats into the leaderboard (local + remote
+            // if configured) before the gameover screen renders.
+            if (typeof scoreSystem !== "undefined") {
+                scoreSystem.onPlayerDeath();
+            }
             // Fade the music out so the defeat sits in silence.
             // restartGame will pull the zone track back in on the
             // next tick via the music picker.
@@ -8249,6 +8255,16 @@
         // pool, so around 20 kills fills Crown Mode at baseline.
         // Boss kills push the crown harder as a reward beat.
         crown.add(enemy && enemy.isBoss ? 40 : 5);
+        // Score system hook. Per-kill popups fire here so players
+        // see "+10" over the corpse even if the corpse sprite has
+        // already faded from the hit-flash.
+        if (typeof scoreSystem !== "undefined") {
+            if (enemy && enemy.isBoss && !enemy.isGiant && !enemy.ally) {
+                scoreSystem.onBossKilled(enemy);
+            } else if (enemy && !enemy.isGiant) {
+                scoreSystem.onEnemyKilled(enemy);
+            }
+        }
         // Chapter 2 "Awakening" arc - count corrupted-faction kills
         // so missions 11 / 12 can auto-progress.
         if (typeof chapterTwo !== "undefined") {
@@ -12699,6 +12715,11 @@
         player.specialUnits.push({
             typeId, hp: cfg.hp, maxHp: cfg.hp,
         });
+        // Score hook - giant defeated counts as the "+1000" tier
+        // in the leaderboard formula, AND pops a floating bonus.
+        if (typeof scoreSystem !== "undefined") {
+            scoreSystem.onGiantBound();
+        }
         questLog.showToast(
             `${cfg.name} is bound to you.`, 3.0
         );
@@ -13068,6 +13089,11 @@
 
         onWaveCleared() {
             this.waveIndex++;
+            // Score hook - +50 per cleared wave, spawns a "Wave
+            // Survived" popup for feedback.
+            if (typeof scoreSystem !== "undefined") {
+                scoreSystem.onWaveCleared();
+            }
             if (this.waveIndex >= this.totalWaves) {
                 this.waveState = "complete";
                 this.onAllWavesCleared();
@@ -17742,7 +17768,13 @@
         const touchTri = (typeof megaTriBeamButton !== "undefined")
             ? megaTriBeamButton.consumeJustPressed() : false;
         if (keyboardTri || touchTri) {
-            megaTriBeam.activate();
+            // megaTriBeam.activate returns true only when the cast
+            // actually fired (passed the squad / resource / cd
+            // gate). Score the use only on a real activation so a
+            // button mash during cooldown doesn't farm points.
+            if (megaTriBeam.activate() && typeof scoreSystem !== "undefined") {
+                scoreSystem.onMegaTriBeam();
+            }
         }
     }
 
@@ -18012,6 +18044,11 @@
         redBeam.update(dt);
         energyBeam.update(dt);
         megaTriBeam.update(dt);
+        // Score + popup ticks. Bounded O(1) + O(pool cap) each
+        // frame. Pop-ups update regardless of gameState so a kill
+        // at the exact frame the game ends still animates out.
+        scoreSystem.tick(dt);
+        scorePopups.update(dt);
         chargeFx.update(dt);
         playerTrail.update(dt);
         ambientParticles.update(dt);
@@ -18179,6 +18216,447 @@
         { speaker: null, text: "But something beneath the world has awakened..." },
         { speaker: null, text: "You can feel it..." },
     ];
+
+    // ---------------------------------------------------------------
+    // Leaderboard + gamified scoring
+    //
+    // Tracks per-run stats, computes a composite score, rolls a
+    // rank badge, pops floating "+X" text on scoring events, and
+    // submits the final score to a local top-10 board (with
+    // optional remote HTTP mirror - see server.js for the minimal
+    // Node.js backend).
+    //
+    // Design rules:
+    //   - Client is OFFLINE-FIRST. All scoring, ranks, popups, and
+    //     the top-10 board work with nothing but localStorage. A
+    //     remote endpoint is purely additive.
+    //   - Remote mirror is OPT-IN via `window.ETHEREON_API`
+    //     (leaderboard url) or an in-page config. If unset the
+    //     client never touches the network.
+    //   - Bounded work per frame - popups cap at 8 live, leaderboard
+    //     refresh polls at 15 s in the pause menu (never during
+    //     combat), score updates batch every 0.25 s instead of
+    //     per-frame.
+    // ---------------------------------------------------------------
+    const RANKS = [
+        { id: "bronze",   name: "Bronze",   color: "#c48c4a", min: 0      },
+        { id: "silver",   name: "Silver",   color: "#c0c4c8", min: 2500   },
+        { id: "gold",     name: "Gold",     color: "#ffd166", min: 10000  },
+        { id: "elite",    name: "Elite",    color: "#8ad9ff", min: 25000  },
+        { id: "legend",   name: "Legend",   color: "#b070ff", min: 60000  },
+        { id: "ethereon", name: "Ethereon", color: "#fff6d6", min: 150000 },
+    ];
+    function rankFor(score) {
+        for (let i = RANKS.length - 1; i >= 0; i--) {
+            if (score >= RANKS[i].min) return RANKS[i];
+        }
+        return RANKS[0];
+    }
+
+    const scoreSystem = {
+        stats: {
+            enemiesKilled: 0,
+            wavesSurvived: 0,
+            bossesDefeated: 0,
+            giantsDefeated: 0,
+            survivalTime: 0,
+            megaTriBeamUses: 0,
+            deaths: 0,
+            multiKillBest: 0,
+        },
+
+        // Score displayed on the HUD + sent to the leaderboard.
+        // Batched: recomputed every BATCH_INTERVAL instead of every
+        // frame so no hot-path cost during combat.
+        _cached: 0,
+        _batch: 0,
+        _BATCH_INTERVAL: 0.25,
+        _submitted: false,
+
+        // Transient multi-kill tracker. Resets if the player goes
+        // longer than MULTIKILL_WINDOW without a kill.
+        _multiWindow: 0,
+        _multiCount: 0,
+        _MULTIKILL_WINDOW: 1.25,
+
+        reset() {
+            const s = this.stats;
+            s.enemiesKilled = 0;
+            s.wavesSurvived = 0;
+            s.bossesDefeated = 0;
+            s.giantsDefeated = 0;
+            s.survivalTime = 0;
+            s.megaTriBeamUses = 0;
+            s.deaths = 0;
+            s.multiKillBest = 0;
+            this._cached = 0;
+            this._batch = 0;
+            this._multiWindow = 0;
+            this._multiCount = 0;
+            this._submitted = false;
+        },
+
+        // Composite score per spec:
+        //   enemiesKilled   * 10
+        //   wavesSurvived   * 50
+        //   bossesDefeated  * 500
+        //   giantsDefeated  * 1000
+        //   survivalTime    * 2  (integer seconds)
+        // Plus gamified bonuses:
+        //   no-death bonus   +2000 (if enemiesKilled > 0 and deaths = 0)
+        //   Mega Tri Beam    +300  per use
+        //   multi-kill tier  +25   per kill in the best streak (only
+        //                           counted once, capped by multiKillBest)
+        compute() {
+            const s = this.stats;
+            let v =
+                (s.enemiesKilled  *   10) +
+                (s.wavesSurvived  *   50) +
+                (s.bossesDefeated *  500) +
+                (s.giantsDefeated * 1000) +
+                (Math.floor(s.survivalTime) * 2);
+            if (s.deaths === 0 && s.enemiesKilled > 0) v += 2000;
+            v += s.megaTriBeamUses * 300;
+            v += s.multiKillBest * 25;
+            return v;
+        },
+
+        tick(dt) {
+            if (gameState === "playing" && player.alive) {
+                this.stats.survivalTime += dt;
+            }
+            if (this._multiWindow > 0) {
+                this._multiWindow = Math.max(0, this._multiWindow - dt);
+                if (this._multiWindow === 0) this._multiCount = 0;
+            }
+            this._batch -= dt;
+            if (this._batch <= 0) {
+                this._batch = this._BATCH_INTERVAL;
+                this._cached = this.compute();
+            }
+        },
+
+        score() { return this._cached; },
+        rank() { return rankFor(this._cached); },
+
+        // --- Event hooks. Each call is O(1). ----------------------
+        onEnemyKilled(enemy) {
+            if (!enemy || enemy.ally || enemy.neutral) return;
+            if (enemy.isGiant) return;     // giants route through onGiantBound
+            this.stats.enemiesKilled++;
+            scorePopups.spawn(
+                enemy.x + enemy.width / 2,
+                enemy.y + enemy.height / 2,
+                "+10", "#ffd166"
+            );
+            // Multi-kill streak
+            this._multiWindow = this._MULTIKILL_WINDOW;
+            this._multiCount++;
+            if (this._multiCount > this.stats.multiKillBest) {
+                this.stats.multiKillBest = this._multiCount;
+            }
+            if (this._multiCount === 3) {
+                scorePopups.spawn(
+                    player.x + player.width / 2,
+                    player.y,
+                    "+75 Triple Kill", "#ff9a3a"
+                );
+            } else if (this._multiCount === 5) {
+                scorePopups.spawn(
+                    player.x + player.width / 2,
+                    player.y,
+                    "+125 Penta Kill", "#ff6a4a"
+                );
+            } else if (this._multiCount === 8) {
+                scorePopups.spawn(
+                    player.x + player.width / 2,
+                    player.y,
+                    "+200 HORDE KILL", "#ff4d55"
+                );
+            }
+        },
+
+        onBossKilled(enemy) {
+            this.stats.bossesDefeated++;
+            scorePopups.spawn(
+                enemy.x + enemy.width / 2,
+                enemy.y + enemy.height / 2 - 16,
+                "+500 Boss Defeated", "#ffd166"
+            );
+        },
+
+        onGiantBound() {
+            this.stats.giantsDefeated++;
+            scorePopups.spawn(
+                player.x + player.width / 2,
+                player.y,
+                "+1000 Giant Bound", "#b070ff"
+            );
+        },
+
+        onWaveCleared() {
+            this.stats.wavesSurvived++;
+            scorePopups.spawn(
+                player.x + player.width / 2,
+                player.y - 20,
+                "+50 Wave Survived", "#8ad9ff"
+            );
+        },
+
+        onMegaTriBeam() {
+            this.stats.megaTriBeamUses++;
+            scorePopups.spawn(
+                player.x + player.width / 2,
+                player.y - 10,
+                "+300 Tri Beam", "#ffd166"
+            );
+        },
+
+        onPlayerDeath() {
+            this.stats.deaths++;
+            this.submitIfFinal();
+        },
+
+        // Called on death + on reset. Submits a snapshot to the
+        // leaderboard unless we already did this run.
+        submitIfFinal() {
+            if (this._submitted) return;
+            this._submitted = true;
+            // Force a final compute before submit so the last few
+            // batched ticks are accounted for.
+            this._cached = this.compute();
+            leaderboard.submit({ ...this.stats }, this._cached);
+        },
+    };
+
+    const scorePopups = {
+        pool: [],
+        cap: 8,
+
+        spawn(x, y, text, color) {
+            const c = color || "#ffd166";
+            for (const p of this.pool) {
+                if (!p.alive) { this._reuse(p, x, y, text, c); return; }
+            }
+            if (this.pool.length < this.cap) {
+                const p = { alive: false };
+                this._reuse(p, x, y, text, c);
+                this.pool.push(p);
+            }
+        },
+
+        _reuse(p, x, y, text, color) {
+            p.alive = true;
+            p.x = x;
+            p.y = y;
+            p.life = 0;
+            p.maxLife = 1.0;
+            p.text = text;
+            p.color = color;
+        },
+
+        update(dt) {
+            for (const p of this.pool) {
+                if (!p.alive) continue;
+                p.life += dt;
+                p.y -= dt * 28;           // drift up
+                if (p.life >= p.maxLife) p.alive = false;
+            }
+        },
+
+        draw(ctx) {
+            for (const p of this.pool) {
+                if (!p.alive) continue;
+                const t = p.life / p.maxLife;
+                const a = 1 - t * t;
+                ctx.save();
+                ctx.globalAlpha = a;
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.font = "bold 14px system-ui, sans-serif";
+                ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+                ctx.fillText(p.text, p.x + 1, p.y + 1);
+                ctx.fillStyle = p.color;
+                ctx.fillText(p.text, p.x, p.y);
+                ctx.restore();
+            }
+        },
+
+        reset() {
+            for (const p of this.pool) p.alive = false;
+        },
+    };
+
+    const leaderboard = {
+        LOCAL_KEY: "ethereon.leaderboard.v1",
+        NAME_KEY:  "ethereon.playerName",
+        entries: [],
+        playerName: null,
+        // Set from window.ETHEREON_API at load. When non-null the
+        // client POSTs new scores here and GETs the live top-50.
+        endpoint: null,
+        // Refresh cadence (seconds). Only ticks while the pause
+        // panel is open so gameplay isn't polling the network.
+        _refreshTimer: 0,
+        _REFRESH_INTERVAL: 15,
+
+        init() {
+            // Remote endpoint (optional). If window defines one,
+            // use it; otherwise stay local-only.
+            try {
+                if (typeof window !== "undefined" && window.ETHEREON_API) {
+                    this.endpoint = String(window.ETHEREON_API);
+                }
+            } catch (_e) {}
+            // Local entries
+            try {
+                if (typeof localStorage !== "undefined") {
+                    const raw = localStorage.getItem(this.LOCAL_KEY);
+                    if (raw) {
+                        const parsed = JSON.parse(raw);
+                        if (Array.isArray(parsed)) this.entries = parsed;
+                    }
+                    this.playerName = localStorage.getItem(this.NAME_KEY) || null;
+                }
+            } catch (_e) {}
+            // First-ever boot: seed a handful of synthetic rivals so
+            // the board doesn't open empty. Marked `seed: true` so
+            // they're easy to tell apart from real runs.
+            if (this.entries.length === 0) {
+                this.entries = [
+                    { name: "Aldric",  score: 48200, seed: true },
+                    { name: "Nyra",    score: 32950, seed: true },
+                    { name: "Ovid",    score: 24300, seed: true },
+                    { name: "Iris",    score: 17460, seed: true },
+                    { name: "Brann",   score: 11020, seed: true },
+                    { name: "Talia",   score:  8640, seed: true },
+                    { name: "Wren",    score:  5220, seed: true },
+                    { name: "Odo",     score:  3100, seed: true },
+                ];
+                this._save();
+            }
+        },
+
+        _save() {
+            try {
+                if (typeof localStorage !== "undefined") {
+                    localStorage.setItem(this.LOCAL_KEY,
+                        JSON.stringify(this.entries.slice(0, 50)));
+                }
+            } catch (_e) {}
+        },
+
+        setName(name) {
+            const clean = String(name || "").trim().slice(0, 14) || "Anon";
+            this.playerName = clean;
+            try {
+                if (typeof localStorage !== "undefined") {
+                    localStorage.setItem(this.NAME_KEY, clean);
+                }
+            } catch (_e) {}
+        },
+
+        top10() {
+            // Snapshot sorted desc by score.
+            return this.entries
+                .slice()
+                .sort((a, b) => (b.score || 0) - (a.score || 0))
+                .slice(0, 10);
+        },
+
+        // Submit a final run. If a remote endpoint is configured,
+        // POSTs to it in the background; local copy always updates
+        // so the pause panel feels live even offline.
+        submit(stats, score) {
+            if (!score || score <= 0) return;
+            // Prompt for a player name on first submit. Uses a
+            // synchronous prompt so the rest of the run doesn't
+            // race the async dialog. Defaults to "Anon" when the
+            // user dismisses.
+            if (!this.playerName) {
+                let entered = null;
+                try {
+                    if (typeof window !== "undefined" && window.prompt) {
+                        entered = window.prompt(
+                            "Enter your leaderboard name:",
+                            "Hero"
+                        );
+                    }
+                } catch (_e) {}
+                this.setName(entered || "Anon");
+            }
+            const entry = {
+                name: this.playerName,
+                score: Math.floor(score),
+                stats: { ...stats },
+                at: Date.now(),
+                local: true,
+            };
+            this.entries.push(entry);
+            this.entries.sort((a, b) => (b.score || 0) - (a.score || 0));
+            this.entries = this.entries.slice(0, 50);
+            this._save();
+            this._remoteSubmit(entry);
+        },
+
+        _remoteSubmit(entry) {
+            if (!this.endpoint || typeof fetch === "undefined") return;
+            try {
+                fetch(this.endpoint, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(entry),
+                    keepalive: true,
+                }).catch(() => { /* offline / 5xx -> local copy is fine */ });
+            } catch (_e) {}
+        },
+
+        _remoteRefresh() {
+            if (!this.endpoint || typeof fetch === "undefined") return;
+            try {
+                fetch(this.endpoint, { method: "GET" })
+                    .then(r => r.ok ? r.json() : null)
+                    .then(data => {
+                        if (!data || !Array.isArray(data)) return;
+                        // Merge: remote wins on duplicates (by name +
+                        // score) so the board reflects the live set
+                        // but still keeps offline-only entries.
+                        const seen = new Set();
+                        const merged = [];
+                        for (const e of data) {
+                            if (!e || typeof e.score !== "number") continue;
+                            const key = `${e.name}:${e.score}`;
+                            if (seen.has(key)) continue;
+                            seen.add(key);
+                            merged.push(e);
+                        }
+                        for (const e of this.entries) {
+                            const key = `${e.name}:${e.score}`;
+                            if (seen.has(key)) continue;
+                            seen.add(key);
+                            merged.push(e);
+                        }
+                        merged.sort((a, b) => (b.score || 0) - (a.score || 0));
+                        this.entries = merged.slice(0, 50);
+                        this._save();
+                    })
+                    .catch(() => {});
+            } catch (_e) {}
+        },
+
+        // Tick is called ONLY while the pause panel is open so the
+        // network activity is bounded to "player is reading the
+        // board" moments. Gameplay never polls.
+        tickWhilePaused(dt) {
+            if (!this.endpoint) return;
+            this._refreshTimer -= dt;
+            if (this._refreshTimer <= 0) {
+                this._refreshTimer = this._REFRESH_INTERVAL;
+                this._remoteRefresh();
+            }
+        },
+    };
+    leaderboard.init();
 
     function startGame() {
         gameState = "playing";
@@ -18459,6 +18937,11 @@
         player.specialUnits = [];
         if (typeof boundGiants !== "undefined") boundGiants.reset();
         if (typeof giantSpawner !== "undefined") giantSpawner.reset();
+        // Leaderboard - fresh run zeroes the live stats but keeps
+        // the persistent top-10 board intact so the player still
+        // sees their prior best between runs.
+        if (typeof scoreSystem !== "undefined") scoreSystem.reset();
+        if (typeof scorePopups !== "undefined") scorePopups.reset();
         drops.length = 0;
         inventoryOpen = false;
 
@@ -18751,6 +19234,9 @@
         // visible during gameplay so the player knows their
         // potion stack at a glance.
         if (gameState === "playing") itemBar.draw(ctx);
+        // Score pop-ups - floating "+X" text over kills. Drawn
+        // ABOVE the HUD so the player reads them immediately.
+        scorePopups.draw(ctx);
         drawQuestPanel();
         drawSquadIndicator();
         drawMinimap();
@@ -18896,6 +19382,26 @@
             lvlX + 28, y - 2,
             "#8ad9ff",
             "bold 18px system-ui, sans-serif"
+        );
+
+        // Rank badge - compact row BELOW the main score line.
+        // Shows the live leaderboard score + the rank it earns, so
+        // players see themselves moving up the tiers in realtime.
+        const rank = scoreSystem.rank();
+        const rankY = y + 24;
+        drawShadowedText("RANK", x, rankY,
+            "#a0a0b8", "10px system-ui, sans-serif");
+        drawShadowedText(
+            rank.name,
+            x + 36, rankY,
+            rank.color,
+            "bold 11px system-ui, sans-serif"
+        );
+        drawShadowedText(
+            String(scoreSystem.score()),
+            x + 110, rankY,
+            rank.color,
+            "bold 11px system-ui, sans-serif"
         );
 
         ctx.restore();
@@ -20081,10 +20587,10 @@
 
     function drawPauseMenu() {
         // Bigger panel now that it carries the journal + map + the
-        // anime tab. Caps at 540x720 so it stays readable on desktop
-        // without stretching; clamps to the viewport on mobile.
+        // anime tab + leaderboard. Caps at 540x900 so the top-10
+        // leaderboard has room without overlapping the action rows.
         const w = Math.min(540, VIEW_W - 16);
-        const h = Math.min(720, VIEW_H - 16);
+        const h = Math.min(900, VIEW_H - 16);
         const x = Math.floor((VIEW_W - w) / 2);
         const y = Math.floor((VIEW_H - h) / 2);
 
@@ -20307,6 +20813,89 @@
         ctx.restore();
 
         sy += mapH + 14;
+
+        // --- Section: Live leaderboard ----------------------------
+        // Top 10 by score. Current player (by stored name) is
+        // highlighted so they can see their standing at a glance.
+        // Remote refresh (if configured) ticks here while the
+        // panel is open - gameplay never polls.
+        leaderboard.tickWhilePaused(1 / 60);
+        drawShadowedText("LEADERBOARD", x + 20, sy,
+            "#8ad9ff", "bold 11px system-ui, sans-serif");
+        if (leaderboard.playerName) {
+            ctx.textAlign = "right";
+            drawShadowedText(
+                `you: ${leaderboard.playerName}`,
+                x + w - 20, sy,
+                "#a0a0b8", "10px system-ui, sans-serif"
+            );
+            ctx.textAlign = "left";
+        }
+        sy += 18;
+
+        const top = leaderboard.top10();
+        const lbRowH = 18;
+        const lbRowW = w - 40;
+        const lbX = x + 20;
+        if (top.length === 0) {
+            drawShadowedText("(no runs yet)", lbX, sy,
+                "#787888", "11px system-ui, sans-serif");
+            sy += lbRowH;
+        } else {
+            const you = leaderboard.playerName;
+            for (let i = 0; i < top.length; i++) {
+                const e = top[i];
+                const isYou = e && you && e.name === you && e.local;
+                const rnk = rankFor(e.score || 0);
+                const rowY = sy + i * lbRowH;
+
+                if (isYou) {
+                    ctx.save();
+                    ctx.globalAlpha = 0.18;
+                    ctx.fillStyle = "#ffd166";
+                    ctx.fillRect(lbX - 2, rowY - 2, lbRowW + 4, lbRowH);
+                    ctx.restore();
+                }
+                // Rank index
+                drawShadowedText(
+                    String(i + 1).padStart(2, "0") + ".",
+                    lbX, rowY,
+                    isYou ? "#ffd166" : "#a0a0b8",
+                    "bold 11px system-ui, sans-serif"
+                );
+                // Badge dot + rank name
+                ctx.fillStyle = rnk.color;
+                ctx.beginPath();
+                ctx.arc(lbX + 30, rowY + 5, 4, 0, Math.PI * 2);
+                ctx.fill();
+                // Player name
+                drawShadowedText(
+                    e.name || "?",
+                    lbX + 40, rowY,
+                    isYou ? "#fff6d6" : "#e8e8f0",
+                    isYou ? "bold 11px system-ui, sans-serif"
+                          : "11px system-ui, sans-serif"
+                );
+                // Rank word (italic small)
+                drawShadowedText(
+                    rnk.name,
+                    lbX + 134, rowY,
+                    rnk.color,
+                    "italic 10px system-ui, sans-serif"
+                );
+                // Score (right-aligned)
+                ctx.textAlign = "right";
+                drawShadowedText(
+                    String(e.score || 0),
+                    lbX + lbRowW - 4, rowY,
+                    isYou ? "#ffd166" : "#e8e8f0",
+                    "bold 11px system-ui, sans-serif"
+                );
+                ctx.textAlign = "left";
+            }
+            sy += top.length * lbRowH;
+        }
+        sy += 10;
 
         // --- Section 3: Ethereon anime tab ------------------------
         // Dedicated "tab" row for the companion anime video. Styled
