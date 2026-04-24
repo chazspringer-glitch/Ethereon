@@ -8893,11 +8893,19 @@
     };
 
     const pauseMenu = {
+        // Tab-driven pause panel: the JOURNAL tab holds the
+        // chapter timeline / missions / world map; the BOARD tab
+        // holds the live leaderboard + yesterday's champions. The
+        // ANIME / Resume / Save / Load rows stay visible on both
+        // tabs so saving never scrolls off.
+        activeTab: "journal",   // journal | board
         rects: {
-            anime:  { x: 0, y: 0, w: 0, h: 0 },
-            resume: { x: 0, y: 0, w: 0, h: 0 },
-            save:   { x: 0, y: 0, w: 0, h: 0 },
-            load:   { x: 0, y: 0, w: 0, h: 0 },
+            tabJournal: { x: 0, y: 0, w: 0, h: 0 },
+            tabBoard:   { x: 0, y: 0, w: 0, h: 0 },
+            anime:      { x: 0, y: 0, w: 0, h: 0 },
+            resume:     { x: 0, y: 0, w: 0, h: 0 },
+            save:       { x: 0, y: 0, w: 0, h: 0 },
+            load:       { x: 0, y: 0, w: 0, h: 0 },
         },
         // Brief on-screen toast inside the pause panel - "Saved.",
         // "No save found.", etc. Ticks from update() while paused.
@@ -8910,6 +8918,8 @@
         },
 
         handleAction(name) {
+            if (name === "tabJournal") { this.activeTab = "journal"; return; }
+            if (name === "tabBoard")   { this.activeTab = "board";   return; }
             if (name === "resume") {
                 paused = false;
                 return;
@@ -8941,6 +8951,12 @@
 
         handlePointer(x, y) {
             for (const [name, r] of Object.entries(this.rects)) {
+                // Skip stale rects for the hidden tab - a lingering
+                // mission row from the last frame shouldn't swallow
+                // a tap on the leaderboard tab. Every rect gets
+                // cleared on tab switch by re-layout, so checking
+                // w/h > 0 is enough to ignore zeroed slots.
+                if (!r || r.w <= 0 || r.h <= 0) continue;
                 if (x >= r.x && x <= r.x + r.w &&
                     y >= r.y && y <= r.y + r.h) {
                     this.handleAction(name);
@@ -20844,11 +20860,15 @@
     ];
 
     function drawPauseMenu() {
-        // Bigger panel now that it carries the journal + map + the
-        // anime tab + leaderboard. Caps at 540x900 so the top-10
-        // leaderboard has room without overlapping the action rows.
+        // Tab-driven panel. The JOURNAL tab carries chapters /
+        // missions / world map; the BOARD tab carries the live
+        // leaderboard + yesterday's champions. The anime row and
+        // Resume / Save / Load rows are PINNED to the bottom so
+        // they stay visible on both tabs regardless of how tall
+        // the tab content gets. Caps at 540x760 so the pinned
+        // actions always sit above the fold on mobile.
         const w = Math.min(540, VIEW_W - 16);
-        const h = Math.min(900, VIEW_H - 16);
+        const h = Math.min(760, VIEW_H - 16);
         const x = Math.floor((VIEW_W - w) / 2);
         const y = Math.floor((VIEW_H - h) / 2);
 
@@ -20873,12 +20893,50 @@
             x + w / 2, y + 38,
             "#a0a0b8", "11px system-ui, sans-serif");
 
-        // --- Section: Chapters timeline ---------------------------
-        // Full campaign arc laid out horizontally so the player sees
-        // all six beats at once, with past (green) / current (gold)
-        // / future (dim) coded by color. Sits above missions so it
-        // reads as the top-level "where am I in the story?" map.
-        let sy = y + 62;
+        // --- Tab bar ----------------------------------------------
+        // Two pills: JOURNAL + BOARD. Click hitboxes are cached on
+        // pauseMenu.rects so handlePointer dispatches cleanly.
+        const tabY = y + 60;
+        const tabH = 30;
+        const tabGap = 6;
+        const tabW = Math.floor((w - 40 - tabGap) / 2);
+        const tabDefs = [
+            { id: "tabJournal", label: "JOURNAL",     active: pauseMenu.activeTab === "journal" },
+            { id: "tabBoard",   label: "LEADERBOARD", active: pauseMenu.activeTab === "board"   },
+        ];
+        for (let i = 0; i < tabDefs.length; i++) {
+            const t = tabDefs[i];
+            const tx = x + 20 + i * (tabW + tabGap);
+            const r = pauseMenu.rects[t.id];
+            r.x = tx; r.y = tabY; r.w = tabW; r.h = tabH;
+
+            ctx.save();
+            roundRectPath(ctx, tx, tabY, tabW, tabH, 6);
+            ctx.fillStyle = t.active ? "#ffd166" : "rgba(40, 40, 54, 0.95)";
+            ctx.fill();
+            ctx.strokeStyle = t.active
+                ? "#fff6d6"
+                : "rgba(255, 209, 102, 0.35)";
+            ctx.lineWidth = t.active ? 2 : 1;
+            ctx.stroke();
+            ctx.fillStyle = t.active ? "#1a1a24" : "#e8e8f0";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.font = "bold 12px system-ui, sans-serif";
+            ctx.fillText(t.label, tx + tabW / 2, tabY + tabH / 2);
+            ctx.restore();
+        }
+
+        // Cursor for the ACTIVE tab's content. Anchored just below
+        // the tab bar; each branch below appends its sections here.
+        let sy = tabY + tabH + 12;
+
+        // --- JOURNAL TAB -----------------------------------------
+        // Chapters timeline + Missions list + World map. Only
+        // rendered when the journal tab is active so the leaderboard
+        // doesn't push these sections under the pinned actions.
+        if (pauseMenu.activeTab === "journal") {
+
         ctx.textAlign = "left";
         drawShadowedText("CHAPTERS", x + 20, sy,
             "#8ad9ff", "bold 11px system-ui, sans-serif");
@@ -20943,15 +21001,36 @@
         sy = chTrackY + 34;
 
         // --- Section: Missions timeline ---------------------------
+        // Compact window: progress summary + current mission + up
+        // to 4 upcoming. Keeps the journal tab short enough that
+        // the pinned actions sit cleanly below the world map on
+        // phone-width screens.
         ctx.textAlign = "left";
+        const totalMissions = missions.list.length;
+        const curIdx = missions.currentMissionIndex;
+        const completedCount = missions.list.filter(m => m.completed).length;
         drawShadowedText("MISSIONS", x + 20, sy,
             "#8ad9ff", "bold 11px system-ui, sans-serif");
+        ctx.textAlign = "right";
+        drawShadowedText(
+            `${completedCount} / ${totalMissions} complete`,
+            x + w - 20, sy,
+            "#a0a0b8", "10px system-ui, sans-serif"
+        );
+        ctx.textAlign = "left";
         sy += 18;
+
+        // Windowed view: current + next 4 (up to 5 rows total).
+        const windowStart = Math.min(
+            Math.max(0, curIdx),
+            Math.max(0, totalMissions - 5)
+        );
+        const windowEnd = Math.min(totalMissions, windowStart + 5);
         const missionRowH = 20;
-        for (let i = 0; i < missions.list.length; i++) {
+        let drawn = 0;
+        for (let i = windowStart; i < windowEnd; i++) {
             const m = missions.list[i];
-            const isCurrent =
-                i === missions.currentMissionIndex && !m.completed;
+            const isCurrent = i === curIdx && !m.completed;
             const done = m.completed;
             const icon = done ? "[x]" : isCurrent ? "[>]" : "[ ]";
             const color = done ? "#7ad17a"
@@ -20959,13 +21038,14 @@
                         : "#a0a0b8";
             drawShadowedText(
                 `${icon}  ${i + 1}. ${m.name}`,
-                x + 28, sy + i * missionRowH,
+                x + 28, sy + drawn * missionRowH,
                 color,
                 isCurrent ? "bold 12px system-ui, sans-serif"
                           : "12px system-ui, sans-serif"
             );
+            drawn++;
         }
-        sy += missions.list.length * missionRowH + 14;
+        sy += drawn * missionRowH + 14;
 
         // --- Section 2: World map ---------------------------------
         drawShadowedText("WORLD MAP", x + 20, sy,
@@ -21072,10 +21152,14 @@
 
         sy += mapH + 14;
 
-        // --- Section: Live leaderboard ----------------------------
-        // Top 5 (per spec) with countdown + current rank indicator.
-        // Polling runs on its own 2 s cadence from the main tick,
-        // so this draw just reads the latest roster.
+        }   // end JOURNAL tab
+
+        // --- BOARD TAB --------------------------------------------
+        // Live leaderboard + yesterday's champions. Polling runs on
+        // its own 2 s cadence from the main tick, so this draw just
+        // reads the latest roster.
+        if (pauseMenu.activeTab === "board") {
+
         drawShadowedText("LEADERBOARD", x + 20, sy,
             "#8ad9ff", "bold 11px system-ui, sans-serif");
         // Countdown badge on the right.
@@ -21221,6 +21305,19 @@
             sy += champ.length * champRowH + 4;
         }
         sy += 6;
+
+        }   // end BOARD tab
+
+        // --- Pinned bottom: anime row + action rows ---------------
+        // These sit at a FIXED offset from the panel bottom so they
+        // stay visible regardless of how tall the current tab's
+        // content grows. Reassigning `sy` here overrides whatever
+        // the tab content accumulated - the content is rendered
+        // above this line, the actions below.
+        const actionsH = 3 * (34 + 8) - 8;     // 3 rows, 34 tall, 8 gap
+        const statusH = 24;
+        const animeH_total = 46 + 16 + 14;     // row(46) + label(16) + gap(14)
+        sy = y + h - actionsH - statusH - animeH_total;
 
         // --- Section 3: Ethereon anime tab ------------------------
         // Dedicated "tab" row for the companion anime video. Styled
