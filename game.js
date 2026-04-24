@@ -23445,71 +23445,82 @@
         // content grows. Reassigning `sy` here overrides whatever
         // the tab content accumulated - the content is rendered
         // above this line, the actions below.
+        //
+        // The Ethereon anime row is rendered ONLY on the WORLD tab
+        // - the Journal tab needs every pixel for chapters /
+        // missions / map / factions / crown influence, and the
+        // Board tab is busy with the leaderboard. World tab has
+        // room (region grid is short) so the anime tab lives there.
+        const showAnime = pauseMenu.activeTab === "world";
         const actionsH = 3 * (34 + 8) - 8;     // 3 rows, 34 tall, 8 gap
         const statusH = 24;
-        const animeH_total = 46 + 16 + 14;     // row(46) + label(16) + gap(14)
+        const animeH_total = showAnime ? (46 + 16 + 14) : 0;
         sy = y + h - actionsH - statusH - animeH_total;
 
-        // --- Section 3: Ethereon anime tab ------------------------
-        // Dedicated "tab" row for the companion anime video. Styled
-        // apart from the save/load rows with a YouTube-red accent +
-        // play glyph so it reads as an EXTERNAL link, not a game
-        // action. Clicking it opens the video in a new browser tab.
-        drawShadowedText("ETHEREON ANIME", x + 20, sy,
-            "#ff4d55", "bold 11px system-ui, sans-serif");
-        sy += 16;
+        if (showAnime) {
+            // --- Section 3: Ethereon anime tab --------------------
+            // Dedicated "tab" row for the companion anime video.
+            // Crimson accent + play glyph reads as an external link
+            // rather than a game action. Clicking opens the video.
+            drawShadowedText("ETHEREON ANIME", x + 20, sy,
+                "#ff4d55", "bold 11px system-ui, sans-serif");
+            sy += 16;
 
-        const animeW = w - 40;
-        const animeH = 46;
-        const animeX = x + 20;
-        const animeHover = Math.sin(performance.now() * 0.004) * 0.5 + 0.5;
+            const animeW = w - 40;
+            const animeH = 46;
+            const animeX = x + 20;
+            const animeHover = Math.sin(performance.now() * 0.004) * 0.5 + 0.5;
 
-        const animeR = pauseMenu.rects.anime;
-        animeR.x = animeX;
-        animeR.y = sy;
-        animeR.w = animeW;
-        animeR.h = animeH;
+            const animeR = pauseMenu.rects.anime;
+            animeR.x = animeX;
+            animeR.y = sy;
+            animeR.w = animeW;
+            animeR.h = animeH;
 
-        ctx.save();
-        roundRectPath(ctx, animeX, sy, animeW, animeH, 7);
-        // Soft crimson tint so the tab reads distinct from the gold
-        // action rows underneath.
-        ctx.fillStyle = "rgba(255, 60, 70, 0.12)";
-        ctx.fill();
-        ctx.strokeStyle = `rgba(255, 77, 85, ${0.55 + animeHover * 0.25})`;
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
+            ctx.save();
+            roundRectPath(ctx, animeX, sy, animeW, animeH, 7);
+            ctx.fillStyle = "rgba(255, 60, 70, 0.12)";
+            ctx.fill();
+            ctx.strokeStyle = `rgba(255, 77, 85, ${0.55 + animeHover * 0.25})`;
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
 
-        // Play-triangle glyph on the left, YouTube-ish red.
-        const pgx = animeX + 18;
-        const pgy = sy + animeH / 2;
-        ctx.fillStyle = "#ff4d55";
-        ctx.beginPath();
-        ctx.moveTo(pgx - 6, pgy - 8);
-        ctx.lineTo(pgx + 8, pgy);
-        ctx.lineTo(pgx - 6, pgy + 8);
-        ctx.closePath();
-        ctx.fill();
+            // Play-triangle glyph on the left.
+            const pgx = animeX + 18;
+            const pgy = sy + animeH / 2;
+            ctx.fillStyle = "#ff4d55";
+            ctx.beginPath();
+            ctx.moveTo(pgx - 6, pgy - 8);
+            ctx.lineTo(pgx + 8, pgy);
+            ctx.lineTo(pgx - 6, pgy + 8);
+            ctx.closePath();
+            ctx.fill();
 
-        // Title + subline.
-        ctx.textAlign = "left";
-        ctx.textBaseline = "middle";
-        drawShadowedText("Watch the Episode",
-            animeX + 36, sy + animeH / 2 - 8,
-            "#ffeff0", "bold 14px system-ui, sans-serif");
-        drawShadowedText("Ethereon - the anime companion",
-            animeX + 36, sy + animeH / 2 + 9,
-            "#c88088", "11px system-ui, sans-serif");
+            // Title + subline.
+            ctx.textAlign = "left";
+            ctx.textBaseline = "middle";
+            drawShadowedText("Watch the Episode",
+                animeX + 36, sy + animeH / 2 - 8,
+                "#ffeff0", "bold 14px system-ui, sans-serif");
+            drawShadowedText("Ethereon - the anime companion",
+                animeX + 36, sy + animeH / 2 + 9,
+                "#c88088", "11px system-ui, sans-serif");
 
-        // PLAY hint on the right.
-        ctx.textAlign = "right";
-        ctx.textBaseline = "middle";
-        drawShadowedText("play",
-            animeX + animeW - 14, sy + animeH / 2,
-            "#ff4d55", "bold 11px system-ui, sans-serif");
-        ctx.restore();
+            // PLAY hint on the right.
+            ctx.textAlign = "right";
+            ctx.textBaseline = "middle";
+            drawShadowedText("play",
+                animeX + animeW - 14, sy + animeH / 2,
+                "#ff4d55", "bold 11px system-ui, sans-serif");
+            ctx.restore();
 
-        sy += animeH + 14;
+            sy += animeH + 14;
+        } else {
+            // Anime row not on this tab - zero the rect so a stale
+            // hit-test from a previous frame can't fire the player.
+            const animeR = pauseMenu.rects.anime;
+            animeR.x = 0; animeR.y = 0; animeR.w = 0; animeR.h = 0;
+        }
 
         // --- Section 4: action rows -------------------------------
         const rowW = w - 40;
