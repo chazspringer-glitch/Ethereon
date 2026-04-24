@@ -1514,15 +1514,23 @@
             this._pulseHold = 0;
         },
 
+        // When true, follow() skips the x/y tug but still runs
+        // the zoom + pulse easing. Used by the cutscene engine
+        // so scripted camera pans aren't fought by the auto-
+        // follow tug toward the player.
+        locked: false,
+
         follow(target, dt) {
-            const tx = target.x + target.width / 2 - VIEW_W / 2;
-            const ty = target.y + target.height / 2 - VIEW_H / 2;
+            if (!this.locked) {
+                const tx = target.x + target.width / 2 - VIEW_W / 2;
+                const ty = target.y + target.height / 2 - VIEW_H / 2;
 
-            const t = 1 - Math.exp(-this.sharpness * dt);
-            this.x += (tx - this.x) * t;
-            this.y += (ty - this.y) * t;
+                const t = 1 - Math.exp(-this.sharpness * dt);
+                this.x += (tx - this.x) * t;
+                this.y += (ty - this.y) * t;
 
-            this.clamp();
+                this.clamp();
+            }
 
             // --- Zoom easing ---
             // Pulse layer: decay hold, then flip target back to 1.
@@ -3663,6 +3671,15 @@
         }
         if (cinematic.isOpen()) {
             cinematic.advance();
+            e.preventDefault();
+            return;
+        }
+        // Cutscene: tap anywhere fast-forwards. Goes AFTER the
+        // higher-priority dialog / cinematic modals so an open
+        // chapter cinematic that fires DURING a cutscene still
+        // gets the tap first.
+        if (cutscene.isActive()) {
+            cutscene.requestSkip();
             e.preventDefault();
             return;
         }
@@ -6041,6 +6058,419 @@
         },
 
         reset() { this.active = null; },
+    };
+
+    // ---------------------------------------------------------------
+    // Cutscene - reusable in-game cinematic engine
+    //
+    // Step-based cutscene player. Scripts are arrays of typed
+    // steps (wait, cameraTo, cameraZoom, letterbox, text, bubble,
+    // moveNpc, shake, flash, burst, fade, call). Each step runs
+    // instantly or holds for `duration` seconds; camera pans, NPC
+    // moves, and fades lerp across their duration.
+    //
+    // Separation from existing systems:
+    //   - `cinematic` handles story.advance letterboxed text
+    //     pages and is still used by chapter transitions.
+    //   - `scriptedDialogue` handles single-line narration.
+    //   - `cutscene` here is the composable ENGINE: camera + NPC
+    //     control + narration + effects, driven by data.
+    //
+    // Input lock: while a cutscene is active, updateMovement and
+    // updateCombatInput early-out so the player can't act. A tap
+    // or key press fast-forwards to the final step.
+    //
+    // Camera lock: the main camera.follow call skips while the
+    // cutscene is active, so the cutscene owns camera.x /
+    // camera.y / camera.userScaleTarget without auto-follow
+    // tugging them.
+    // ---------------------------------------------------------------
+    const CUTSCENE_SCRIPTS = {
+        // Example preset exercising every step type. Other callers
+        // register more scripts by extending this table.
+        elder_greeting: [
+            { type: "letterbox", open: true },
+            { type: "fade", from: 1, to: 0, duration: 0.6 },
+            { type: "cameraTo", x: 1620, y: 1180, duration: 1.0 },
+            { type: "cameraZoom", scale: 1.18, duration: 0.8 },
+            { type: "text", line: "The Elder turns toward you.", duration: 1.8 },
+            { type: "shake", intensity: 3, duration: 0.2 },
+            { type: "text",
+              line: "\"Traveler. The grove has been waiting.\"",
+              duration: 2.2 },
+            { type: "cameraZoom", scale: 1.0, duration: 0.6 },
+            { type: "cameraFollow" },
+            { type: "letterbox", open: false },
+        ],
+    };
+
+    const cutscene = {
+        active: null,
+        name: null,
+        stepIndex: 0,
+        stepTimer: 0,
+        stepDuration: 0,
+        skipRequested: false,
+
+        // Letterbox bars
+        letterboxH: 0,
+        letterboxTarget: 0,
+        _LETTERBOX_H: 56,
+
+        // Active narration line
+        _line: null,
+
+        // Full-screen fade overlay
+        _fadeAlpha: 0,
+        _fadeFrom: 0, _fadeTo: 0,
+        _fadeElapsed: 0, _fadeDuration: 0,
+
+        // Camera pan tween
+        _camStart: null,
+        _camTarget: null,
+        _camTimer: 0, _camDur: 0,
+
+        // Camera zoom tween (writes to userScaleTarget)
+        _zoomStart: 1, _zoomTarget: 1,
+        _zoomTimer: 0, _zoomDur: 0,
+
+        // Active NPC move tweens (small list)
+        _npcMoves: [],
+
+        _onDone: null,
+
+        isActive() { return !!this.active; },
+
+        play(scriptOrName, onDone) {
+            if (this.active) return false;
+            const script = typeof scriptOrName === "string"
+                ? CUTSCENE_SCRIPTS[scriptOrName]
+                : scriptOrName;
+            if (!Array.isArray(script) || script.length === 0) return false;
+            this.active = script;
+            this.name = typeof scriptOrName === "string" ? scriptOrName : null;
+            this.stepIndex = 0;
+            this.stepTimer = 0;
+            this.stepDuration = 0;
+            this.skipRequested = false;
+            this._onDone = onDone || null;
+            this._enterStep(0);
+            return true;
+        },
+
+        requestSkip() {
+            if (!this.active) return;
+            this.skipRequested = true;
+        },
+
+        _enterStep(i) {
+            this.stepIndex = i;
+            if (i >= this.active.length) { this._end(); return; }
+            const step = this.active[i];
+            const d = Number(step.duration) || 0;
+            this.stepDuration = d;
+            this.stepTimer = d;
+
+            switch (step.type) {
+                case "wait":
+                    break;
+                case "cameraTo":
+                    this._camStart = { x: camera.x, y: camera.y };
+                    // Target world coord -> camera top-left.
+                    this._camTarget = {
+                        x: step.x - VIEW_W / 2,
+                        y: step.y - VIEW_H / 2,
+                    };
+                    this._camTimer = 0;
+                    this._camDur = Math.max(0.01, d);
+                    break;
+                case "cameraZoom":
+                    this._zoomStart = camera.userScaleTarget;
+                    this._zoomTarget = step.scale || 1;
+                    this._zoomTimer = 0;
+                    this._zoomDur = Math.max(0.01, d);
+                    break;
+                case "cameraFollow":
+                    this._camTarget = null;
+                    camera.snap(player);
+                    break;
+                case "text":
+                    this._line = {
+                        text: step.line,
+                        life: 0,
+                        maxLife: d || 2.0,
+                        fadeIn: 0.25,
+                        fadeOut: 0.4,
+                    };
+                    if (!d) this.stepDuration = this.stepTimer = 2.0;
+                    break;
+                case "bubble":
+                    if (typeof spawnChatBubble === "function" && step.owner) {
+                        spawnChatBubble(step.owner, step.text, d || 2.0);
+                    }
+                    break;
+                case "moveNpc":
+                    if (step.npc) {
+                        this._npcMoves.push({
+                            npc: step.npc,
+                            fromX: step.npc.x, fromY: step.npc.y,
+                            toX: step.x, toY: step.y,
+                            timer: 0,
+                            duration: Math.max(0.01, d),
+                        });
+                        step.npc._cutsceneLock = true;
+                    }
+                    break;
+                case "shake":
+                    if (typeof shake !== "undefined") {
+                        shake.trigger(step.intensity || 6, d || 0.2);
+                    }
+                    break;
+                case "flash":
+                    if (typeof flash !== "undefined") {
+                        flash.trigger(step.alpha || 0.5, d || 0.2);
+                    }
+                    break;
+                case "burst":
+                    if (typeof cinematicFx !== "undefined") {
+                        cinematicFx.burst(
+                            step.x, step.y,
+                            step.color || "255, 220, 140",
+                            step.count || 6
+                        );
+                    }
+                    break;
+                case "fade":
+                    this._fadeFrom = step.from != null ? step.from : this._fadeAlpha;
+                    this._fadeTo = step.to != null ? step.to : 0;
+                    this._fadeElapsed = 0;
+                    this._fadeDuration = Math.max(0.01, d);
+                    break;
+                case "letterbox":
+                    this.letterboxTarget = step.open ? this._LETTERBOX_H : 0;
+                    if (!d) this.stepDuration = this.stepTimer = 0.35;
+                    break;
+                case "call":
+                    if (typeof step.fn === "function") {
+                        try { step.fn(); } catch (_e) {}
+                    }
+                    break;
+            }
+        },
+
+        update(dt) {
+            if (!this.active) {
+                // Letterbox + fade can still be unwinding AFTER a
+                // cutscene ends; keep them ticking until they hit
+                // zero so the transition out stays smooth.
+                this._tickOverlayTweens(dt);
+                return;
+            }
+
+            // Skip: fast-forward tweens + end.
+            if (this.skipRequested) {
+                this.skipRequested = false;
+                this._collapseToEnd();
+                return;
+            }
+
+            // Camera pan tween (ease-in-out cubic)
+            if (this._camTarget) {
+                this._camTimer += dt;
+                const t = Math.min(1, this._camTimer / this._camDur);
+                const k = t < 0.5
+                    ? 4 * t * t * t
+                    : 1 - Math.pow(-2 * t + 2, 3) / 2;
+                camera.x = this._camStart.x + (this._camTarget.x - this._camStart.x) * k;
+                camera.y = this._camStart.y + (this._camTarget.y - this._camStart.y) * k;
+                camera.clamp();
+                if (t >= 1) this._camTarget = null;
+            }
+
+            // Zoom tween
+            if (this._zoomTimer < this._zoomDur) {
+                this._zoomTimer = Math.min(this._zoomDur, this._zoomTimer + dt);
+                const t = this._zoomTimer / this._zoomDur;
+                const k = t < 0.5
+                    ? 4 * t * t * t
+                    : 1 - Math.pow(-2 * t + 2, 3) / 2;
+                camera.userScaleTarget =
+                    this._zoomStart + (this._zoomTarget - this._zoomStart) * k;
+            }
+
+            // NPC move tweens
+            for (let i = this._npcMoves.length - 1; i >= 0; i--) {
+                const m = this._npcMoves[i];
+                m.timer += dt;
+                const t = Math.min(1, m.timer / m.duration);
+                const k = t < 0.5
+                    ? 2 * t * t
+                    : 1 - Math.pow(-2 * t + 2, 2) / 2;
+                m.npc.x = m.fromX + (m.toX - m.fromX) * k;
+                m.npc.y = m.fromY + (m.toY - m.fromY) * k;
+                if (t >= 1) {
+                    m.npc._cutsceneLock = false;
+                    this._npcMoves.splice(i, 1);
+                }
+            }
+
+            this._tickOverlayTweens(dt);
+
+            // Step timer
+            this.stepTimer -= dt;
+            if (this.stepTimer <= 0) {
+                this._enterStep(this.stepIndex + 1);
+            }
+        },
+
+        _tickOverlayTweens(dt) {
+            // Letterbox ease
+            const lbStep = dt * this._LETTERBOX_H * 4;
+            if (this.letterboxH < this.letterboxTarget) {
+                this.letterboxH = Math.min(this.letterboxTarget,
+                    this.letterboxH + lbStep);
+            } else if (this.letterboxH > this.letterboxTarget) {
+                this.letterboxH = Math.max(this.letterboxTarget,
+                    this.letterboxH - lbStep);
+            }
+
+            // Narration line life
+            if (this._line) {
+                this._line.life += dt;
+                if (this._line.life >= this._line.maxLife) this._line = null;
+            }
+
+            // Fade overlay
+            if (this._fadeDuration > 0) {
+                this._fadeElapsed = Math.min(this._fadeDuration,
+                    this._fadeElapsed + dt);
+                const t = this._fadeElapsed / this._fadeDuration;
+                this._fadeAlpha = this._fadeFrom +
+                    (this._fadeTo - this._fadeFrom) * t;
+                if (t >= 1) {
+                    this._fadeDuration = 0;
+                    this._fadeAlpha = this._fadeTo;
+                }
+            }
+        },
+
+        _collapseToEnd() {
+            if (this._camTarget) {
+                camera.x = this._camTarget.x;
+                camera.y = this._camTarget.y;
+                camera.clamp();
+                this._camTarget = null;
+            }
+            camera.userScaleTarget = this._zoomTarget;
+            this._fadeAlpha = this._fadeTo;
+            this._fadeDuration = 0;
+            for (const m of this._npcMoves) {
+                m.npc.x = m.toX;
+                m.npc.y = m.toY;
+                m.npc._cutsceneLock = false;
+            }
+            this._npcMoves.length = 0;
+            this._line = null;
+            // Letterbox unwinds to 0 on skip so gameplay resumes
+            // without bars stuck on.
+            this.letterboxTarget = 0;
+            this._end();
+        },
+
+        _end() {
+            const cb = this._onDone;
+            this.active = null;
+            this.name = null;
+            this.stepIndex = 0;
+            this.stepTimer = 0;
+            this.stepDuration = 0;
+            this._onDone = null;
+            if (typeof cb === "function") {
+                try { cb(); } catch (_e) {}
+            }
+        },
+
+        draw(ctx) {
+            if (!this.active &&
+                this.letterboxH <= 0 &&
+                this._fadeAlpha <= 0 &&
+                !this._line) return;
+
+            // Full-screen fade (under letterbox so bars sit on top)
+            if (this._fadeAlpha > 0) {
+                ctx.save();
+                ctx.globalAlpha = this._fadeAlpha;
+                ctx.fillStyle = "#000";
+                ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+                ctx.restore();
+            }
+
+            // Letterbox bars
+            if (this.letterboxH > 0) {
+                ctx.fillStyle = "#000";
+                ctx.fillRect(0, 0, VIEW_W, this.letterboxH);
+                ctx.fillRect(0, VIEW_H - this.letterboxH, VIEW_W, this.letterboxH);
+            }
+
+            // Narration line sits inside the bottom bar band.
+            if (this._line) {
+                const L = this._line;
+                let a = 1;
+                if (L.life < L.fadeIn) a = L.life / L.fadeIn;
+                else if (L.life > L.maxLife - L.fadeOut) {
+                    a = (L.maxLife - L.life) / L.fadeOut;
+                }
+                ctx.save();
+                ctx.globalAlpha = Math.max(0, Math.min(1, a));
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                drawShadowedText(
+                    L.text,
+                    VIEW_W / 2,
+                    VIEW_H - Math.max(this._LETTERBOX_H, 40) / 2 - 4,
+                    "#fff6d6",
+                    "italic 15px system-ui, sans-serif"
+                );
+                ctx.restore();
+            }
+
+            // Skip hint while active, bottom-right.
+            if (this.active) {
+                ctx.save();
+                ctx.globalAlpha = 0.55;
+                ctx.textAlign = "right";
+                ctx.textBaseline = "bottom";
+                drawShadowedText(
+                    "tap to skip",
+                    VIEW_W - 14, VIEW_H - 12,
+                    "#a0a0b8",
+                    "10px system-ui, sans-serif"
+                );
+                ctx.restore();
+            }
+        },
+
+        reset() {
+            if (this.active) {
+                for (const m of this._npcMoves) {
+                    if (m.npc) m.npc._cutsceneLock = false;
+                }
+            }
+            this.active = null;
+            this.name = null;
+            this.stepIndex = 0;
+            this.stepTimer = 0;
+            this._line = null;
+            this._fadeAlpha = 0;
+            this._fadeDuration = 0;
+            this._camTarget = null;
+            this._zoomTimer = 0;
+            this._zoomDur = 0;
+            this._npcMoves.length = 0;
+            this.letterboxH = 0;
+            this.letterboxTarget = 0;
+            this.skipRequested = false;
+        },
     };
 
     // ---------------------------------------------------------------
@@ -17209,6 +17639,14 @@
     // ---------------------------------------------------------------
     function updateMovement(dt) {
         if (!player.alive) return;
+        // Cutscene lock: no movement input while a cutscene is
+        // running. Velocities drain to zero so the player doesn't
+        // coast into combat mid-beat.
+        if (typeof cutscene !== "undefined" && cutscene.isActive()) {
+            player.vx = 0;
+            player.vy = 0;
+            return;
+        }
 
         let dx = 0;
         let dy = 0;
@@ -17635,6 +18073,17 @@
             player.specialChargeTime = 0;
             return;
         }
+        // Cutscene lock: drain any mid-press charge state and
+        // return before any attack / power / super / tri-beam
+        // input is considered.
+        if (typeof cutscene !== "undefined" && cutscene.isActive()) {
+            player.isCharging = false;
+            player.chargeTime = 0;
+            player.specialCharging = false;
+            player.specialChargeTime = 0;
+            clearJustPressed();
+            return;
+        }
 
         // Primary attack: hold to charge, release to fire. Keyboard
         // space / spacebar and the mobile attack button share the
@@ -17899,6 +18348,21 @@
         // Scripted dialogue: highest-priority modal above cinematic.
         // ESC skips the whole sequence; any other key/tap advances
         // the current line (or finishes the typewriter in progress).
+        // Cutscene: any key press during an active cutscene
+        // requests skip. Input is consumed so the key doesn't
+        // also fire an attack / item use on the next frame.
+        if (cutscene.isActive()) {
+            for (const k in keysJustPressed) {
+                if (keysJustPressed[k]) {
+                    cutscene.requestSkip();
+                    break;
+                }
+            }
+            clearJustPressed();
+            // Fall through to the main gameplay tick below - the
+            // world keeps animating underneath the letterbox.
+        }
+
         if (scriptedDialogue.isOpen()) {
             scriptedDialogue.update(dt);
             let pressed = false;
@@ -18133,7 +18597,12 @@
         updatePlayerStatus(dt);
         updateDrops(dt);
         updateNpcs(dt);
+        // Cutscene locks the auto-follow so the script can own
+        // camera.x / camera.y via its pan tween. Zoom + pulse
+        // easing still run inside follow() when locked.
+        camera.locked = cutscene.isActive();
         camera.follow(player, dt);
+        cutscene.update(dt);
         clearJustPressed();
     }
 
@@ -19073,6 +19542,12 @@
         playerTrail.reset();
         ambientParticles.reset();
         cinematicFx.reset();
+        // A zone transition while a cutscene is mid-play would
+        // leave camera.locked true and NPCs flagged _cutsceneLock.
+        // Reset the cutscene engine on every zone load so a stale
+        // letterbox can't survive into the new room.
+        if (typeof cutscene !== "undefined") cutscene.reset();
+        camera.locked = false;
         flash.reset();
         camera.resetZoom();
 
@@ -19297,6 +19772,8 @@
         playerTrail.reset();
         ambientParticles.reset();
         cinematicFx.reset();
+        if (typeof cutscene !== "undefined") cutscene.reset();
+        camera.locked = false;
 
         // Screen shake - any mid-cast impulses clear so respawn
         // isn't still rattling.
@@ -19574,6 +20051,10 @@
         // Scripted dialogue + cinematic are top of the stack. The
         // scripted box draws over everything (including cinematic
         // letterboxing) because it's the highest-priority modal.
+        // Cutscene overlay (letterbox + narration + fade) draws
+        // just BELOW cinematic so chapter cinematics still win if
+        // both fire simultaneously.
+        cutscene.draw(ctx);
         cinematic.draw(ctx);
         scriptedDialogue.draw(ctx);
     }
