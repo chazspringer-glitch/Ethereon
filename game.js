@@ -5088,6 +5088,25 @@
                 if (this.energy >= this.max) this.activate();
             },
 
+            // Influence: cumulative counter that climbs with every
+            // use of Crown Mode. High influence boosts ally damage
+            // and recruit odds; excessive use (> OVERUSE_AT) starts
+            // penalising faction trust and raising enemy aggression.
+            // Saved with the rest of the crown state.
+            influence: 0,
+            INFLUENCE_MAX: 200,
+            OVERUSE_AT: 140,
+            _overuseTickAt: 0,
+
+            // 0 -> 3 bucket: "low | mid | high | peak". Quick ramp
+            // readable by callers without doing math every time.
+            influenceBucket() {
+                if (this.influence >= 160) return 3;
+                if (this.influence >= 90)  return 2;
+                if (this.influence >= 40)  return 1;
+                return 0;
+            },
+
             // Triggers Crown Mode with the small cinematic. Always
             // consumes the full energy pool even if the player had
             // "overshot" on the final pickup.
@@ -5096,6 +5115,8 @@
                 this.energy = 0;
                 this.active = true;
                 this.activeTimer = this.activeDuration;
+                this.influence = Math.min(this.INFLUENCE_MAX,
+                    this.influence + 10);
                 // Brief cinematic - shake + flash + camera punch.
                 // Slow-mo hijacks the specialAttack slowMoTimer (the
                 // enemy-dt scale already reads from it), so enemies
@@ -5108,7 +5129,40 @@
                 );
                 sound.play("levelUp");
                 questLog.showToast("Crown Mode!", 2.2);
+                // Overuse: once the influence counter crosses the
+                // threshold, every fresh activation nicks the
+                // player's standing with non-hostile tribes.
+                if (this.influence >= this.OVERUSE_AT &&
+                    typeof factionRep !== "undefined") {
+                    for (const id of Object.keys(TRIBAL_FACTIONS)) {
+                        const align = factionRep.alignmentFor(id);
+                        if (align !== "hostile") {
+                            factionRep.adjust(id, -2, true);
+                        }
+                    }
+                }
                 return true;
+            },
+
+            // +damage to ally attacks, scaling with influence.
+            //   low  0      mid  +5%    high +10%  peak +15%
+            allyDamageBonus() {
+                const b = this.influenceBucket();
+                return b === 3 ? 0.15 : b === 2 ? 0.10 : b === 1 ? 0.05 : 0;
+            },
+
+            // Recruit-odds bonus for reachOut calls. Small but
+            // meaningful at peak influence.
+            recruitBonus() {
+                const b = this.influenceBucket();
+                return b === 3 ? 0.18 : b === 2 ? 0.10 : b === 1 ? 0.05 : 0;
+            },
+
+            // Enemy-aggression multiplier for overuse. Caller reads
+            // this to scale enemy speed / cd. Returns 1 when not
+            // overused.
+            enemyAggressionMult() {
+                return this.influence >= this.OVERUSE_AT ? 1.12 : 1;
             },
 
             // Mission 13 trigger - Crown Awakens. One-shot, idempotent.
@@ -7681,19 +7735,127 @@
         if (!species) return;
         const pcx = player.x + player.width / 2;
         const pcy = player.y + player.height / 2;
+        // Apply creature-evolution upgrades at rehire so level 3
+        // tamed stags don't suddenly revert to baseline stats on
+        // zone load. Snapshot carries level + xp.
+        const level = Math.max(1, Math.min(4, snap.level | 0 || 1));
+        const evo = creatureEvolution.statsFor(species, level);
         lightCreatures.push({
             species,
             x: pcx + (Math.random() - 0.5) * 48,
             y: pcy + 40 + Math.random() * 20,
             width: 28, height: 28,
-            hp: species.maxHp, maxHp: species.maxHp,
+            hp: evo.maxHp, maxHp: evo.maxHp,
             state: "follow", target: null,
             cooldown: 0,
             phase: Math.random() * Math.PI * 2,
             sparklePhase: Math.random() * Math.PI * 2,
             wanderX: 0, wanderY: 0, wanderTimer: 0, fleeTimer: 0,
+            // Evolution state
+            creatureLevel: level,
+            creatureXp: snap.xp | 0,
+            _evoSpeedMult: evo.speedMult,
+            _evoDmgMult:   evo.dmgMult,
         });
     }
+
+    // ---------------------------------------------------------------
+    // Creature evolution
+    //
+    // Tamed light creatures (wolf / bird / stag / seal / dolphin)
+    // gain XP from every nearby enemy kill. Level thresholds upgrade
+    // their stats + unlock visual tells:
+    //
+    //   Lv 1 (0 xp):   baseline
+    //   Lv 2 (50):     +25% hp, +10% speed, +10% damage
+    //   Lv 3 (150):    +60% hp, +20% speed, +25% damage,
+    //                  sparkle count bumped (read by existing draw)
+    //   Lv 4 (350):    +100% hp, +30% speed, +50% damage
+    //
+    // Snapshot carries level + xp so progress persists across zone
+    // transitions and save files.
+    // ---------------------------------------------------------------
+    const creatureEvolution = {
+        XP_PER_KILL: 10,
+        XP_PER_BOSS: 60,
+        XP_NEAR_RADIUS_SQ: 520 * 520,
+        THRESHOLDS: [0, 50, 150, 350],
+
+        statsFor(species, level) {
+            const l = Math.max(1, Math.min(4, level | 0));
+            const mult = l === 1 ? { hp: 1.0, spd: 1.0, dmg: 1.0 }
+                     : l === 2 ? { hp: 1.25, spd: 1.1, dmg: 1.1 }
+                     : l === 3 ? { hp: 1.6, spd: 1.2, dmg: 1.25 }
+                     :           { hp: 2.0, spd: 1.3, dmg: 1.5 };
+            return {
+                maxHp: Math.round(species.maxHp * mult.hp),
+                speedMult: mult.spd,
+                dmgMult: mult.dmg,
+            };
+        },
+
+        // Award XP to the player's tamed creatures within range of
+        // a fresh kill. Bosses award a chunkier slice so evolution
+        // keeps up with boss-heavy runs.
+        awardKillXp(enemy) {
+            if (!lightCreatures || lightCreatures.length === 0) return;
+            const ecx = enemy.x + enemy.width / 2;
+            const ecy = enemy.y + enemy.height / 2;
+            const gain = enemy.isBoss ? this.XP_PER_BOSS : this.XP_PER_KILL;
+            for (const c of lightCreatures) {
+                if (!c || c.state === "wild" || c.state === "flee") continue;
+                const dx = (c.x + c.width / 2) - ecx;
+                const dy = (c.y + c.height / 2) - ecy;
+                if (dx * dx + dy * dy > this.XP_NEAR_RADIUS_SQ) continue;
+                c.creatureXp = (c.creatureXp | 0) + gain;
+                this._checkLevelUp(c);
+            }
+        },
+
+        _checkLevelUp(c) {
+            const cur = c.creatureLevel || 1;
+            if (cur >= 4) return;
+            const nextT = this.THRESHOLDS[cur];   // threshold for level (cur+1)
+            if (c.creatureXp < nextT) return;
+            c.creatureLevel = cur + 1;
+            const evo = this.statsFor(c.species, c.creatureLevel);
+            // Rescale hp proportionally so the creature isn't
+            // penalised for evolving mid-fight.
+            const hpFrac = c.maxHp > 0 ? c.hp / c.maxHp : 1;
+            c.maxHp = evo.maxHp;
+            c.hp = Math.max(1, Math.round(evo.maxHp * hpFrac));
+            c._evoSpeedMult = evo.speedMult;
+            c._evoDmgMult = evo.dmgMult;
+            // Snapshot sync so the upgrade survives a zone change.
+            const snap = (player.lightCreatures || []).find(
+                s => s.speciesId === c.species.id);
+            if (snap) {
+                snap.level = c.creatureLevel;
+                snap.xp = c.creatureXp;
+            }
+            if (typeof questLog !== "undefined") {
+                questLog.showToast(
+                    `${c.species.name}  evolves to Lv ${c.creatureLevel}!`,
+                    2.4
+                );
+            }
+            if (typeof flash !== "undefined") flash.trigger(0.4, 0.22);
+            if (typeof sound !== "undefined") sound.play("levelUp");
+        },
+
+        // Sync XP snapshots back to player.lightCreatures so a
+        // save file captures the current level. Called on save.
+        syncSnapshots() {
+            for (const c of lightCreatures) {
+                const snap = (player.lightCreatures || []).find(
+                    s => s.speciesId === c.species.id);
+                if (snap) {
+                    snap.level = c.creatureLevel || 1;
+                    snap.xp = c.creatureXp | 0;
+                }
+            }
+        },
+    };
 
     function nearestHostileForLight(c) {
         const cx = c.x + c.width / 2;
@@ -7716,6 +7878,17 @@
         const sy = c.y + c.height / 2;
         const tcx = c.target.x + c.target.width / 2;
         const tcy = c.target.y + c.target.height / 2;
+        // Evolution damage multiplier (1.0 until evolved).
+        const dmgMult = c._evoDmgMult || 1;
+        // Crown-influence ally damage boost. Small at low
+        // influence; grows to +15% at max influence. Stacks with
+        // evolution so a maxed stag + full crown hits noticeably
+        // harder than a fresh one.
+        const crownBoost = (typeof crown !== "undefined" && crown.allyDamageBonus)
+            ? crown.allyDamageBonus()
+            : 0;
+        const dmg = Math.max(1,
+            Math.round(c.species.attackDamage * dmgMult * (1 + crownBoost)));
         if (c.species.kind === "ranged") {
             const dx = tcx - sx, dy = tcy - sy;
             const mag = Math.hypot(dx, dy) || 1;
@@ -7723,12 +7896,12 @@
                 x: sx - 5, y: sy - 5, w: 10, h: 10,
                 vx: (dx / mag) * 380, vy: (dy / mag) * 380,
                 life: 1.0,
-                damage: c.species.attackDamage,
+                damage: dmg,
                 color: c.species.color,
                 age: 0, alive: true,
             });
         } else if (c.species.kind === "melee") {
-            c.target.takeHit(c.species.attackDamage, { x: sx, y: sy });
+            c.target.takeHit(dmg, { x: sx, y: sy });
             if (!c.target.alive) onEnemyDefeated(c.target);
         }
     }
@@ -8802,6 +8975,20 @@
         // pool, so around 20 kills fills Crown Mode at baseline.
         // Boss kills push the crown harder as a reward beat.
         crown.add(enemy && enemy.isBoss ? 40 : 5);
+
+        // Tribal kills: reputation hit with the deceased's faction,
+        // routed through the faction-war bookkeeper when a war is
+        // active (invaders swing rep differently than residents).
+        if (enemy && enemy.tribal && !enemy.ally) {
+            factionWar.onKill(enemy);
+        }
+
+        // Creature evolution: feed XP to the player's tamed light
+        // creatures for every enemy kill nearby, so the creatures
+        // grow alongside the player's run.
+        if (enemy && !enemy.ally && typeof creatureEvolution !== "undefined") {
+            creatureEvolution.awardKillXp(enemy);
+        }
         // Score system hook. Per-kill popups fire here so players
         // see "+10" over the corpse even if the corpse sprite has
         // already faded from the hit-flash.
@@ -9176,6 +9363,12 @@
         },
 
         write() {
+            // Pre-save: flush creature-evolution live state back
+            // to player.lightCreatures snapshots so levels /xp
+            // survive the round-trip.
+            if (typeof creatureEvolution !== "undefined") {
+                creatureEvolution.syncSnapshots();
+            }
             const data = {
                 version: SAVE_VERSION,
                 savedAt: Date.now(),
@@ -9191,6 +9384,8 @@
                     lightCreatures: player.lightCreatures.map(c => ({ ...c })),
                     specialUnits: (player.specialUnits || []).map(u => ({ ...u })),
                     tribals:      (player.tribals || []).map(t => ({ ...t })),
+                    factionRep:   factionRep.save(),
+                    crownInfluence: (typeof crown !== "undefined" ? crown.influence : 0) | 0,
                     weaponIndex: player.weaponIndex,
                 },
                 stats: {
@@ -9328,6 +9523,17 @@
                         name: t.name || TRIBAL_FACTIONS[t.factionId].recruitName,
                     });
                 }
+            }
+            // Faction reputation + crown influence.
+            if (typeof factionRep !== "undefined") {
+                factionRep.load(data.player.factionRep);
+            }
+            if (typeof crown !== "undefined" &&
+                typeof data.player.crownInfluence === "number") {
+                crown.influence = Math.max(0, Math.min(
+                    crown.INFLUENCE_MAX,
+                    data.player.crownInfluence | 0
+                ));
             }
             // Squad: dismiss any current followers back to their
             // home zones first, then rehire from the snapshot roster
@@ -13403,6 +13609,193 @@
         },
     };
 
+    // ---------------------------------------------------------------
+    // Faction reputation
+    //
+    // Numeric reputation per faction (-100..100). The tribal
+    // faction's static `alignment` is the BASELINE; reputation
+    // shifts it to "hostile" (<= -40) or "friendly" (>= +40),
+    // letting the player earn or burn trust over time.
+    //
+    // Hooks:
+    //   - killing a tribal member -> -10 with their faction
+    //   - recruiting a tribal     -> +15 with their faction
+    //   - assisting a faction war -> +/-20 based on the side you
+    //                                hit (see factionWar below)
+    //
+    // Saved with player state via player.factionRep (plain object).
+    // ---------------------------------------------------------------
+    const factionRep = {
+        values: {},
+        REP_MIN: -100,
+        REP_MAX: 100,
+        HOSTILE_AT: -40,
+        FRIENDLY_AT: 40,
+
+        get(id) {
+            if (!(id in this.values)) this.values[id] = 0;
+            return this.values[id];
+        },
+        set(id, v) {
+            this.values[id] = Math.max(this.REP_MIN,
+                Math.min(this.REP_MAX, v | 0));
+        },
+        adjust(id, delta, silent) {
+            const cur = this.get(id);
+            const next = Math.max(this.REP_MIN,
+                Math.min(this.REP_MAX, cur + delta));
+            if (next === cur) return 0;
+            this.values[id] = next;
+            if (!silent && typeof questLog !== "undefined" &&
+                Math.abs(delta) >= 5) {
+                const f = TRIBAL_FACTIONS[id];
+                const name = f ? f.name : id;
+                const sign = delta >= 0 ? "+" : "";
+                questLog.showToast(
+                    `${name}  rep ${sign}${delta}  -> ${next}`, 1.8
+                );
+            }
+            return next;
+        },
+        // Dynamic alignment. Heavy negative rep can push even a
+        // neutral tribe hostile; heavy positive can turn a hostile
+        // tribe friendly. Mid-band falls back to the faction's
+        // baseline alignment.
+        alignmentFor(id) {
+            const f = TRIBAL_FACTIONS[id];
+            if (!f) return "neutral";
+            const r = this.get(id);
+            if (r >= this.FRIENDLY_AT) return "friendly";
+            if (r <= this.HOSTILE_AT) return "hostile";
+            return f.alignment;
+        },
+        // Reputation -> tier label for the HUD panel.
+        tierFor(id) {
+            const a = this.alignmentFor(id);
+            if (a === "friendly") return { label: "Allied",   color: "#7ad17a" };
+            if (a === "hostile")  return { label: "Hostile",  color: "#e06666" };
+            return                   { label: "Neutral",  color: "#a0a0b8" };
+        },
+        save() {
+            return { ...this.values };
+        },
+        load(obj) {
+            this.values = {};
+            if (!obj || typeof obj !== "object") return;
+            for (const k in obj) {
+                if (TRIBAL_FACTIONS[k]) this.set(k, obj[k]);
+            }
+        },
+        reset() { this.values = {}; },
+    };
+
+    // ---------------------------------------------------------------
+    // Faction war
+    //
+    // Spawn a small opposing squad of one tribal faction inside a
+    // zone where a DIFFERENT tribe holds territory. The invaders
+    // arrive as hostile tribal enemies. The resident neutral
+    // tribals become temporarily hostile-to-invaders via their
+    // `ally: true` flip (so the existing ally AI targets the
+    // nearest hostile - the invaders).
+    //
+    // Player participation:
+    //   - attack an INVADER -> rep gain with the resident, small
+    //     rep loss with the invader faction.
+    //   - attack a RESIDENT -> rep loss with the resident.
+    //
+    // Triggered manually via factionWar.trigger(residentId,
+    // invaderId) - leave as an exposed API for callers (dev
+    // console, scripted events) rather than auto-rolling, so a
+    // zone visit isn't guaranteed to be a battlefield.
+    // ---------------------------------------------------------------
+    const factionWar = {
+        active: null,     // { residentId, invaderId, started }
+        _INVADER_COUNT: 3,
+
+        // Roll a war in the CURRENT zone using the opposing tribe
+        // of the caller's choice. The resident faction is inferred
+        // from currentLevel.tribalFaction.
+        trigger(invaderId) {
+            if (!currentLevel || !currentLevel.tribalFaction) return false;
+            const residentId = currentLevel.tribalFaction;
+            if (!invaderId || invaderId === residentId) return false;
+            const invader = TRIBAL_FACTIONS[invaderId];
+            if (!invader) return false;
+
+            // Flip living residents to ally so they fight the
+            // invaders - the existing ally Enemy AI handles the
+            // target pick (nearestHostileEnemy) automatically.
+            for (const e of enemies) {
+                if (!e || !e.alive || !e.tribal) continue;
+                if (e.tribal.faction.id !== residentId) continue;
+                e.ally = true;
+                e.neutral = false;
+                e.contactDamage = 0;
+            }
+
+            // Spawn invaders via the tribalSpawner with a bias
+            // toward grouping them near one edge so the incoming
+            // raid reads as a coordinated force.
+            for (let i = 0; i < this._INVADER_COUNT; i++) {
+                if (enemies.length >= MAX_ENEMIES) break;
+                const role = invader.roles[
+                    Math.floor(Math.random() * invader.roles.length)
+                ];
+                const w = Math.round(32 * role.size);
+                const h = Math.round(32 * role.size);
+                // Land near the south edge; spread 120 px apart.
+                const baseX = WORLD_W / 2 - 180 + i * 120;
+                const baseY = WORLD_H - 200;
+                const e = spawnEnemy(baseX, baseY, {
+                    width: w, height: h,
+                    hp: Math.max(1, Math.round(invader.hp * role.hpMult)),
+                    speed: Math.round(invader.speed * role.speedMult),
+                    contactDamage: Math.round(invader.damage * role.dmgMult),
+                    knockbackScale: invader.kbScale,
+                    reward: 25, xpReward: 20,
+                });
+                if (!e) continue;
+                e.tribal = { faction: invader, role, invader: true };
+                e.neutral = false;
+                e.ally = false;
+                if (invader.pack) e.faction = { id: invader.id, pack: true };
+            }
+
+            this.active = {
+                residentId,
+                invaderId,
+                started: performance.now(),
+            };
+            questLog.showToast(
+                `${invader.name} raid the ${TRIBAL_FACTIONS[residentId].name}!`,
+                2.8
+            );
+            shake.trigger(6, 0.25);
+            return true;
+        },
+
+        // Called from onEnemyDefeated. Applies rep swings based on
+        // who the player just hit.
+        onKill(enemy) {
+            if (!enemy || !enemy.tribal) return;
+            const isInvader = !!enemy.tribal.invader;
+            const id = enemy.tribal.faction.id;
+            if (isInvader) {
+                // Hitting an invader -> that faction likes you less
+                // AND the zone's resident faction likes you more.
+                factionRep.adjust(id, -5, true);
+                if (this.active) {
+                    factionRep.adjust(this.active.residentId, +8, true);
+                }
+            } else {
+                factionRep.adjust(id, -10);
+            }
+        },
+
+        reset() { this.active = null; },
+    };
+
     // Live tribal population of the active zone. Parallel to
     // `enemies`, but we don't need separate storage - the tribals
     // are stored inside `enemies` with a `tribal` property. This
@@ -13455,23 +13848,20 @@
             const e = spawnEnemy(x, y, opts);
             if (!e) return;
             e.tribal = { faction: f, role };
-            // Hostile alignment -> attacks on sight via normal AI.
-            // Neutral -> passive until hit, wanders its home
-            // territory (we reuse the `neutral` flag that guardians
-            // already respect in the Enemy class).
-            if (f.alignment === "hostile") {
+            // Effective alignment = faction baseline + reputation
+            // adjustment, so the player's history with the tribe
+            // drives whether members spawn hostile / neutral /
+            // friendly at zone load.
+            const effAlign = factionRep.alignmentFor(f.id);
+            if (effAlign === "hostile") {
                 e.neutral = false;
                 e.ally = false;
                 if (f.pack) {
-                    // Pack speed-boost - reuse the hunter faction's
-                    // `_packBonus` lookup path.
-                    e.faction = { id: "dogmen", pack: true };
+                    e.faction = { id: f.id, pack: true };
                 }
             } else {
                 e.neutral = true;
                 e.ally = false;
-                // Memory of a home point so wander stays tribal
-                // instead of drifting across the whole map.
                 e.tribalHome = { x, y };
                 e.tribalWanderR = 180;
             }
@@ -13514,7 +13904,14 @@
         const f = e.tribal.faction;
         const role = e.tribal.role;
         const succ = f.alignment === "friendly" ? 0.75 : 0.45;
-        if (Math.random() < succ) {
+        // Crown-influence boost: a well-charged crown nudges the
+        // recruit odds up. Lets players who have earned their
+        // Crown Mode see it pay off socially, not just in combat.
+        const crownBoost = (typeof crown !== "undefined" && crown.influenceBucket)
+            ? crown.recruitBonus()
+            : 0;
+        const effectiveSucc = Math.min(0.95, succ + crownBoost);
+        if (Math.random() < effectiveSucc) {
             // Convert the live enemy instance into an ally: the
             // existing follower damage routing already handles
             // ally enemies, so we flip the flags + reassign the
@@ -13531,6 +13928,8 @@
                 roleId: role.id,
                 name: `${f.recruitName} ${role.id}`,
             });
+            // Reputation bump on successful recruit.
+            factionRep.adjust(f.id, +15);
             questLog.showToast(
                 `${f.recruitName} ${role.id} joins you.`, 2.8
             );
@@ -20067,6 +20466,11 @@
         // live ally Enemy instances are already cleared by the
         // enemies.length = 0 earlier in this reset.
         player.tribals = [];
+        // Faction reputation + crown influence rewind too - a new
+        // run starts every tribe at neutral + a dormant crown.
+        if (typeof factionRep !== "undefined") factionRep.reset();
+        if (typeof factionWar !== "undefined") factionWar.reset();
+        if (typeof crown !== "undefined") crown.influence = 0;
         // Leaderboard - fresh run zeroes the live stats but keeps
         // the persistent top-10 board intact so the player still
         // sees their prior best between runs.
@@ -22366,6 +22770,92 @@
         ctx.restore();
 
         sy += mapH + 14;
+
+        // --- Section: Tribal reputation ---------------------------
+        // Three faction bars, each showing the live reputation value
+        // and the derived tier (Hostile / Neutral / Allied). Gives
+        // the player a compact dashboard of where every tribe
+        // stands without leaving the pause panel.
+        drawShadowedText("FACTIONS", x + 20, sy,
+            "#8ad9ff", "bold 11px system-ui, sans-serif");
+        sy += 18;
+        const tribeIds = ["bigfoot", "dogmen", "reptilian"];
+        const factionRowH = 22;
+        for (let i = 0; i < tribeIds.length; i++) {
+            const id = tribeIds[i];
+            const f = TRIBAL_FACTIONS[id];
+            if (!f) continue;
+            const rep = factionRep.get(id);
+            const tier = factionRep.tierFor(id);
+            const rowY = sy + i * factionRowH;
+            // Name
+            drawShadowedText(f.name, x + 20, rowY,
+                "#e8e8f0", "bold 12px system-ui, sans-serif");
+            // Tier badge - color-coded to alignment.
+            drawShadowedText(tier.label, x + 100, rowY,
+                tier.color, "italic 11px system-ui, sans-serif");
+            // Bar: -100 .. 100 normalised to 0..1 around center
+            // at the row's right side. Full bar = 140 px.
+            const barW = 140, barH = 5;
+            const barX = x + w - barW - 56;
+            const barY = rowY + 5;
+            ctx.fillStyle = "rgba(18, 18, 30, 0.85)";
+            ctx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
+            ctx.fillStyle = "rgba(120, 120, 144, 0.3)";
+            ctx.fillRect(barX, barY, barW, barH);
+            // Fill
+            const cx_mid = barX + barW / 2;
+            const frac = Math.max(-1, Math.min(1, rep / 100));
+            if (frac >= 0) {
+                ctx.fillStyle = "#7ad17a";
+                ctx.fillRect(cx_mid, barY, (barW / 2) * frac, barH);
+            } else {
+                ctx.fillStyle = "#e06666";
+                const w2 = (barW / 2) * -frac;
+                ctx.fillRect(cx_mid - w2, barY, w2, barH);
+            }
+            // Center tick
+            ctx.fillStyle = "#fff6d6";
+            ctx.fillRect(cx_mid - 0.5, barY - 2, 1, barH + 4);
+            // Numeric value right-aligned
+            ctx.textAlign = "right";
+            drawShadowedText(
+                (rep > 0 ? "+" : "") + rep,
+                x + w - 20, rowY,
+                tier.color, "bold 11px system-ui, sans-serif"
+            );
+            ctx.textAlign = "left";
+        }
+        sy += tribeIds.length * factionRowH + 8;
+
+        // Crown influence line - compact one-row readout below
+        // the faction block.
+        if (typeof crown !== "undefined") {
+            const influence = crown.influence | 0;
+            const bucketLabels = ["Low", "Mid", "High", "Peak"];
+            const bucketColors = ["#a0a0b8", "#8ad9ff", "#ffd166", "#fff6d6"];
+            const b = crown.influenceBucket();
+            const overused = influence >= crown.OVERUSE_AT;
+            drawShadowedText("CROWN INFLUENCE", x + 20, sy,
+                "#8ad9ff", "bold 11px system-ui, sans-serif");
+            drawShadowedText(
+                `${bucketLabels[b]}  (${influence}/${crown.INFLUENCE_MAX})`,
+                x + 160, sy,
+                overused ? "#ff8e5a" : bucketColors[b],
+                "bold 11px system-ui, sans-serif"
+            );
+            if (overused) {
+                ctx.textAlign = "right";
+                drawShadowedText(
+                    "overused - trust dropping",
+                    x + w - 20, sy,
+                    "#ff8e5a",
+                    "italic 10px system-ui, sans-serif"
+                );
+                ctx.textAlign = "left";
+            }
+            sy += 18;
+        }
 
         }   // end JOURNAL tab
 
