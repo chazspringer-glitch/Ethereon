@@ -6369,19 +6369,32 @@
         // without losing the binding.
         bind() { this.slots = player.items; },
 
-        // Layout the bottom-center 4-slot strip. Slot rects are
-        // cached so pointer hit tests don't need to recompute.
+        // Layout: vertical strip on the LEFT edge, sitting above
+        // the weapon / power cooldown HUD (drawCooldownBar paints
+        // the bottom-left ~74 px tall stack). The bottom-center
+        // strip used to collide with the weapon-swap button + the
+        // weapons HUD on phone-width screens, so we moved it to a
+        // column on the side - safely clear of every action button
+        // (right-anchored) and the joystick (only spawns where the
+        // player taps in empty space).
+        //
+        // Slot rects are cached so pointer hit tests don't need to
+        // recompute.
         layout() {
-            const slotW = 52;
-            const slotH = 52;
-            const gap = 8;
-            const totalW = slotW * 4 + gap * 3;
-            const x0 = Math.floor((VIEW_W - totalW) / 2);
-            const y = VIEW_H - slotH - 12;
+            const slotW = 44;
+            const slotH = 44;
+            const gap = 6;
+            const totalH = slotH * 4 + gap * 3;
+            const x = 12;
+            // panelBottom in drawCooldownBar = VIEW_H - 12, total
+            // HUD height ~74 px, leave a 10 px gap above it.
+            const cooldownTopY = VIEW_H - 12 - 74;
+            const y0 = cooldownTopY - 10 - totalH;
             for (let i = 0; i < 4; i++) {
                 this.rects[i] = {
-                    x: x0 + i * (slotW + gap),
-                    y, w: slotW, h: slotH,
+                    x,
+                    y: y0 + i * (slotH + gap),
+                    w: slotW, h: slotH,
                 };
             }
         },
