@@ -18049,6 +18049,11 @@
         // at the exact frame the game ends still animates out.
         scoreSystem.tick(dt);
         scorePopups.update(dt);
+        // Leaderboard: heartbeat + poll on their own cadences.
+        // Heartbeat pushes the live score every 1 s, poll pulls
+        // the roster + daily-reset state every 2 s. Both are no-
+        // ops if no endpoint is configured (local-only play).
+        leaderboard.tick(dt);
         chargeFx.update(dt);
         playerTrail.update(dt);
         ambientParticles.update(dt);
@@ -18417,15 +18422,16 @@
             this.submitIfFinal();
         },
 
-        // Called on death + on reset. Submits a snapshot to the
-        // leaderboard unless we already did this run.
+        // Called on death. Flushes a final heartbeat so the
+        // session's last score reaches the leaderboard even if the
+        // 1 s cadence hasn't fired yet. Idempotent.
         submitIfFinal() {
             if (this._submitted) return;
             this._submitted = true;
-            // Force a final compute before submit so the last few
-            // batched ticks are accounted for.
             this._cached = this.compute();
-            leaderboard.submit({ ...this.stats }, this._cached);
+            if (typeof leaderboard !== "undefined" && leaderboard.heartbeat) {
+                leaderboard.heartbeat(this._cached, { ...this.stats });
+            }
         },
     };
 
@@ -18488,27 +18494,38 @@
     };
 
     const leaderboard = {
-        LOCAL_KEY: "ethereon.leaderboard.v1",
-        NAME_KEY:  "ethereon.playerName",
+        LOCAL_KEY:     "ethereon.leaderboard.v1",
+        NAME_KEY:      "ethereon.playerName",
+        CHAMPIONS_KEY: "ethereon.championsCache",
+        NAME_MAX_LEN:  12,
         entries: [],
+        yesterdaysChampions: [],
         playerName: null,
-        // Set from window.ETHEREON_API at load. When non-null the
-        // client POSTs new scores here and GETs the live top-50.
         endpoint: null,
-        // Refresh cadence (seconds). Only ticks while the pause
-        // panel is open so gameplay isn't polling the network.
-        _refreshTimer: 0,
-        _REFRESH_INTERVAL: 15,
+
+        // Reset detection. lastResetTime is tracked across requests
+        // so we can fire a "New Day" toast when the server rolls
+        // the cycle over between one poll and the next.
+        lastResetTime: 0,
+        // `nextResetIn` is the server-reported ms until next reset;
+        // the pause panel shows it as a count-down.
+        nextResetIn: 0,
+
+        // Heartbeat: push current score every 1 s during gameplay.
+        _hbTimer: 0,
+        _HB_INTERVAL: 1.0,
+        // Remote poll: pull leaderboard every 2 s always (cheap
+        // JSON GET, gated by endpoint).
+        _pollTimer: 0,
+        _POLL_INTERVAL: 2.0,
+        _resetToastPending: false,
 
         init() {
-            // Remote endpoint (optional). If window defines one,
-            // use it; otherwise stay local-only.
             try {
                 if (typeof window !== "undefined" && window.ETHEREON_API) {
                     this.endpoint = String(window.ETHEREON_API);
                 }
             } catch (_e) {}
-            // Local entries
             try {
                 if (typeof localStorage !== "undefined") {
                     const raw = localStorage.getItem(this.LOCAL_KEY);
@@ -18516,12 +18533,20 @@
                         const parsed = JSON.parse(raw);
                         if (Array.isArray(parsed)) this.entries = parsed;
                     }
+                    const champ = localStorage.getItem(this.CHAMPIONS_KEY);
+                    if (champ) {
+                        const parsed = JSON.parse(champ);
+                        if (Array.isArray(parsed)) {
+                            this.yesterdaysChampions = parsed.slice(0, 3);
+                        }
+                    }
                     this.playerName = localStorage.getItem(this.NAME_KEY) || null;
                 }
             } catch (_e) {}
-            // First-ever boot: seed a handful of synthetic rivals so
-            // the board doesn't open empty. Marked `seed: true` so
-            // they're easy to tell apart from real runs.
+            // First-ever boot: seed synthetic rivals so the board
+            // isn't empty for a fresh local-only player. The remote
+            // endpoint (if configured) overwrites these on first
+            // poll.
             if (this.entries.length === 0) {
                 this.entries = [
                     { name: "Aldric",  score: 48200, seed: true },
@@ -18529,9 +18554,6 @@
                     { name: "Ovid",    score: 24300, seed: true },
                     { name: "Iris",    score: 17460, seed: true },
                     { name: "Brann",   score: 11020, seed: true },
-                    { name: "Talia",   score:  8640, seed: true },
-                    { name: "Wren",    score:  5220, seed: true },
-                    { name: "Odo",     score:  3100, seed: true },
                 ];
                 this._save();
             }
@@ -18542,57 +18564,82 @@
                 if (typeof localStorage !== "undefined") {
                     localStorage.setItem(this.LOCAL_KEY,
                         JSON.stringify(this.entries.slice(0, 50)));
+                    localStorage.setItem(this.CHAMPIONS_KEY,
+                        JSON.stringify(this.yesterdaysChampions));
                 }
             } catch (_e) {}
         },
 
+        // 1..NAME_MAX_LEN, trimmed, controls stripped. Returns null
+        // on empty so the nickname modal can reject the submit.
+        sanitizeName(raw) {
+            const s = String(raw || "")
+                .replace(/[\x00-\x1f]/g, "")
+                .trim()
+                .slice(0, this.NAME_MAX_LEN);
+            return s || null;
+        },
+
         setName(name) {
-            const clean = String(name || "").trim().slice(0, 14) || "Anon";
+            const clean = this.sanitizeName(name);
+            if (!clean) return false;
             this.playerName = clean;
             try {
                 if (typeof localStorage !== "undefined") {
                     localStorage.setItem(this.NAME_KEY, clean);
                 }
             } catch (_e) {}
+            return true;
         },
 
-        top10() {
-            // Snapshot sorted desc by score.
+        hasName() { return !!this.playerName; },
+
+        top5() { return this._sortedSlice(5); },
+        top10() { return this._sortedSlice(10); },
+
+        _sortedSlice(n) {
             return this.entries
                 .slice()
                 .sort((a, b) => (b.score || 0) - (a.score || 0))
-                .slice(0, 10);
+                .slice(0, n);
         },
 
-        // Submit a final run. If a remote endpoint is configured,
-        // POSTs to it in the background; local copy always updates
-        // so the pause panel feels live even offline.
-        submit(stats, score) {
-            if (!score || score <= 0) return;
-            // Prompt for a player name on first submit. Uses a
-            // synchronous prompt so the rest of the run doesn't
-            // race the async dialog. Defaults to "Anon" when the
-            // user dismisses.
-            if (!this.playerName) {
-                let entered = null;
-                try {
-                    if (typeof window !== "undefined" && window.prompt) {
-                        entered = window.prompt(
-                            "Enter your leaderboard name:",
-                            "Hero"
-                        );
-                    }
-                } catch (_e) {}
-                this.setName(entered || "Anon");
+        // Player's current rank (1-based) in the live entries. 0
+        // means "not on the board yet". Used by the HUD rank
+        // indicator.
+        currentRank() {
+            if (!this.playerName) return 0;
+            const sorted = this._sortedSlice(50);
+            for (let i = 0; i < sorted.length; i++) {
+                if (sorted[i].name === this.playerName) return i + 1;
             }
+            return 0;
+        },
+
+        // Heartbeat - called every HB_INTERVAL seconds from the
+        // gameplay update path. Pushes the CURRENT run's score to
+        // the local cache + the remote endpoint so the leaderboard
+        // reflects the active session, not just final runs.
+        heartbeat(score, stats) {
+            if (!this.playerName) return;
+            if (!score || score <= 0) return;
+            // Local upsert by nickname - keep the best score.
+            const idx = this.entries.findIndex(
+                e => e.name === this.playerName && e.local);
             const entry = {
                 name: this.playerName,
                 score: Math.floor(score),
-                stats: { ...stats },
+                stats: stats ? { ...stats } : null,
                 at: Date.now(),
                 local: true,
             };
-            this.entries.push(entry);
+            if (idx >= 0) {
+                if ((this.entries[idx].score || 0) < entry.score) {
+                    this.entries[idx] = entry;
+                }
+            } else {
+                this.entries.push(entry);
+            }
             this.entries.sort((a, b) => (b.score || 0) - (a.score || 0));
             this.entries = this.entries.slice(0, 50);
             this._save();
@@ -18607,7 +18654,10 @@
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(entry),
                     keepalive: true,
-                }).catch(() => { /* offline / 5xx -> local copy is fine */ });
+                })
+                .then(r => r.ok ? r.json() : null)
+                .then(data => this._applyServerPayload(data))
+                .catch(() => {});
             } catch (_e) {}
         },
 
@@ -18616,47 +18666,226 @@
             try {
                 fetch(this.endpoint, { method: "GET" })
                     .then(r => r.ok ? r.json() : null)
-                    .then(data => {
-                        if (!data || !Array.isArray(data)) return;
-                        // Merge: remote wins on duplicates (by name +
-                        // score) so the board reflects the live set
-                        // but still keeps offline-only entries.
-                        const seen = new Set();
-                        const merged = [];
-                        for (const e of data) {
-                            if (!e || typeof e.score !== "number") continue;
-                            const key = `${e.name}:${e.score}`;
-                            if (seen.has(key)) continue;
-                            seen.add(key);
-                            merged.push(e);
-                        }
-                        for (const e of this.entries) {
-                            const key = `${e.name}:${e.score}`;
-                            if (seen.has(key)) continue;
-                            seen.add(key);
-                            merged.push(e);
-                        }
-                        merged.sort((a, b) => (b.score || 0) - (a.score || 0));
-                        this.entries = merged.slice(0, 50);
-                        this._save();
-                    })
+                    .then(data => this._applyServerPayload(data))
                     .catch(() => {});
             } catch (_e) {}
         },
 
-        // Tick is called ONLY while the pause panel is open so the
-        // network activity is bounded to "player is reading the
-        // board" moments. Gameplay never polls.
-        tickWhilePaused(dt) {
-            if (!this.endpoint) return;
-            this._refreshTimer -= dt;
-            if (this._refreshTimer <= 0) {
-                this._refreshTimer = this._REFRESH_INTERVAL;
-                this._remoteRefresh();
+        // Applies the server's full payload to local state:
+        //   { entries, lastResetTime, yesterdaysChampions, nextResetIn }
+        // Also detects a DAILY RESET: if lastResetTime advanced,
+        // queue the "New Day" toast so the main tick can surface
+        // it once on the next frame.
+        _applyServerPayload(data) {
+            if (!data || typeof data !== "object") return;
+            if (typeof data.lastResetTime === "number") {
+                if (this.lastResetTime && data.lastResetTime > this.lastResetTime) {
+                    this._resetToastPending = true;
+                }
+                this.lastResetTime = data.lastResetTime;
+            }
+            if (typeof data.nextResetIn === "number") {
+                this.nextResetIn = data.nextResetIn;
+            }
+            if (Array.isArray(data.yesterdaysChampions)) {
+                this.yesterdaysChampions = data.yesterdaysChampions.slice(0, 3);
+            }
+            if (Array.isArray(data.entries)) {
+                // Remote wins: authoritative roster. Tag entries as
+                // NOT local so the HUD highlighting only fires on
+                // the player's own row (matched by name + local=true
+                // flag in _sortedSlice? -> simpler: keep the local
+                // entry for this player alongside so rank lookups
+                // work offline too).
+                const merged = [];
+                const seen = new Set();
+                for (const e of data.entries) {
+                    if (!e || typeof e.score !== "number") continue;
+                    merged.push({
+                        name: e.name,
+                        score: e.score,
+                        stats: e.stats || null,
+                        at: e.at || Date.now(),
+                    });
+                    seen.add(e.name);
+                }
+                // Preserve the PLAYER's local entry if the server
+                // doesn't have them yet (covers the gap between
+                // first heartbeat and the server's next GET flush).
+                const you = this.entries.find(
+                    e => e.local && e.name === this.playerName);
+                if (you && !seen.has(this.playerName)) {
+                    merged.push(you);
+                }
+                merged.sort((a, b) => (b.score || 0) - (a.score || 0));
+                this.entries = merged.slice(0, 50);
+            }
+            this._save();
+        },
+
+        // Called every frame. Runs both heartbeat + poll on their
+        // own cadences. Heartbeat only fires during active
+        // gameplay; poll fires always (even on gameover / pause)
+        // so the rival board stays live for the player to read.
+        tick(dt) {
+            // Heartbeat - gameplay-only so hanging on the pause
+            // screen doesn't freeze the player's score into the
+            // roster with a stale timestamp.
+            if (gameState === "playing" && !paused &&
+                player.alive && this.playerName) {
+                this._hbTimer -= dt;
+                if (this._hbTimer <= 0) {
+                    this._hbTimer = this._HB_INTERVAL;
+                    const score = (typeof scoreSystem !== "undefined")
+                        ? scoreSystem.score()
+                        : 0;
+                    const snap = (typeof scoreSystem !== "undefined")
+                        ? scoreSystem.stats
+                        : null;
+                    if (score > 0) this.heartbeat(score, snap);
+                }
+            }
+            // Poll - always, when an endpoint is configured. Cheap
+            // JSON GET, 2 s cadence per spec.
+            if (this.endpoint) {
+                this._pollTimer -= dt;
+                if (this._pollTimer <= 0) {
+                    this._pollTimer = this._POLL_INTERVAL;
+                    this._remoteRefresh();
+                }
+            } else {
+                // No endpoint -> no poll needed; still update the
+                // nextResetIn countdown display locally if we have
+                // one (resets stay server-driven; local-only runs
+                // don't reset).
+                if (this.nextResetIn > 0) {
+                    this.nextResetIn = Math.max(0,
+                        this.nextResetIn - dt * 1000);
+                }
+            }
+            // Surface the reset toast once per detected rollover.
+            if (this._resetToastPending) {
+                this._resetToastPending = false;
+                if (typeof questLog !== "undefined" && questLog.showToast) {
+                    questLog.showToast("New Day - Leaderboard Reset", 3.2);
+                }
+                if (typeof flash !== "undefined") flash.trigger(0.5, 0.35);
             }
         },
     };
     leaderboard.init();
+
+    // ---------------------------------------------------------------
+    // Nickname modal (first-boot gate)
+    //
+    // Blocking HTML overlay that appears at boot when the player
+    // has no stored nickname. Built once, lazily, so the DOM cost
+    // is zero for returning players. Clicking Play stores the name
+    // and closes the modal; the gameplay loop carries on.
+    // ---------------------------------------------------------------
+    const nicknameModal = {
+        overlay: null,
+        input: null,
+        hint: null,
+        play: null,
+        _built: false,
+
+        _build() {
+            if (this._built) return;
+            const overlay = document.createElement("div");
+            overlay.className = "nick-overlay";
+
+            const panel = document.createElement("div");
+            panel.className = "nick-overlay__panel";
+
+            const title = document.createElement("div");
+            title.className = "nick-overlay__title";
+            title.textContent = "ETHEREON";
+            panel.appendChild(title);
+
+            const sub = document.createElement("div");
+            sub.className = "nick-overlay__sub";
+            sub.textContent = "Pick a nickname for the leaderboard.";
+            panel.appendChild(sub);
+
+            const input = document.createElement("input");
+            input.className = "nick-overlay__input";
+            input.type = "text";
+            input.maxLength = leaderboard.NAME_MAX_LEN;
+            input.autocomplete = "off";
+            input.autocapitalize = "words";
+            input.spellcheck = false;
+            input.placeholder = "Hero";
+            panel.appendChild(input);
+
+            const hint = document.createElement("div");
+            hint.className = "nick-overlay__hint";
+            hint.textContent = `1 - ${leaderboard.NAME_MAX_LEN} characters`;
+            panel.appendChild(hint);
+
+            const play = document.createElement("button");
+            play.className = "nick-overlay__play";
+            play.type = "button";
+            play.textContent = "PLAY";
+            panel.appendChild(play);
+
+            overlay.appendChild(panel);
+            document.body.appendChild(overlay);
+
+            const submit = () => {
+                const clean = leaderboard.sanitizeName(input.value);
+                if (!clean) {
+                    hint.textContent = "Please enter a name.";
+                    input.focus();
+                    return;
+                }
+                leaderboard.setName(clean);
+                this.close();
+            };
+            play.addEventListener("click", submit);
+            input.addEventListener("keydown", (e) => {
+                if (e.key === "Enter") { e.preventDefault(); submit(); }
+            });
+            // Live count + empty-state enabled tracking.
+            input.addEventListener("input", () => {
+                const clean = leaderboard.sanitizeName(input.value);
+                play.disabled = !clean;
+                hint.textContent = clean
+                    ? `${clean.length} / ${leaderboard.NAME_MAX_LEN}`
+                    : `1 - ${leaderboard.NAME_MAX_LEN} characters`;
+            });
+
+            this.overlay = overlay;
+            this.input = input;
+            this.hint = hint;
+            this.play = play;
+            this._built = true;
+        },
+
+        isOpen() {
+            return !!(this.overlay && this.overlay.classList.contains("open"));
+        },
+
+        open() {
+            this._build();
+            if (this.isOpen()) return;
+            this.overlay.classList.add("open");
+            this.play.disabled = true;
+            this.hint.textContent = `1 - ${leaderboard.NAME_MAX_LEN} characters`;
+            this.input.value = "";
+            // Autofocus after a tick so mobile browsers actually
+            // open the keyboard (they ignore focus calls fired
+            // during a touchend event).
+            setTimeout(() => {
+                try { this.input.focus(); } catch (_e) {}
+            }, 80);
+        },
+
+        close() {
+            if (!this.overlay) return;
+            this.overlay.classList.remove("open");
+        },
+    };
 
     function startGame() {
         gameState = "playing";
@@ -18669,6 +18898,14 @@
         // Clear any held keys that might be stuck from the input
         // that dismissed the intro.
         for (const k in keys) keys[k] = false;
+        // First-boot nickname prompt. The modal is non-blocking
+        // for the game loop - the input sits above the canvas and
+        // the player can see the world running while they pick a
+        // name. Heartbeat is a no-op until `leaderboard.playerName`
+        // is set, so the roster won't get a "null" entry.
+        if (!leaderboard.hasName()) {
+            nicknameModal.open();
+        }
 
         // Opening intro plays only once per session - a fresh page
         // load starts with the story; respawning from death does
@@ -19387,6 +19624,9 @@
         // Rank badge - compact row BELOW the main score line.
         // Shows the live leaderboard score + the rank it earns, so
         // players see themselves moving up the tiers in realtime.
+        // Also shows the live leaderboard position (#N) on the
+        // right, plus the player's nickname, so the same row
+        // answers "what tier? what score? what position? who?"
         const rank = scoreSystem.rank();
         const rankY = y + 24;
         drawShadowedText("RANK", x, rankY,
@@ -19403,6 +19643,24 @@
             rank.color,
             "bold 11px system-ui, sans-serif"
         );
+        // Leaderboard position + nickname pill.
+        const lbRank = leaderboard.currentRank();
+        if (lbRank > 0) {
+            drawShadowedText(
+                "#" + lbRank,
+                x + 180, rankY,
+                "#8ad9ff",
+                "bold 11px system-ui, sans-serif"
+            );
+        }
+        if (leaderboard.playerName) {
+            drawShadowedText(
+                leaderboard.playerName,
+                x + 218, rankY,
+                "#e8e8f0",
+                "bold 11px system-ui, sans-serif"
+            );
+        }
 
         ctx.restore();
     }
@@ -20815,14 +21073,24 @@
         sy += mapH + 14;
 
         // --- Section: Live leaderboard ----------------------------
-        // Top 10 by score. Current player (by stored name) is
-        // highlighted so they can see their standing at a glance.
-        // Remote refresh (if configured) ticks here while the
-        // panel is open - gameplay never polls.
-        leaderboard.tickWhilePaused(1 / 60);
+        // Top 5 (per spec) with countdown + current rank indicator.
+        // Polling runs on its own 2 s cadence from the main tick,
+        // so this draw just reads the latest roster.
         drawShadowedText("LEADERBOARD", x + 20, sy,
             "#8ad9ff", "bold 11px system-ui, sans-serif");
-        if (leaderboard.playerName) {
+        // Countdown badge on the right.
+        if (leaderboard.nextResetIn > 0) {
+            const sec = Math.floor(leaderboard.nextResetIn / 1000);
+            const hrs = Math.floor(sec / 3600);
+            const mins = Math.floor((sec % 3600) / 60);
+            ctx.textAlign = "right";
+            drawShadowedText(
+                `resets in ${hrs}h ${mins}m`,
+                x + w - 20, sy,
+                "#a0a0b8", "10px system-ui, sans-serif"
+            );
+            ctx.textAlign = "left";
+        } else if (leaderboard.playerName) {
             ctx.textAlign = "right";
             drawShadowedText(
                 `you: ${leaderboard.playerName}`,
@@ -20833,7 +21101,21 @@
         }
         sy += 18;
 
-        const top = leaderboard.top10();
+        // Player rank line - compact "#3 / 47" above the top-5
+        // list so the player sees where they sit even if they're
+        // below the visible top.
+        if (leaderboard.playerName) {
+            const myRank = leaderboard.currentRank();
+            const totalPlayers = leaderboard.entries.length;
+            const rankStr = myRank > 0
+                ? `Your rank: #${myRank} of ${totalPlayers}`
+                : `Your rank: unranked`;
+            drawShadowedText(rankStr, x + 20, sy,
+                "#8ad9ff", "italic 10px system-ui, sans-serif");
+            sy += 14;
+        }
+
+        const top = leaderboard.top5();
         const lbRowH = 18;
         const lbRowW = w - 40;
         const lbX = x + 20;
@@ -20845,7 +21127,7 @@
             const you = leaderboard.playerName;
             for (let i = 0; i < top.length; i++) {
                 const e = top[i];
-                const isYou = e && you && e.name === you && e.local;
+                const isYou = e && you && e.name === you;
                 const rnk = rankFor(e.score || 0);
                 const rowY = sy + i * lbRowH;
 
@@ -20856,19 +21138,16 @@
                     ctx.fillRect(lbX - 2, rowY - 2, lbRowW + 4, lbRowH);
                     ctx.restore();
                 }
-                // Rank index
                 drawShadowedText(
                     String(i + 1).padStart(2, "0") + ".",
                     lbX, rowY,
                     isYou ? "#ffd166" : "#a0a0b8",
                     "bold 11px system-ui, sans-serif"
                 );
-                // Badge dot + rank name
                 ctx.fillStyle = rnk.color;
                 ctx.beginPath();
                 ctx.arc(lbX + 30, rowY + 5, 4, 0, Math.PI * 2);
                 ctx.fill();
-                // Player name
                 drawShadowedText(
                     e.name || "?",
                     lbX + 40, rowY,
@@ -20876,14 +21155,12 @@
                     isYou ? "bold 11px system-ui, sans-serif"
                           : "11px system-ui, sans-serif"
                 );
-                // Rank word (italic small)
                 drawShadowedText(
                     rnk.name,
                     lbX + 134, rowY,
                     rnk.color,
                     "italic 10px system-ui, sans-serif"
                 );
-                // Score (right-aligned)
                 ctx.textAlign = "right";
                 drawShadowedText(
                     String(e.score || 0),
@@ -20895,7 +21172,55 @@
             }
             sy += top.length * lbRowH;
         }
-        sy += 10;
+        sy += 8;
+
+        // --- Yesterday's Champions ------------------------------
+        // Rendered only when the server has flushed a top-3 from
+        // the previous cycle. Each name sits under a crown glyph
+        // in the tier color, so gold badges read as "yesterday's
+        // best" even at a glance.
+        if (leaderboard.yesterdaysChampions &&
+            leaderboard.yesterdaysChampions.length > 0) {
+            drawShadowedText("YESTERDAY'S CHAMPIONS", x + 20, sy,
+                "#ffd166", "bold 11px system-ui, sans-serif");
+            sy += 16;
+            const champRowH = 18;
+            const champ = leaderboard.yesterdaysChampions;
+            const crowns = ["♛", "♔", "♕"];   // gold / silver / bronze
+            for (let i = 0; i < champ.length; i++) {
+                const e = champ[i];
+                const rnk = rankFor(e.score || 0);
+                const rowY = sy + i * champRowH;
+                // Crown glyph, color-tiered.
+                const crownColor = i === 0 ? "#ffd166"
+                                 : i === 1 ? "#c0c4c8"
+                                 :           "#c48c4a";
+                drawShadowedText(
+                    crowns[i] || "★",
+                    lbX, rowY,
+                    crownColor, "bold 13px system-ui, sans-serif"
+                );
+                drawShadowedText(
+                    e.name || "?",
+                    lbX + 20, rowY,
+                    "#e8e8f0", "bold 11px system-ui, sans-serif"
+                );
+                drawShadowedText(
+                    rnk.name,
+                    lbX + 134, rowY,
+                    rnk.color, "italic 10px system-ui, sans-serif"
+                );
+                ctx.textAlign = "right";
+                drawShadowedText(
+                    String(e.score || 0),
+                    lbX + lbRowW - 4, rowY,
+                    "#ffd166", "bold 11px system-ui, sans-serif"
+                );
+                ctx.textAlign = "left";
+            }
+            sy += champ.length * champRowH + 4;
+        }
+        sy += 6;
 
         // --- Section 3: Ethereon anime tab ------------------------
         // Dedicated "tab" row for the companion anime video. Styled
