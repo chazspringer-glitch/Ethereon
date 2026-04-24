@@ -22849,116 +22849,17 @@
         }
         sy += totalMissions * missionRowH + 14;
 
-        // --- Section 2: World map ---------------------------------
-        drawShadowedText("WORLD MAP", x + 20, sy,
-            "#8ad9ff", "bold 11px system-ui, sans-serif");
-        sy += 14;
-
-        const mapX = x + 20;
-        const mapY = sy;
-        const mapW = w - 40;
-        const mapH = 140;
-
-        ctx.save();
-        // Subtle backdrop for the map area.
-        roundRectPath(ctx, mapX, mapY, mapW, mapH, 6);
-        ctx.fillStyle = "rgba(10, 12, 22, 0.75)";
-        ctx.fill();
-        ctx.strokeStyle = "rgba(138, 217, 255, 0.18)";
-        ctx.lineWidth = 1;
-        ctx.stroke();
-
-        // Compute node screen positions from the grid coords.
-        const maxCol = 4, maxRow = 1;
-        const nodePositions = {};
-        for (const n of PAUSE_MAP_NODES) {
-            const nx = mapX + 28 + (n.col / maxCol) * (mapW - 56);
-            const ny = mapY + 32 + (n.row / Math.max(1, maxRow)) * (mapH - 64);
-            nodePositions[n.id] = { x: nx, y: ny };
-        }
-
-        // Links first so the circles draw on top. Known-route links
-        // are a bright cyan; locked-by-boss-gate links (shrine ->
-        // abyss) go dim until the boss falls.
-        ctx.lineWidth = 2;
-        for (const [a, b] of PAUSE_MAP_LINKS) {
-            const pa = nodePositions[a];
-            const pb = nodePositions[b];
-            if (!pa || !pb) continue;
-            const locked = (a === "shrine" && b === "abyss") &&
-                !defeatedBosses.has("shrine");
-            ctx.strokeStyle = locked
-                ? "rgba(120, 90, 130, 0.45)"
-                : "rgba(138, 217, 255, 0.55)";
-            ctx.beginPath();
-            ctx.moveTo(pa.x, pa.y);
-            ctx.lineTo(pb.x, pb.y);
-            ctx.stroke();
-        }
-
-        // Nodes.
-        for (const n of PAUSE_MAP_NODES) {
-            const p = nodePositions[n.id];
-            const isHere = currentLevel && currentLevel.id === n.id;
-            const cleared = defeatedBosses.has(n.id);
-            const safeZone = LEVELS[n.id] && LEVELS[n.id].safe;
-
-            // Base fill - bright gold for current, green for zones
-            // whose boss fell, cyan for known safe zones, violet for
-            // other hostile zones (still reachable but unsubdued).
-            let fill = "#8ad9ff";
-            let rim  = "rgba(138, 217, 255, 0.7)";
-            if (cleared)  { fill = "#7ad17a"; rim = "rgba(122, 209, 122, 0.85)"; }
-            else if (safeZone) { fill = "#8ad9ff"; rim = "rgba(138, 217, 255, 0.75)"; }
-            else           { fill = "#b06bff"; rim = "rgba(176, 107, 255, 0.75)"; }
-            if (isHere)    { fill = "#ffd166"; rim = "#fff6d6"; }
-
-            ctx.fillStyle = fill;
-            ctx.beginPath();
-            ctx.arc(p.x, p.y, isHere ? 8 : 6, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.strokeStyle = rim;
-            ctx.lineWidth = isHere ? 2.5 : 1.5;
-            ctx.beginPath();
-            ctx.arc(p.x, p.y, isHere ? 10 : 7, 0, Math.PI * 2);
-            ctx.stroke();
-
-            // "here" pulse ring so the current zone reads at a glance.
-            if (isHere) {
-                const pulse = 0.5 + 0.5 *
-                    Math.abs(Math.sin(performance.now() * 0.004));
-                ctx.globalAlpha = pulse * 0.45;
-                ctx.strokeStyle = "#fff6d6";
-                ctx.lineWidth = 1.5;
-                ctx.beginPath();
-                ctx.arc(p.x, p.y, 14, 0, Math.PI * 2);
-                ctx.stroke();
-                ctx.globalAlpha = 1;
-            }
-
-            // Label under the node.
-            ctx.textAlign = "center";
-            ctx.textBaseline = "top";
-            drawShadowedText(n.label, p.x, p.y + 12,
-                isHere ? "#ffd166" : "#e8e8f0",
-                isHere ? "bold 10px system-ui, sans-serif"
-                       : "10px system-ui, sans-serif");
-
-            // Checkmark marker for cleared bosses.
-            if (cleared) {
-                drawShadowedText("[x]", p.x + 12, p.y - 4,
-                    "#7ad17a", "bold 10px system-ui, sans-serif");
-            }
-        }
-        ctx.restore();
-
-        sy += mapH + 14;
-
         // --- Section: Tribal reputation ---------------------------
-        // Three faction bars, each showing the live reputation value
-        // and the derived tier (Hostile / Neutral / Allied). Gives
-        // the player a compact dashboard of where every tribe
-        // stands without leaving the pause panel.
+        // The full WORLD MAP block used to live here (chapter
+        // travel diagram). It's been moved to the dedicated WORLD
+        // tab where the proper region grid + faction detail panel
+        // lives. The Journal tab now goes straight from the
+        // missions list into the faction summary so factions and
+        // crown influence both fit comfortably above the pinned
+        // Resume / Save / Load actions on phone-width screens.
+        //
+        // Three faction bars, each showing the live reputation
+        // value and the derived tier (Hostile / Neutral / Allied).
         drawShadowedText("FACTIONS", x + 20, sy,
             "#8ad9ff", "bold 11px system-ui, sans-serif");
         sy += 18;
