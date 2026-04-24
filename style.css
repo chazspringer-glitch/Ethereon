@@ -46,3 +46,69 @@ body {
     height: 100dvh;
     touch-action: none;
 }
+
+/* ---------- Anime player overlay ----------
+   In-game YouTube embed for the Ethereon anime companion video.
+   Sits above the canvas so it captures input; removing the iframe
+   on close is what actually stops playback (blanking src stops
+   audio instantly even if the close animation is still running). */
+.anime-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.85);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+    padding: 16px;
+    padding: max(16px, env(safe-area-inset-top))
+             max(16px, env(safe-area-inset-right))
+             max(16px, env(safe-area-inset-bottom))
+             max(16px, env(safe-area-inset-left));
+}
+.anime-overlay.open {
+    display: flex;
+}
+.anime-overlay__frame {
+    position: relative;
+    width: min(100%, 1000px);
+    aspect-ratio: 16 / 9;
+    background: #000;
+    border: 2px solid rgba(255, 77, 85, 0.55);
+    border-radius: 10px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+    overflow: hidden;
+}
+.anime-overlay__frame iframe {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
+}
+.anime-overlay__close {
+    position: absolute;
+    top: -14px;
+    right: -14px;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: #ff4d55;
+    color: #fff;
+    border: 2px solid #fff;
+    font: bold 18px/1 "Segoe UI", Roboto, system-ui, sans-serif;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    z-index: 2;
+}
+.anime-overlay__close:focus { outline: none; }
+.anime-overlay__close:hover { background: #ff6b72; }
+.anime-overlay__title {
+    position: absolute;
+    top: -28px;
+    left: 2px;
+    font: bold 12px/1 "Segoe UI", Roboto, system-ui, sans-serif;
+    color: #ff4d55;
+    letter-spacing: 0.08em;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+    pointer-events: none;
+}

@@ -7196,12 +7196,96 @@
     // Pause-menu state. Rects are screen-space and refreshed each
     // draw so they automatically follow resize without a layout
     // callback. Touch + keyboard both route here via handleAction.
-    // URL opened by the "ETHEREON ANIME" pause-menu tab. External
-    // YouTube link opened in a new tab with noopener for safety -
-    // the game itself is in-memory only, so navigating away would
-    // discard unsaved progress if we used location.href.
-    const ETHEREON_ANIME_URL =
-        "https://youtu.be/sJYVRXRk5CQ?si=qBFWPIdJZETFu3F8";
+    // Video opened by the "ETHEREON ANIME" pause-menu tab. Played
+    // inside the page via a YouTube embed iframe - see animePlayer
+    // below - so the player never has to leave the site.
+    const ETHEREON_ANIME_ID = "sJYVRXRk5CQ";
+    const ETHEREON_ANIME_EMBED =
+        "https://www.youtube.com/embed/" + ETHEREON_ANIME_ID +
+        "?autoplay=1&rel=0&modestbranding=1&playsinline=1";
+
+    // DOM-backed YouTube player. Sits above the game canvas while
+    // open so it captures input naturally (clicks / taps land on the
+    // iframe, not the game). The iframe is CREATED on open and
+    // REMOVED on close - blanking `src` would work but re-creating
+    // is cleaner and guarantees audio stops instantly on close.
+    const animePlayer = {
+        overlay: null,
+        frame: null,
+        iframe: null,
+        _built: false,
+
+        _build() {
+            if (this._built) return;
+            const overlay = document.createElement("div");
+            overlay.className = "anime-overlay";
+            // Clicking the dim backdrop (anywhere OUTSIDE the video
+            // frame) closes the player - same gesture pattern as the
+            // in-game dialogue modal.
+            overlay.addEventListener("pointerdown", (e) => {
+                if (e.target === overlay) this.close();
+            });
+
+            const frame = document.createElement("div");
+            frame.className = "anime-overlay__frame";
+
+            const title = document.createElement("div");
+            title.className = "anime-overlay__title";
+            title.textContent = "ETHEREON - ANIME";
+            frame.appendChild(title);
+
+            const close = document.createElement("button");
+            close.className = "anime-overlay__close";
+            close.type = "button";
+            close.setAttribute("aria-label", "Close anime player");
+            close.textContent = "×";
+            close.addEventListener("click", () => this.close());
+            frame.appendChild(close);
+
+            overlay.appendChild(frame);
+            document.body.appendChild(overlay);
+
+            this.overlay = overlay;
+            this.frame = frame;
+            this._built = true;
+        },
+
+        isOpen() {
+            return !!(this.overlay && this.overlay.classList.contains("open"));
+        },
+
+        open() {
+            this._build();
+            if (this.isOpen()) return;
+            // Fresh iframe each open so playback starts cleanly and
+            // doesn't resume from the previous watch position.
+            if (this.iframe) this.iframe.remove();
+            const iframe = document.createElement("iframe");
+            iframe.src = ETHEREON_ANIME_EMBED;
+            iframe.title = "Ethereon - the anime companion";
+            iframe.allow =
+                "accelerometer; autoplay; clipboard-write; " +
+                "encrypted-media; gyroscope; picture-in-picture; " +
+                "web-share";
+            iframe.setAttribute("allowfullscreen", "");
+            iframe.referrerPolicy = "strict-origin-when-cross-origin";
+            this.frame.appendChild(iframe);
+            this.iframe = iframe;
+            this.overlay.classList.add("open");
+        },
+
+        close() {
+            if (!this.overlay) return;
+            this.overlay.classList.remove("open");
+            // Remove the iframe so audio + network cut out at once.
+            // Leaving the iframe in the DOM with display:none keeps
+            // playback running in the background on some browsers.
+            if (this.iframe) {
+                this.iframe.remove();
+                this.iframe = null;
+            }
+        },
+    };
 
     const pauseMenu = {
         rects: {
@@ -7240,22 +7324,12 @@
                 return;
             }
             if (name === "anime") {
-                // Fire and forget - open in a new tab so the run
-                // doesn't get blown away by a navigation. Some
-                // browsers / embedded webviews may block popups; in
-                // that case we surface a hint instead of silently
-                // doing nothing.
-                let opened = null;
-                try {
-                    opened = window.open(
-                        ETHEREON_ANIME_URL,
-                        "_blank",
-                        "noopener,noreferrer"
-                    );
-                } catch (_err) { opened = null; }
-                this.setStatus(opened
-                    ? "Opening Ethereon anime..."
-                    : "Popup blocked - open YouTube manually.");
+                // Open the embedded YouTube player in an overlay on
+                // top of the canvas so the player can watch the
+                // episode without leaving the site. The game stays
+                // paused underneath - closing the overlay drops the
+                // player back into the still-paused menu.
+                animePlayer.open();
                 return;
             }
         },
@@ -14250,6 +14324,18 @@
         // same key that opened the menu. Gameplay ticks are skipped
         // entirely while paused.
         if (paused) {
+            // Anime player takes priority: while it's open, Escape
+            // closes the video instead of resuming the game, so the
+            // player doesn't accidentally unpause into combat while
+            // the episode is playing over the canvas.
+            if (animePlayer.isOpen()) {
+                if (keysJustPressed["Escape"]) {
+                    animePlayer.close();
+                }
+                clearJustPressed();
+                pauseMenu.tick(dt);
+                return;
+            }
             if (keysJustPressed["p"] || keysJustPressed["P"] ||
                 keysJustPressed["Escape"]) {
                 pauseMenu.handleAction("resume");
@@ -16714,18 +16800,17 @@
         // Title + subline.
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
-        drawShadowedText("Watch on YouTube",
+        drawShadowedText("Watch the Episode",
             animeX + 36, sy + animeH / 2 - 8,
             "#ffeff0", "bold 14px system-ui, sans-serif");
         drawShadowedText("Ethereon - the anime companion",
             animeX + 36, sy + animeH / 2 + 9,
             "#c88088", "11px system-ui, sans-serif");
 
-        // External-link glyph on the right so the row clearly reads
-        // as navigation, not an in-game action.
+        // PLAY hint on the right.
         ctx.textAlign = "right";
         ctx.textBaseline = "middle";
-        drawShadowedText("open",
+        drawShadowedText("play",
             animeX + animeW - 14, sy + animeH / 2,
             "#ff4d55", "bold 11px system-ui, sans-serif");
         ctx.restore();
