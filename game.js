@@ -21160,6 +21160,13 @@
         // reads the latest roster.
         if (pauseMenu.activeTab === "board") {
 
+        // The header block above leaves textAlign at "center".
+        // Explicitly reset to "left" so the leaderboard rows anchor
+        // at x+20 instead of being centered on x+20 (which dumped
+        // half the "LEADERBOARD" label off the left edge of the
+        // panel on mobile).
+        ctx.textAlign = "left";
+
         drawShadowedText("LEADERBOARD", x + 20, sy,
             "#8ad9ff", "bold 11px system-ui, sans-serif");
         // Countdown badge on the right.
