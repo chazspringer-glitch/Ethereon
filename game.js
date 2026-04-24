@@ -7496,6 +7496,287 @@
     };
 
     // ---------------------------------------------------------------
+    // Auto-target assist
+    //
+    // Picks a single enemy to soft-lock while the player is actively
+    // attacking, then feeds a SMOOTHED aim direction back out to
+    // weapons that want it (the red beam, the charged energy beam).
+    //
+    // Design rules:
+    //   - Never takes control of movement or facing outside of
+    //     attacks. Walking around and idle animation still obey the
+    //     player's stick / keyboard.
+    //   - Rotation toward the target is rate-limited so aim eases
+    //     into place instead of snapping - sudden enemy pops don't
+    //     whip the beam around.
+    //   - Selection is a composite score (distance, frontal-ness,
+    //     low-hp preference, elite bonus). Lower score wins.
+    //   - Hysteresis: a new candidate only steals the lock if its
+    //     score is materially better than the current target's, so
+    //     the aim doesn't flicker between two equally-good enemies.
+    //   - If the current target dies or drifts past `lossRange`,
+    //     the lock drops and the next best target is picked on the
+    //     same frame.
+    // ---------------------------------------------------------------
+    const autoTarget = {
+        current: null,
+
+        // Smoothed aim vector. Seeded to "down" so the very first
+        // frame after boot has a sane direction; update() replaces
+        // it with the player's facing once one is known.
+        aimX: 0,
+        aimY: 1,
+
+        // Whether the player is CURRENTLY being assisted. Drives the
+        // on-screen reticle visibility and lets weapons check a
+        // single boolean to know whether to swap in autoTarget's aim.
+        active: false,
+
+        // Tuning
+        maxRange: 340,          // initial acquisition range
+        lossRange: 440,         // drops the lock past this distance
+        rotateSpeed: 9.0,       // max radians / sec
+        hysteresis: 24,         // score margin a candidate must beat
+        clusterRadius: 90,      // px radius for cluster widening
+
+        weightDistance: 1.0,
+        weightFrontal: 60,      // multiplier on "off-axis" penalty
+        weightHealth: 40,       // lower hp fraction = better
+        weightElite: 70,        // flat bonus for elite / boss / named
+
+        // True while the player intends to hit something. Gated on
+        // real combat actions so idle motion doesn't hijack aim.
+        isEngaging() {
+            if (typeof redBeam !== "undefined" && redBeam.active) return true;
+            if (typeof energyBeam !== "undefined" && energyBeam.isActive()) return true;
+            if (typeof attack !== "undefined" && attack.active) return true;
+            if (typeof player !== "undefined" && player.isCharging) return true;
+            return false;
+        },
+
+        _isElite(e) {
+            if (!e) return false;
+            if (e.isElite || e.isBoss || e.elite || e.boss) return true;
+            const v = e.variant || (e.faction && e.faction.variant);
+            if (v === "large" || v === "elite" || v === "boss") return true;
+            if (e.factionId === "shadowLord" || e.factionId === "throneWarden") return true;
+            return false;
+        },
+
+        // Lower score = better. Components are kept additive so
+        // they can be tuned independently via the weight* fields.
+        _score(p, e) {
+            const px = p.x + p.width / 2;
+            const py = p.y + p.height / 2;
+            const ex = e.x + e.width / 2;
+            const ey = e.y + e.height / 2;
+            const dx = ex - px;
+            const dy = ey - py;
+            const dist = Math.hypot(dx, dy);
+            if (dist > this.maxRange) return Infinity;
+
+            const fx = p.facing.x;
+            const fy = p.facing.y;
+            const fmag = Math.hypot(fx, fy) || 1;
+            const ux = fx / fmag;
+            const uy = fy / fmag;
+            // dot in [-1, 1]: 1 = directly in front, -1 = behind.
+            const dot = (dx * ux + dy * uy) / Math.max(1, dist);
+            const frontal = 1 - dot;  // front 0, side 1, back 2
+
+            const hpFrac = Math.max(0, Math.min(1,
+                e.hp / Math.max(1, e.maxHp)));
+
+            let score = dist * this.weightDistance
+                + frontal * this.weightFrontal
+                + hpFrac * this.weightHealth;
+            if (this._isElite(e)) score -= this.weightElite;
+            return score;
+        },
+
+        // Public: return the best enemy to attack right now. Returns
+        // null when no valid target is within range.
+        getTarget(p, list) {
+            let best = null;
+            let bestScore = Infinity;
+            for (const e of list) {
+                if (!e || !e.alive || e.ally || e.neutral) continue;
+                const s = this._score(p, e);
+                if (s < bestScore) {
+                    bestScore = s;
+                    best = e;
+                }
+            }
+            return best;
+        },
+
+        // How many hostile enemies sit within clusterRadius of the
+        // current target. Used by the beam to widen slightly when a
+        // clump of enemies is stacked on the lock.
+        clusterCount() {
+            if (!this.current) return 0;
+            const tx = this.current.x + this.current.width / 2;
+            const ty = this.current.y + this.current.height / 2;
+            const r2 = this.clusterRadius * this.clusterRadius;
+            let n = 0;
+            for (const e of enemies) {
+                if (!e.alive || e.ally || e.neutral) continue;
+                const ex = e.x + e.width / 2;
+                const ey = e.y + e.height / 2;
+                const dx = ex - tx;
+                const dy = ey - ty;
+                if (dx * dx + dy * dy < r2) n++;
+            }
+            return n;
+        },
+
+        // Beam half-width multiplier. Solo target keeps the beam at
+        // base width; a stack of 3+ enemies around the lock pushes
+        // the beam wider for crowd control. Capped to avoid silly
+        // sweep widths on open-field hordes.
+        widthBonus() {
+            const n = this.clusterCount();
+            if (n <= 1) return 1;
+            return Math.min(1.55, 1 + 0.14 * (n - 1));
+        },
+
+        update(dt) {
+            // 1. Validate the current lock. Dead / converted / out-
+            //    of-range targets are released before we pick.
+            if (this.current) {
+                const c = this.current;
+                const released = !c.alive || c.ally || c.neutral;
+                if (released) {
+                    this.current = null;
+                } else {
+                    const px = player.x + player.width / 2;
+                    const py = player.y + player.height / 2;
+                    const ex = c.x + c.width / 2;
+                    const ey = c.y + c.height / 2;
+                    if (Math.hypot(ex - px, ey - py) > this.lossRange) {
+                        this.current = null;
+                    }
+                }
+            }
+
+            // 2. Re-pick while engaging. Hysteresis keeps the lock
+            //    sticky: a rival needs to be clearly better, not just
+            //    a hair better, to steal focus.
+            const engaging = this.isEngaging();
+            if (engaging) {
+                const best = this.getTarget(player, enemies);
+                if (best) {
+                    if (!this.current) {
+                        this.current = best;
+                    } else if (best !== this.current) {
+                        const s1 = this._score(player, best);
+                        const s0 = this._score(player, this.current);
+                        if (s1 + this.hysteresis < s0) this.current = best;
+                    }
+                }
+            } else if (this.current) {
+                // Out-of-combat: keep the lock warm briefly so re-
+                // engagement snaps back, but don't actively hunt.
+            }
+
+            // 3. Smooth rotation. Compute the desired aim (target
+            //    vector if locked, facing otherwise) and ease the
+            //    stored aim vector toward it at `rotateSpeed`.
+            let tx = player.facing.x;
+            let ty = player.facing.y;
+            if (this.current) {
+                const px = player.x + player.width / 2;
+                const py = player.y + player.height / 2;
+                const ex = this.current.x + this.current.width / 2;
+                const ey = this.current.y + this.current.height / 2;
+                tx = ex - px;
+                ty = ey - py;
+            }
+            const tmag = Math.hypot(tx, ty) || 1;
+            tx /= tmag;
+            ty /= tmag;
+
+            if (!(isFinite(this.aimX) && isFinite(this.aimY)) ||
+                (this.aimX === 0 && this.aimY === 0)) {
+                this.aimX = tx;
+                this.aimY = ty;
+            } else {
+                const curAng = Math.atan2(this.aimY, this.aimX);
+                const tgtAng = Math.atan2(ty, tx);
+                let delta = tgtAng - curAng;
+                while (delta > Math.PI) delta -= Math.PI * 2;
+                while (delta < -Math.PI) delta += Math.PI * 2;
+                const maxStep = this.rotateSpeed * dt;
+                if (Math.abs(delta) > maxStep) {
+                    delta = Math.sign(delta) * maxStep;
+                }
+                const a = curAng + delta;
+                this.aimX = Math.cos(a);
+                this.aimY = Math.sin(a);
+            }
+
+            this.active = engaging && this.current !== null;
+        },
+
+        // Public helper: resolve the direction a weapon should shoot.
+        // Uses the smoothed aim when a target is locked; falls back
+        // to the player's raw facing when nothing is in range, so
+        // manual aim still works without a target.
+        aimDir() {
+            if (this.current) return { x: this.aimX, y: this.aimY };
+            const fx = player.facing.x;
+            const fy = player.facing.y;
+            const mag = Math.hypot(fx, fy) || 1;
+            return { x: fx / mag, y: fy / mag };
+        },
+
+        draw(ctx) {
+            if (!this.active || !this.current) return;
+            const e = this.current;
+            const cx = e.x + e.width / 2;
+            const cy = e.y + e.height / 2 - 2;
+            const t = performance.now() * 0.006;
+            const pulse = 0.75 + 0.25 * Math.sin(t);
+            const baseR = Math.max(e.width, e.height) * 0.55 + 4;
+            const r = baseR + Math.sin(t * 1.3) * 1.5;
+
+            ctx.save();
+            // Outer ring
+            ctx.globalAlpha = 0.55 * pulse;
+            ctx.strokeStyle = "#ffd166";
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Reticle ticks at N/E/S/W
+            ctx.globalAlpha = 0.9 * pulse;
+            const tick = 4;
+            ctx.beginPath();
+            ctx.moveTo(cx - r - tick, cy); ctx.lineTo(cx - r + 1, cy);
+            ctx.moveTo(cx + r - 1, cy);    ctx.lineTo(cx + r + tick, cy);
+            ctx.moveTo(cx, cy - r - tick); ctx.lineTo(cx, cy - r + 1);
+            ctx.moveTo(cx, cy + r - 1);    ctx.lineTo(cx, cy + r + tick);
+            ctx.stroke();
+
+            // Soft inner glow tint
+            ctx.globalAlpha = 0.15 * pulse;
+            ctx.fillStyle = "#ffd166";
+            ctx.beginPath();
+            ctx.arc(cx, cy, r * 0.7, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        },
+
+        reset() {
+            this.current = null;
+            this.aimX = 0;
+            this.aimY = 1;
+            this.active = false;
+        },
+    };
+
+    // ---------------------------------------------------------------
     // Red energy beam (basic-sword upgrade)
     //
     // Continuous damage stream while the attack button is HELD
@@ -7533,8 +7814,14 @@
         _dealDamage() {
             const cx = player.x + player.width / 2;
             const cy = player.y + player.height / 2;
-            const fx = player.facing.x;
-            const fy = player.facing.y;
+            // Auto-target rotates the beam toward a soft-locked
+            // enemy; without a lock we fall back to raw facing so
+            // manual aim still works.
+            const aim = (typeof autoTarget !== "undefined")
+                ? autoTarget.aimDir()
+                : null;
+            const fx = aim ? aim.x : player.facing.x;
+            const fy = aim ? aim.y : player.facing.y;
             const mag = Math.hypot(fx, fy) || 1;
             const dx = fx / mag;
             const dy = fy / mag;
@@ -7545,7 +7832,14 @@
             const rangeMult = crownUp ? 1.15 : 1;
             const dmgMult = crownUp ? 1.3 : 1;
 
-            const halfW = this.halfWidth * widthMult;
+            // Cluster-aware widening: a clump of enemies on the lock
+            // widens the beam so crowd control doesn't miss the ones
+            // standing shoulder-to-shoulder with the primary target.
+            const clusterWiden = (typeof autoTarget !== "undefined")
+                ? autoTarget.widthBonus()
+                : 1;
+
+            const halfW = this.halfWidth * widthMult * clusterWiden;
             const range = this.range * rangeMult;
             const dmg = Math.max(1, Math.round(
                 (this.damagePerTick + (swordWeapon.damage - 1) * 0.4)
@@ -7595,8 +7889,13 @@
             if (!this.active) return;
             const cx = player.x + player.width / 2;
             const cy = player.y + player.height / 2;
-            const fx = player.facing.x;
-            const fy = player.facing.y;
+            // Match _dealDamage: render along the smoothed auto-aim
+            // vector when a target is locked, otherwise raw facing.
+            const aim = (typeof autoTarget !== "undefined")
+                ? autoTarget.aimDir()
+                : null;
+            const fx = aim ? aim.x : player.facing.x;
+            const fy = aim ? aim.y : player.facing.y;
             const mag = Math.hypot(fx, fy) || 1;
             const dx = fx / mag;
             const dy = fy / mag;
@@ -7604,7 +7903,10 @@
             const crownUp = (typeof crown !== "undefined" && crown.active);
             const widthMult = crownUp ? 1.4 : 1;
             const rangeMult = crownUp ? 1.15 : 1;
-            const halfW = this.halfWidth * widthMult;
+            const clusterWiden = (typeof autoTarget !== "undefined")
+                ? autoTarget.widthBonus()
+                : 1;
+            const halfW = this.halfWidth * widthMult * clusterWiden;
             const range = this.range * rangeMult;
 
             const now = performance.now();
@@ -7719,8 +8021,20 @@
             this.activeTimer = this.duration;
             this.hitEnemies.clear();
             this._nextHitAt.clear();
-            const fx = entity.facing.x;
-            const fy = entity.facing.y;
+            // Auto-target: fire toward the locked enemy when one is
+            // within range. The charged beam doesn't rotate in-flight
+            // (too dramatic for a single-shot cast), but the *launch*
+            // direction steers toward the lock so players don't whiff
+            // the big finisher on a target standing just off-axis.
+            let fx = entity.facing.x;
+            let fy = entity.facing.y;
+            if (entity === player &&
+                typeof autoTarget !== "undefined" &&
+                autoTarget.current &&
+                autoTarget.current.alive) {
+                fx = autoTarget.aimX;
+                fy = autoTarget.aimY;
+            }
             const mag = Math.hypot(fx, fy) || 1;
             this.dirX = fx / mag;
             this.dirY = fy / mag;
@@ -14120,6 +14434,11 @@
         specialAttack.update(dt);
         battlefieldNova.update(dt);
         swordSpin.update(dt);
+        // Auto-target runs BEFORE the beams so they can read its
+        // smoothed aim vector on the same frame. Evaluating in this
+        // order avoids a one-frame lag between target acquisition
+        // and the beam rotating toward it.
+        autoTarget.update(dt);
         redBeam.update(dt);
         energyBeam.update(dt);
         chargeFx.update(dt);
@@ -14396,6 +14715,7 @@
         swordSpin.reset();
         redBeam.reset();
         energyBeam.reset();
+        autoTarget.reset();
         chargeFx.reset();
         playerTrail.reset();
         ambientParticles.reset();
@@ -14588,6 +14908,7 @@
         swordSpin.reset();
         redBeam.reset();
         energyBeam.reset();
+        autoTarget.reset();
         chargeFx.reset();
         playerTrail.reset();
         ambientParticles.reset();
@@ -14729,6 +15050,12 @@
 
         // Enemies beneath the player so the player always reads on top.
         for (const e of enemies) e.draw(ctx);
+
+        // Auto-target reticle on the locked enemy. Drawn after the
+        // enemy sprites so the ring reads ON TOP of the target, but
+        // before the player so the sprite still layers cleanly over
+        // any reticle spilling past the enemy's hitbox.
+        autoTarget.draw(ctx);
 
         // Player - skipped on alternating "blinks" while in iframes
         // to give a classic invulnerability flash.
