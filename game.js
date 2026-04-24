@@ -2909,8 +2909,20 @@
         justPressed: false,
 
         visible() {
-            return gameState === "playing" &&
-                (nearestNpc() !== null || nearestLore() !== null);
+            // TALK button now shows for every interactable the cascade
+            // can route: NPCs (dialogue), wild light creatures
+            // (reach out), neutral guardians (ally), city events
+            // (watch), and lore objects. Mobile players no longer
+            // need to rely on an E key for any of these paths.
+            if (gameState !== "playing") return false;
+            return nearestNpc() !== null
+                || (typeof nearestWildLightCreature === "function"
+                    && nearestWildLightCreature() !== null)
+                || (typeof nearestNeutralGuardian === "function"
+                    && nearestNeutralGuardian() !== null)
+                || (typeof nearestCityEvent === "function"
+                    && nearestCityEvent() !== null)
+                || nearestLore() !== null;
         },
 
         contains(x, y) {
@@ -6243,21 +6255,24 @@
             ctx.globalAlpha = 1;
 
             // "Reach out" bubble on wild creatures near the player.
+            // Uses a TALK pill instead of a raw E key so mobile
+            // players can follow the same visual to the on-screen
+            // TALK button.
             if (c.state === "wild" && lightCreatureNearPlayer(c)) {
-                const bx = cx, by = cy - 22;
+                const bw = 34, bh = 14;
+                const bx = cx - bw / 2, by = cy - 28;
                 ctx.save();
+                roundRectPath(ctx, bx, by, bw, bh, 3);
                 ctx.fillStyle = "#1a1a24";
-                ctx.beginPath();
-                ctx.arc(bx, by, 11, 0, Math.PI * 2);
                 ctx.fill();
                 ctx.strokeStyle = c.species.color;
-                ctx.lineWidth = 1.5;
+                ctx.lineWidth = 1.2;
                 ctx.stroke();
                 ctx.fillStyle = c.species.color;
-                ctx.font = "bold 12px system-ui, sans-serif";
+                ctx.font = "bold 9px system-ui, sans-serif";
                 ctx.textAlign = "center";
                 ctx.textBaseline = "middle";
-                ctx.fillText("E", bx, by + 1);
+                ctx.fillText("TALK", bx + bw / 2, by + bh / 2 + 1);
                 ctx.restore();
             }
 
@@ -10494,20 +10509,20 @@
         // Small "enter" hint when the player is right on the door.
         if (gameState === "playing" && buildingDoorOverlap(b, player)) {
             const bx = b.doorX + b.doorW / 2;
-            const by = b.doorY - 12;
+            const by = b.doorY - 14;
+            const bw = 34, bh = 14;
             ctx.save();
+            roundRectPath(ctx, bx - bw / 2, by - bh / 2, bw, bh, 3);
             ctx.fillStyle = "#1a1a24";
-            ctx.beginPath();
-            ctx.arc(bx, by, 11, 0, Math.PI * 2);
             ctx.fill();
             ctx.strokeStyle = "#ffd166";
-            ctx.lineWidth = 1.5;
+            ctx.lineWidth = 1.2;
             ctx.stroke();
             ctx.fillStyle = "#ffd166";
-            ctx.font = "bold 13px system-ui, sans-serif";
+            ctx.font = "bold 9px system-ui, sans-serif";
             ctx.textAlign = "center";
             ctx.textBaseline = "middle";
-            ctx.fillText("E", bx, by + 1);
+            ctx.fillText("ENTER", bx, by + 1);
             ctx.restore();
         }
     }
@@ -10653,19 +10668,19 @@
         if (gameState === "playing" && loreIsNear(entry)) {
             const bx = x + 16;
             const by = y - 14;
+            const bw = 30, bh = 14;
             ctx.save();
+            roundRectPath(ctx, bx - bw / 2, by - bh / 2, bw, bh, 3);
             ctx.fillStyle = "#1a1a24";
-            ctx.beginPath();
-            ctx.arc(bx, by, 11, 0, Math.PI * 2);
             ctx.fill();
             ctx.strokeStyle = "#ffd166";
-            ctx.lineWidth = 1.5;
+            ctx.lineWidth = 1.2;
             ctx.stroke();
             ctx.fillStyle = "#ffd166";
-            ctx.font = "bold 13px system-ui, sans-serif";
+            ctx.font = "bold 9px system-ui, sans-serif";
             ctx.textAlign = "center";
             ctx.textBaseline = "middle";
-            ctx.fillText("E", bx, by + 1);
+            ctx.fillText("READ", bx, by + 1);
             ctx.restore();
         }
     }
@@ -10765,25 +10780,27 @@
             ctx.fillRect(x + 20, y + 19 + bob, 2, 2);
         }
 
-        // Interact hint when in range (world-space bubble with "E").
+        // Interact hint when in range (world-space TALK pill).
         // Followers are always within range, so their bubbles would
         // clutter the screen - suppressed for the whole squad.
+        // Uses a TALK pill instead of a raw E key so the prompt
+        // reads the same way on desktop and mobile.
         if (gameState === "playing" && !n._isFollower && npcIsNear(n)) {
             const bx = x + 16;
             const by = y - 14;
+            const bw = 34, bh = 14;
             ctx.save();
+            roundRectPath(ctx, bx - bw / 2, by - bh / 2, bw, bh, 3);
             ctx.fillStyle = "#1a1a24";
-            ctx.beginPath();
-            ctx.arc(bx, by, 11, 0, Math.PI * 2);
             ctx.fill();
             ctx.strokeStyle = c.sash;
-            ctx.lineWidth = 1.5;
+            ctx.lineWidth = 1.2;
             ctx.stroke();
             ctx.fillStyle = c.sash;
-            ctx.font = "bold 13px system-ui, sans-serif";
+            ctx.font = "bold 9px system-ui, sans-serif";
             ctx.textAlign = "center";
             ctx.textBaseline = "middle";
-            ctx.fillText("E", bx, by + 1);
+            ctx.fillText("TALK", bx, by + 1);
             ctx.restore();
         }
 
@@ -15135,7 +15152,7 @@
         ctx.font = "bold 13px system-ui, sans-serif";
         const tw = ctx.measureText(label).width;
         const padX = 16;
-        const w = Math.ceil(tw + padX * 2 + 30);  // +30 for E pip
+        const w = Math.ceil(tw + padX * 2 + 44);  // +44 for TALK pip
         const h = 34;
         // Float above the mobile action cluster.
         const yBase = tutorial.isActive() ? VIEW_H - 250 : VIEW_H - 220;
@@ -15152,24 +15169,27 @@
         ctx.stroke();
         ctx.globalAlpha = 1;
 
-        // E pip on the left to echo the world-space bubble.
+        // Action pip on the left. Shows "TALK" so mobile players
+        // know to tap the central TALK button - the old "E" pip
+        // pointed at a key that doesn't exist on touch.
+        const pipW = 38, pipH = 18;
+        const pipX = x + 8, pipY = y + (h - pipH) / 2;
+        roundRectPath(ctx, pipX, pipY, pipW, pipH, 4);
         ctx.fillStyle = "#1a1a24";
-        ctx.beginPath();
-        ctx.arc(x + 16, y + h / 2, 10, 0, Math.PI * 2);
         ctx.fill();
         ctx.strokeStyle = wild.species.color;
         ctx.lineWidth = 1.2;
         ctx.stroke();
         ctx.fillStyle = wild.species.color;
-        ctx.font = "bold 11px system-ui, sans-serif";
+        ctx.font = "bold 10px system-ui, sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText("E", x + 16, y + h / 2 + 1);
+        ctx.fillText("TALK", pipX + pipW / 2, pipY + pipH / 2 + 1);
 
         // Label
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
-        drawShadowedText(label, x + 32, y + h / 2,
+        drawShadowedText(label, pipX + pipW + 8, y + h / 2,
             "#e8e8f0", "bold 13px system-ui, sans-serif");
 
         ctx.restore();
@@ -15187,7 +15207,7 @@
         if (!npc || npc.role !== "warrior") return;
         if (companions.has(npc.id)) return;
 
-        const text = "Press E to speak";
+        const text = "Tap TALK to speak";
         ctx.save();
         ctx.font = "bold 13px system-ui, sans-serif";
         const padX = 14;
@@ -16545,22 +16565,30 @@
             // friendly hitboxes so tapping on mobile stays easy.
             const ROW_H = 44;
             const ROW_PITCH = 50;
+
+            // Recruit hint sits in its own reserved row just below
+            // body text so it never overlaps wrapped greeting lines.
+            // The blue italic used to be positioned relative to the
+            // options block which collided with short greetings on
+            // mobile; now it lives on a dedicated line.
+            const showRecruitHint = !!(
+                d.npc && d.npc.role === "warrior" &&
+                !companions.has(d.npc.id) &&
+                player.squad.length === 0
+            );
+            const hintReserve = showRecruitHint ? 22 : 0;
+            const hintY = lineY + 6;
+
             const optionsTop = Math.max(
-                lineY + 10,
+                lineY + 10 + hintReserve,
                 y + boxH - 14 - d.options.length * ROW_PITCH + (ROW_PITCH - ROW_H)
             );
 
-            // Recruitment hint - only shown to first-time recruiters,
-            // pointing at the Fight-with-me option. Auto-hides once
-            // the player already has any squadmate so it doesn't nag
-            // on subsequent conversations.
-            if (d.npc && d.npc.role === "warrior" &&
-                !companions.has(d.npc.id) &&
-                player.squad.length === 0) {
+            if (showRecruitHint) {
                 ctx.textAlign = "left";
                 drawShadowedText(
                     "Select 'Fight with me' to recruit",
-                    x + 18, optionsTop - 18,
+                    x + 18, hintY,
                     "#8ad9ff",
                     "italic 12px system-ui, sans-serif"
                 );
