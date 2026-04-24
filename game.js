@@ -400,6 +400,104 @@
                     x: 1420, y: 1300, w: 52, h: 38,
                     wall: "#996836", roof: "#c7953b",
                 },
+                // --- Densification pass ---------------------------
+                // Each addition has a gameplay role (guard post,
+                // blacksmith, training ground, etc.) and an NPC or
+                // two assigned so the city reads as INHABITED, not
+                // dressing. Positions were chosen to tighten the
+                // gaps around existing districts - most are within
+                // ~100 px of an existing cluster so they densify
+                // instead of fragmenting the map.
+                // Blacksmith - sits along the north road between
+                // the plaza and the market, so smoke + clangs read
+                // over the plaza's cardinal side.
+                {
+                    id: "blacksmith", label: "FORGE",
+                    x: 1500, y: 680, w: 170, h: 115,
+                    doorX: 1554, doorY: 778, doorW: 32, doorH: 22,
+                    wall: "#5a4436", roof: "#2e1f18",
+                    accent: "#d05a2a",   // forge-glow trim
+                },
+                // Craftsman's workshop (carver / weaver) - west of
+                // the plaza, tightens the gap to the guild.
+                {
+                    id: "workshop", label: "WORKSHOP",
+                    x: 980, y: 1260, w: 150, h: 110,
+                    doorX: 1030, doorY: 1352, doorW: 32, doorH: 22,
+                    wall: "#6b553c", roof: "#3c2a1e",
+                },
+                // East guard post - flanks the road to the caverns
+                // so the player passes a live guard on their way
+                // out of town. Small footprint.
+                {
+                    id: "guardpost_east", label: "GUARD",
+                    x: 2840, y: 1080, w: 110, h: 88,
+                    doorX: 2876, doorY: 1154, doorW: 26, doorH: 18,
+                    wall: "#4a4e62", roof: "#22263a",
+                    accent: "#8ad9ff",
+                },
+                // South guard post - mirrors the east post near the
+                // Port Halen exit.
+                {
+                    id: "guardpost_south", label: "GUARD",
+                    x: 1460, y: 2000, w: 110, h: 88,
+                    doorX: 1496, doorY: 2074, doorW: 26, doorH: 18,
+                    wall: "#4a4e62", roof: "#22263a",
+                    accent: "#8ad9ff",
+                },
+                // Training grounds - an armory / sparring shack
+                // anchoring the training dummies rendered in the
+                // plaza's south apron.
+                {
+                    id: "training_hall", label: "TRAINING",
+                    x: 1800, y: 1320, w: 140, h: 96,
+                    doorX: 1846, doorY: 1400, doorW: 32, doorH: 22,
+                    wall: "#525a6a", roof: "#2e3548",
+                },
+                // Extra market stalls packed around the NE plaza -
+                // produce + cloth + pottery. Tightens the market
+                // district to three full rows.
+                {
+                    id: "stall_produce", label: "", stall: true,
+                    x: 2180, y: 500, w: 52, h: 38,
+                    wall: "#557a3a", roof: "#7ec84a",
+                },
+                {
+                    id: "stall_cloth", label: "", stall: true,
+                    x: 2480, y: 500, w: 52, h: 38,
+                    wall: "#6a486a", roof: "#b070b0",
+                },
+                {
+                    id: "stall_pots", label: "", stall: true,
+                    x: 2400, y: 800, w: 54, h: 40,
+                    wall: "#8a5a3a", roof: "#c7823e",
+                },
+                {
+                    id: "stall_fish", label: "", stall: true,
+                    x: 2140, y: 780, w: 50, h: 38,
+                    wall: "#3a5a88", roof: "#5a8cc4",
+                },
+                // Extra housing in the west residential - tighter
+                // cluster so the quarter reads as a neighborhood.
+                {
+                    id: "house_6", label: "",
+                    x: 460, y: 1450, w: 124, h: 92,
+                    doorX: 510, doorY: 1522, doorW: 24, doorH: 20,
+                    wall: "#9a806a", roof: "#5f3e2a",
+                },
+                {
+                    id: "house_7", label: "",
+                    x: 600, y: 1420, w: 120, h: 88,
+                    doorX: 648, doorY: 1488, doorW: 24, doorH: 20,
+                    wall: "#b39a7c", roof: "#6d4832",
+                },
+                // Tavern-flank cottage so the tavern isn't isolated.
+                {
+                    id: "house_8", label: "",
+                    x: 1880, y: 820, w: 110, h: 82,
+                    doorX: 1920, doorY: 882, doorW: 24, doorH: 20,
+                    wall: "#a08060", roof: "#6a4a2a",
+                },
             ],
         },
         caverns: {
@@ -10622,6 +10720,20 @@
             //   "patrol"            - cycles through config.waypoints in order
             //   "gather"            - occasionally heads to config.gatherPoint
             //                         (with jitter) instead of wandering.
+            //   "travel"            - picks a destination from
+            //                         config.destinations (world coords)
+            //                         at random, then ROUTES via the
+            //                         city waypoint graph so the NPC
+            //                         follows roads instead of cutting
+            //                         across grass. Linger/idle when a
+            //                         destination is reached.
+            //   "commute"           - bounces between config.workPoint
+            //                         and home in a long cycle. Used by
+            //                         workers (baker, smith's apprentice).
+            //   "stallHop"          - picks a random point from
+            //                         config.stallPoints each cycle, so
+            //                         merchants naturally make the
+            //                         rounds of their own stalls.
             // Adding a new routine is one more branch in
             // `_pickWanderTarget` plus new config fields.
             this.routine = config.routine ?? "wander";
@@ -10630,6 +10742,30 @@
             this.gatherPoint = config.gatherPoint ?? null;
             this.gatherChance = config.gatherChance ?? 0.35;
             this.gatherJitter = config.gatherJitter ?? 48;
+
+            // Long-haul destinations + work points. Used by the new
+            // travel / commute / stallHop routines.
+            this.destinations = config.destinations ?? null;
+            this.workPoint = config.workPoint ?? null;
+            this.stallPoints = config.stallPoints ?? null;
+
+            // Active travel path (list of {x, y} waypoints). Set by
+            // _pickTravelTarget(); consumed one waypoint at a time
+            // so update() doesn't have to know about pathing.
+            this._path = null;
+            this._pathStep = 0;
+
+            // Role tag - descriptive only, drives nothing directly
+            // but lets the HUD / draw layer style a guard differently
+            // than a trader etc. Roles: "guard" | "trader" |
+            // "traveler" | "entertainer" | "worker" | "messenger" |
+            // "warrior" | undefined (default villager).
+            this.role = config.role ?? null;
+
+            // Commute toggle - flipped each time a commuter reaches
+            // an endpoint. False = heading to work, true = heading
+            // home.
+            this._commuteHome = false;
 
             this.state = "idle";
             this.stateTimer = 0.3 + Math.random() * this.idleMax;
@@ -10671,6 +10807,31 @@
                     this.waypointIndex =
                         (this.waypointIndex + 1) % this.waypoints.length;
                 }
+                // Long-haul travel: on clean arrival, advance to the
+                // next path step. If the path is consumed, drop it
+                // so the next idle re-rolls a fresh destination.
+                if (reached && this._path &&
+                    this._pathStep < this._path.length) {
+                    this._pathStep++;
+                    if (this._pathStep >= this._path.length) {
+                        this._path = null;
+                        this._pathStep = 0;
+                        if (this.routine === "commute") {
+                            this._commuteHome = !this._commuteHome;
+                        }
+                    } else {
+                        // More waypoints to walk - stay in walk
+                        // state and retarget next frame.
+                        const wp = this._path[this._pathStep];
+                        this.targetX = wp.x;
+                        this.targetY = wp.y;
+                        // Short refreshed walk timer per segment so
+                        // chains never deadlock on a stalled step.
+                        this.stateTimer = this.walkMin +
+                            Math.random() * (this.walkMax - this.walkMin);
+                        return;
+                    }
+                }
                 this.state = "idle";
                 this.stateTimer = this.idleMin +
                     Math.random() * (this.idleMax - this.idleMin);
@@ -10688,13 +10849,54 @@
         _pickWanderTarget() {
             let tx, ty;
 
-            if (this.routine === "patrol" &&
+            // Travel path has priority when one is active: keep
+            // stepping through it until it's consumed, so a long-
+            // haul route doesn't re-roll a new destination mid-walk.
+            if (this._path && this._pathStep < this._path.length) {
+                const wp = this._path[this._pathStep];
+                tx = wp.x;
+                ty = wp.y;
+            } else if (this.routine === "patrol" &&
                 this.waypoints && this.waypoints.length > 0) {
                 // Head toward the current waypoint (advanced on
                 // arrival in `update`, not here).
                 const wp = this.waypoints[this.waypointIndex];
                 tx = wp.x;
                 ty = wp.y;
+            } else if (this.routine === "travel" &&
+                       this.destinations && this.destinations.length > 0) {
+                // Pick a fresh destination + route through the
+                // city's waypoint graph so the NPC follows roads.
+                const dst = this.destinations[
+                    Math.floor(Math.random() * this.destinations.length)
+                ];
+                const levelId = currentLevel ? currentLevel.id : null;
+                this._path = findCityPath(levelId, this.x, this.y, dst.x, dst.y);
+                this._pathStep = 0;
+                const wp = this._path[0] || { x: dst.x, y: dst.y };
+                tx = wp.x;
+                ty = wp.y;
+            } else if (this.routine === "commute" && this.workPoint) {
+                // Alternate between home and work. Flip happens in
+                // update() on clean arrival.
+                const dst = this._commuteHome
+                    ? { x: this.homeX, y: this.homeY }
+                    : this.workPoint;
+                const levelId = currentLevel ? currentLevel.id : null;
+                this._path = findCityPath(levelId, this.x, this.y, dst.x, dst.y);
+                this._pathStep = 0;
+                const wp = this._path[0] || dst;
+                tx = wp.x;
+                ty = wp.y;
+            } else if (this.routine === "stallHop" &&
+                       this.stallPoints && this.stallPoints.length > 0) {
+                // Random stall each cycle - jitter on arrival so
+                // traders don't stand on the exact same pixel.
+                const dst = this.stallPoints[
+                    Math.floor(Math.random() * this.stallPoints.length)
+                ];
+                tx = dst.x + (Math.random() - 0.5) * 24;
+                ty = dst.y + (Math.random() - 0.5) * 24;
             } else if (this.routine === "gather" && this.gatherPoint &&
                        Math.random() < this.gatherChance) {
                 // Occasionally walk to the shared gather spot with a
@@ -12577,6 +12779,217 @@
                 options: [{ label: "Goodbye.", close: true }],
             },
         }),
+
+        // --- Role-driven citizens -------------------------------
+        // Each carries a `role` tag + a matching routine so the
+        // city has visibly different work patterns overlapping in
+        // the same space. Patrol / travel / commute NPCs all use
+        // findCityPath() via their routines, so their walks follow
+        // the road grid instead of cutting across grass.
+
+        // Guard - patrols the east-road spine between the plaza
+        // and the caverns gate.
+        new Npc({
+            id: "guard_east", name: "City Guard",
+            x: 2800, y: 1200, width: 32, height: 32,
+            interactRange: 60, wanderRadius: 30, speed: 40,
+            idleMin: 0.8, idleMax: 2.0,
+            walkMin: 4.0, walkMax: 7.0,
+            role: "guard",
+            routine: "patrol",
+            waypoints: [
+                { x: 2800, y: 1200 },
+                { x: 2400, y: 1152 },
+                { x: 1900, y: 1152 },
+                { x: 2400, y: 1152 },
+            ],
+            colors: { robe: "#3a4256", trim: "#1a2030", sash: "#8ad9ff", hat: "#0e1420" },
+            dialogue: {
+                greeting: '"Eyes sharp. Blades sharper. Move along, traveler."',
+                options: [
+                    { label: "Anything to report?", response: "Caverns chatter at dusk. Don't go in after dark." },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+        // Guard - south gate patrol toward Port Halen road.
+        new Npc({
+            id: "guard_south", name: "City Guard",
+            x: 1470, y: 2110, width: 32, height: 32,
+            interactRange: 60, wanderRadius: 30, speed: 38,
+            idleMin: 0.8, idleMax: 2.0,
+            walkMin: 4.0, walkMax: 7.0,
+            role: "guard",
+            routine: "patrol",
+            waypoints: [
+                { x: 1470, y: 2110 },
+                { x: 1600, y: 1728 },
+                { x: 1600, y: 1300 },
+                { x: 1600, y: 1728 },
+            ],
+            colors: { robe: "#3a4256", trim: "#1a2030", sash: "#8ad9ff", hat: "#0e1420" },
+            dialogue: {
+                greeting: '"Road to Port Halen is clear - for now."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+        // Blacksmith - lives in the forge. Commutes to a forge-
+        // side house at dawn/dusk so the shop feels lived in.
+        new Npc({
+            id: "smith", name: "Blacksmith",
+            x: 1584, y: 820, width: 32, height: 32,
+            interactRange: 60, wanderRadius: 24, speed: 22,
+            role: "worker",
+            routine: "commute",
+            workPoint: { x: 1584, y: 820 },       // in front of the forge
+            colors: { robe: "#4a2e20", trim: "#1e1008", sash: "#d05a2a", hat: "#2a1608" },
+            dialogue: {
+                greeting: '"Steel\'s hot. Swing by if you need an edge."',
+                options: [
+                    { label: "What do you forge?", response: "Blades, plow-shoes, nails. Only one of those buys me wine." },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+        // Trader - stallHops around the market plaza, keeping the
+        // stalls visibly tended by the same person at different
+        // times.
+        new Npc({
+            id: "trader_rounds", name: "Trader",
+            x: 2300, y: 560, width: 32, height: 32,
+            interactRange: 56, wanderRadius: 40, speed: 28,
+            role: "trader",
+            routine: "stallHop",
+            stallPoints: [
+                { x: 2200, y: 540 },  // produce stall
+                { x: 2500, y: 540 },  // cloth stall
+                { x: 2420, y: 840 },  // pots stall
+                { x: 2160, y: 820 },  // fish stall
+            ],
+            colors: { robe: "#a88250", trim: "#5a3c1c", sash: "#ffd166", hat: "#2e1c08" },
+            dialogue: {
+                greeting: '"Running the rounds for my cousin. Coin for everyone."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+        // Entertainer - stays at the plaza fountain. Small
+        // wanderRadius so they keep their spot; idleMax kept low
+        // so they animate visibly (short pauses, fast bob).
+        new Npc({
+            id: "bard", name: "Bard",
+            x: 1620, y: 1200, width: 32, height: 32,
+            interactRange: 56, wanderRadius: 16, speed: 20,
+            idleMin: 0.4, idleMax: 1.2,
+            walkMin: 1.0, walkMax: 1.8,
+            role: "entertainer",
+            colors: { robe: "#6a3a82", trim: "#3a1c4a", sash: "#ffd166", hat: "#2a0e36" },
+            dialogue: {
+                greeting: '"A coin\'s weight in a song, friend. Where shall we go?"',
+                options: [
+                    { label: "Sing the hero.", response: "The hero sings back. A duet, then - verse and steel." },
+                    { label: "Goodbye.", close: true },
+                ],
+            },
+        }),
+        // Traveler A - rotates between plaza, market, residence
+        // via the waypoint graph, so they visibly traverse the
+        // main roads.
+        new Npc({
+            id: "traveler_a", name: "Traveler",
+            x: 1600, y: 1200, width: 32, height: 32,
+            interactRange: 54, wanderRadius: 40, speed: 34,
+            role: "traveler",
+            routine: "travel",
+            destinations: [
+                { x: 2400, y: 620 },   // market
+                { x: 900,  y: 1720 },  // residential
+                { x: 1760, y: 1030 },  // tavern
+                { x: 1600, y: 1200 },  // plaza
+            ],
+            colors: { robe: "#808090", trim: "#40485a", sash: "#8ad9ff", hat: "#1a1f2c" },
+            dialogue: {
+                greeting: '"Stretching my legs - long roads behind me."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+        // Traveler B - different pace + loop so two travelers
+        // don't follow each other like ducks.
+        new Npc({
+            id: "traveler_b", name: "Traveler",
+            x: 900, y: 1200, width: 32, height: 32,
+            interactRange: 54, wanderRadius: 40, speed: 36,
+            role: "traveler",
+            routine: "travel",
+            destinations: [
+                { x: 2400, y: 620 },
+                { x: 1760, y: 1030 },
+                { x: 900,  y: 1720 },
+                { x: 1500, y: 2040 },  // south gate area
+            ],
+            colors: { robe: "#60725a", trim: "#2e3828", sash: "#c0d890", hat: "#1a2010" },
+            dialogue: {
+                greeting: '"Haven\'t been through the grove in a season. It grew."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+        // Messenger - travels fast between the major gates, so a
+        // runner visibly crosses the map on a cadence. Larger
+        // speed + shorter idle so they don't linger.
+        new Npc({
+            id: "messenger", name: "Runner",
+            x: 1600, y: 1152, width: 32, height: 32,
+            interactRange: 52, wanderRadius: 40, speed: 58,
+            idleMin: 0.6, idleMax: 1.4,
+            walkMin: 3.0, walkMax: 6.0,
+            role: "messenger",
+            routine: "travel",
+            destinations: [
+                { x: 2950, y: 1152 },  // east gate
+                { x: 200,  y: 1152 },  // west gate
+                { x: 1600, y: 2100 },  // south gate
+                { x: 1600, y: 300 },   // north edge
+            ],
+            colors: { robe: "#c46040", trim: "#5a2010", sash: "#ffd166", hat: "#2a0e08" },
+            dialogue: {
+                greeting: '"No time - letters to run! Later, champion."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+        // Worker - baker commuting between the southwest homes
+        // and the central market. Commute flips on arrival so the
+        // baker visibly goes back and forth through the day.
+        new Npc({
+            id: "baker", name: "Baker",
+            x: 640, y: 1500, width: 32, height: 32,
+            interactRange: 58, wanderRadius: 30, speed: 26,
+            role: "worker",
+            routine: "commute",
+            workPoint: { x: 2240, y: 760 },  // market district
+            colors: { robe: "#d6b080", trim: "#8a6846", sash: "#fff2d0", hat: "#5a3c1c" },
+            dialogue: {
+                greeting: '"Bread before dawn, bread after dusk."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
+        // Training-ground master - stays near the training hall,
+        // patrol between two dummies so they visibly drill.
+        new Npc({
+            id: "trainer", name: "Arms Master",
+            x: 1880, y: 1450, width: 32, height: 32,
+            interactRange: 58, wanderRadius: 28, speed: 30,
+            role: "guard",
+            routine: "patrol",
+            waypoints: [
+                { x: 1820, y: 1450 },
+                { x: 1920, y: 1450 },
+                { x: 1870, y: 1500 },
+            ],
+            colors: { robe: "#4a3a2a", trim: "#1a1208", sash: "#d0a050", hat: "#2a1c10" },
+            dialogue: {
+                greeting: '"Strike. Breathe. Strike. Swing by if you need drills."',
+                options: [{ label: "Goodbye.", close: true }],
+            },
+        }),
     ];
 
     // Shop interior roster - the Merchant lives inside the building.
@@ -12864,10 +13277,18 @@
     // ---------------------------------------------------------------
     const CITY_CLUSTERS = {
         grove: [
-            { id: "plaza",   x: 1600, y: 1220, radius: 90, capacity: 5 },
-            { id: "market",  x: 2320, y: 640,  radius: 80, capacity: 4 },
-            { id: "tavern",  x: 1760, y: 1030, radius: 60, capacity: 3 },
-            { id: "southsq", x: 900,  y: 1720, radius: 80, capacity: 4 },
+            { id: "plaza",    x: 1600, y: 1220, radius: 90, capacity: 5 },
+            { id: "market",   x: 2320, y: 640,  radius: 80, capacity: 4 },
+            { id: "tavern",   x: 1760, y: 1030, radius: 60, capacity: 3 },
+            { id: "southsq",  x: 900,  y: 1720, radius: 80, capacity: 4 },
+            // Densification-pass clusters: the forge draws smiths
+            // and a tiny crowd of customers, the training hall
+            // gathers guards-in-training, the workshop pulls
+            // crafters between shifts. Smaller capacities keep
+            // them feeling like specialist nooks, not parties.
+            { id: "forge",    x: 1584, y: 820,  radius: 56, capacity: 3 },
+            { id: "training", x: 1870, y: 1420, radius: 60, capacity: 3 },
+            { id: "workshop", x: 1060, y: 1330, radius: 54, capacity: 3 },
         ],
         port_halen: [
             { id: "dock",    x: 940,  y: 900,  radius: 90, capacity: 5 },
@@ -12880,6 +13301,141 @@
             { id: "carver",  x: 1260, y: 760,  radius: 60, capacity: 3 },
         ],
     };
+
+    // ---------------------------------------------------------------
+    // City road waypoint graph
+    //
+    // A handful of world-space nodes sitting on road intersections /
+    // district centers, with edges between adjacent nodes. Long-haul
+    // NPC travel routes through this graph instead of walking in a
+    // straight line, so they naturally follow the tiled roads
+    // instead of cutting across grass.
+    //
+    // Search is BFS over ~8 nodes - finishes in microseconds and
+    // doesn't need A*. Path is returned as a list of {x, y} world
+    // waypoints ordered start -> end. The NPC then walks each in
+    // sequence, treating the last as its destination.
+    //
+    // Grove-only for now. Other cities keep straight-line movement;
+    // their roads are short enough that the savings are marginal.
+    // ---------------------------------------------------------------
+    const CITY_WAYPOINTS = {
+        grove: {
+            // id -> { x, y } world coords. IDs are descriptive so
+            // NPC configs can reference intersections by name.
+            nodes: {
+                plaza:     { x: 1600, y: 1152 },
+                north_jct: { x: 1600, y: 800  },
+                south_jct: { x: 1600, y: 1728 },
+                east_jct:  { x: 2400, y: 1152 },
+                west_jct:  { x: 800,  y: 1152 },
+                market:    { x: 2400, y: 600  },
+                residence: { x: 800,  y: 1728 },
+                north_gate:{ x: 1600, y: 300  },
+                east_gate: { x: 3040, y: 1152 },
+                south_gate:{ x: 1600, y: 2100 },
+                west_gate: { x: 200,  y: 1152 },
+            },
+            // Undirected edges. Listed once - _buildAdjacency
+            // mirrors them both ways at startup.
+            edges: [
+                ["plaza", "north_jct"],
+                ["plaza", "south_jct"],
+                ["plaza", "east_jct"],
+                ["plaza", "west_jct"],
+                ["north_jct", "north_gate"],
+                ["east_jct",  "market"],
+                ["east_jct",  "east_gate"],
+                ["market",    "north_jct"],
+                ["west_jct",  "west_gate"],
+                ["west_jct",  "residence"],
+                ["residence", "south_jct"],
+                ["south_jct", "south_gate"],
+            ],
+            _adj: null,
+        },
+    };
+
+    // Build the adjacency list once on first use. Idempotent -
+    // subsequent calls hit the cached `_adj` table.
+    function _ensureAdjacency(levelId) {
+        const g = CITY_WAYPOINTS[levelId];
+        if (!g || g._adj) return g;
+        const adj = {};
+        for (const id of Object.keys(g.nodes)) adj[id] = [];
+        for (const [a, b] of g.edges) {
+            adj[a].push(b);
+            adj[b].push(a);
+        }
+        g._adj = adj;
+        return g;
+    }
+
+    // Find the nearest waypoint node id to a world-space (x, y).
+    // Returns null when the level has no waypoint graph.
+    function nearestWaypoint(levelId, x, y) {
+        const g = CITY_WAYPOINTS[levelId];
+        if (!g) return null;
+        let best = null;
+        let bestD = Infinity;
+        for (const id of Object.keys(g.nodes)) {
+            const n = g.nodes[id];
+            const dx = n.x - x;
+            const dy = n.y - y;
+            const d = dx * dx + dy * dy;
+            if (d < bestD) { bestD = d; best = id; }
+        }
+        return best;
+    }
+
+    // BFS path of node ids from `startId` to `endId` (inclusive).
+    // Returns [] when no path exists - waypoint graphs in safe
+    // zones are fully connected, so an empty result really does
+    // mean the input is invalid.
+    function _bfsWaypoints(levelId, startId, endId) {
+        const g = _ensureAdjacency(levelId);
+        if (!g || !g._adj[startId] || !g._adj[endId]) return [];
+        if (startId === endId) return [startId];
+        const prev = { [startId]: null };
+        const q = [startId];
+        while (q.length) {
+            const cur = q.shift();
+            if (cur === endId) break;
+            for (const nb of g._adj[cur]) {
+                if (prev[nb] !== undefined) continue;
+                prev[nb] = cur;
+                q.push(nb);
+            }
+        }
+        if (prev[endId] === undefined) return [];
+        const out = [];
+        let cur = endId;
+        while (cur !== null) {
+            out.unshift(cur);
+            cur = prev[cur];
+        }
+        return out;
+    }
+
+    // Public: resolve a travel path from start world-coords to end
+    // world-coords. Returns an ORDERED list of {x, y} waypoints
+    // ending at `end`. When no graph exists for the level, falls
+    // back to a single-step path straight to `end`.
+    function findCityPath(levelId, startX, startY, endX, endY) {
+        const g = CITY_WAYPOINTS[levelId];
+        if (!g) return [{ x: endX, y: endY }];
+        const a = nearestWaypoint(levelId, startX, startY);
+        const b = nearestWaypoint(levelId, endX, endY);
+        const ids = _bfsWaypoints(levelId, a, b);
+        const path = [];
+        for (const id of ids) {
+            const n = g.nodes[id];
+            path.push({ x: n.x, y: n.y });
+        }
+        // Final hop from the last waypoint to the actual target.
+        path.push({ x: endX, y: endY });
+        return path;
+    }
 
     // Flavor bubbles. Each NPC, when idly waiting for something to
     // do, may emit one of these. Picked at random per-trigger so
@@ -12928,8 +13484,18 @@
             if (!npc || npc._clusterAssigned) continue;
             // Skip warriors + NPCs with existing patrol / gather
             // contracts so campaign-critical behavior isn't lost.
+            // Role-driven citizens (guard, worker, trader, traveler,
+            // messenger, entertainer) already have purposeful
+            // routines - reassigning them to "gather" would hide
+            // that work, so they opt out of the cluster draft.
             if (npc.role === "warrior") continue;
+            if (npc.role === "guard" || npc.role === "worker" ||
+                npc.role === "trader" || npc.role === "traveler" ||
+                npc.role === "messenger" || npc.role === "entertainer") continue;
             if (npc.routine === "patrol") continue;
+            if (npc.routine === "travel" ||
+                npc.routine === "commute" ||
+                npc.routine === "stallHop") continue;
             if (npc.routine === "gather" && npc.gatherPoint) continue;
 
             // 65% of eligible wanderers get pulled into a cluster.
