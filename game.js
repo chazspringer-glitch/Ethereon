@@ -3640,10 +3640,15 @@
 
         const { x, y } = pointerToCanvas(e);
 
-        // Intro: any tap begins the game. Nothing else should react
-        // until playing is active.
+        // Intro: any tap advances or starts the game via the
+        // cinematic's skip logic. Early scenes skip to the final
+        // TAP-TO-START card; the final scene triggers a short
+        // fade-out before handing off to startGame.
         if (gameState === "intro") {
-            startGame();
+            if (introSequence.consumeInput()) {
+                introSequence.beginFadeOut();
+                introSequence._fadeStartRequested = true;
+            }
             e.preventDefault();
             return;
         }
@@ -17798,12 +17803,27 @@
     // Update - top-level tick. Keeps sub-systems in a clear order.
     // ---------------------------------------------------------------
     function update(dt) {
-        // Intro: any key press begins the game.
+        // Intro: any key press advances a scene or starts the game.
+        // The cinematic owns its own internal timing; we only feed
+        // it the input + wait for the fade-out timer to expire
+        // before actually entering gameplay.
         if (gameState === "intro") {
             for (const k in keysJustPressed) {
-                if (keysJustPressed[k]) { startGame(); break; }
+                if (keysJustPressed[k]) {
+                    if (introSequence.consumeInput()) {
+                        introSequence.beginFadeOut();
+                        introSequence._fadeStartRequested = true;
+                    }
+                    break;
+                }
             }
             clearJustPressed();
+            // Once the fade-out has completed, commit to gameplay.
+            if (introSequence._fadeStartRequested &&
+                !introSequence.isFading()) {
+                introSequence._fadeStartRequested = false;
+                startGame();
+            }
             return;
         }
 
@@ -20403,93 +20423,428 @@
     // Cinematic intro screen. Fades in the title over ~2s, then
     // pulses a "press / tap to begin" prompt.
     function drawIntro() {
-        const now = performance.now();
-        const elapsed = (now - introStart) / 1000;
-        const titleFade = Math.min(1, elapsed / 1.2);
-        const showPrompt = elapsed >= 1.2;
+        introSequence.update();
+        introSequence.draw();
+    }
 
-        // Full-screen dim so the world reads as "not playing yet".
-        ctx.fillStyle = "rgba(10, 10, 20, 0.92)";
-        ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+    // ---------------------------------------------------------------
+    // introSequence - cinematic multi-scene opening
+    //
+    // Four short scenes, each ~4 s, run in sequence before the
+    // final TAP-TO-START prompt. Every scene has its own background
+    // painter (gradient + silhouettes + particles) and a pair of
+    // narration lines that fade in, hold, then fade out.
+    //
+    // Skippable: any tap or key press during any scene advances to
+    // the final prompt scene where the player can enter. The prompt
+    // scene itself still waits for an input to actually enter the
+    // game so the player can't "miss" the start button.
+    //
+    // Performance: one gradient fill + ~24 ambient motes + a crown
+    // silhouette + two text lines per scene. No allocation in the
+    // per-frame path - motes are recycled from a fixed pool.
+    // ---------------------------------------------------------------
+    const introSequence = {
+        // Scene list. `duration` is total seconds; scene draws run
+        // through a 0..1 progress value so fade-in/out timings
+        // scale with duration.
+        scenes: [
+            {
+                duration: 4.2,
+                line1: "Long before your arrival...",
+                line2: "the world slept beneath a kind light.",
+                paint: "starfield",
+            },
+            {
+                duration: 4.2,
+                line1: "A crown of light held the dark at bay,",
+                line2: "its wearer lost to memory.",
+                paint: "crown",
+            },
+            {
+                duration: 4.2,
+                line1: "But something beneath the world",
+                line2: "has begun to stir.",
+                paint: "abyss",
+            },
+            {
+                // Final "title" scene - holds until input.
+                duration: Infinity,
+                line1: "Your blade. Your destiny.",
+                line2: "",
+                paint: "title",
+            },
+        ],
 
-        ctx.save();
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
+        // State
+        _started: 0,             // performance.now at scene start
+        _index: 0,
+        _fadeOutTimer: 0,        // > 0 while the whole cinematic is
+                                 // fading out as the game starts
 
-        // Title - slides up slightly as it fades in.
-        const titleY = VIEW_H / 2 - 100 + (1 - titleFade) * 20;
-        ctx.globalAlpha = titleFade;
-        drawShadowedText(
-            "ETHEREON",
-            VIEW_W / 2, titleY,
-            "#ffd166",
-            "bold 64px system-ui, sans-serif"
-        );
+        // Ambient mote pool - drifting upward specks for every
+        // scene. Fixed cap so the cost is known up-front.
+        _motes: null,
+        _MOTE_CAP: 24,
 
-        // Tagline just below the title.
-        ctx.globalAlpha = titleFade * 0.8;
-        drawShadowedText(
-            "a small action-RPG",
-            VIEW_W / 2, titleY + 50,
-            "#a0a0b8",
-            "14px system-ui, sans-serif"
-        );
+        _init() {
+            if (this._motes) return;
+            this._started = performance.now();
+            this._motes = new Array(this._MOTE_CAP);
+            for (let i = 0; i < this._MOTE_CAP; i++) {
+                this._motes[i] = this._newMote(true);
+            }
+        },
 
-        // Three-line instruction block - the core controls in plain
-        // language, readable on both mobile and desktop since each
-        // verb maps to both input modes.
-        if (showPrompt) {
-            ctx.globalAlpha = Math.min(1, (elapsed - 1.2) / 0.5);
-            const instructY = VIEW_H / 2 - 10;
-            const lineGap = 22;
-            const lines = [
-                "Move with joystick or arrows",
-                "Attack with button or SPACE",
-                "Build your squad and survive",
-            ];
-            for (let i = 0; i < lines.length; i++) {
-                drawShadowedText(
-                    lines[i],
-                    VIEW_W / 2, instructY + i * lineGap,
-                    "#e8e8f0",
-                    "15px system-ui, sans-serif"
-                );
+        _newMote(seed) {
+            return {
+                x: Math.random() * VIEW_W,
+                // Stagger initial y so the field looks established
+                // on the first frame rather than a sudden swarm.
+                y: seed
+                    ? Math.random() * VIEW_H
+                    : VIEW_H + 10 + Math.random() * 30,
+                vy: 12 + Math.random() * 22,   // px/s upward
+                vx: (Math.random() - 0.5) * 6,
+                life: 0,
+                maxLife: 4 + Math.random() * 3,
+                size: 1 + Math.random() * 1.5,
+                hue: Math.random() < 0.7 ? "#ffd166" : "#8ad9ff",
+            };
+        },
+
+        // Advance to the next scene. Resets scene timer.
+        nextScene() {
+            this._index++;
+            this._started = performance.now();
+            if (this._index >= this.scenes.length) {
+                this._index = this.scenes.length - 1;  // clamp to final
+            }
+        },
+
+        // Jump straight to the final scene (the TAP-TO-START
+        // screen). Used by the skip handler.
+        skipToFinal() {
+            this._index = this.scenes.length - 1;
+            this._started = performance.now();
+        },
+
+        // Returns true if the player input this frame should begin
+        // the game RIGHT AWAY. Any input during the final scene,
+        // OR during the fade-out window, starts; input during
+        // earlier scenes just skips ahead.
+        consumeInput() {
+            if (this._fadeOutTimer > 0) return false; // already leaving
+            const lastIdx = this.scenes.length - 1;
+            if (this._index >= lastIdx) return true;
+            this.skipToFinal();
+            return false;
+        },
+
+        // Called from drawIntro each frame - ticks motes + the
+        // fade-out curve if the game is transitioning out.
+        update() {
+            this._init();
+            const dtMs = (this._lastFrame != null)
+                ? performance.now() - this._lastFrame : 16;
+            this._lastFrame = performance.now();
+            const dt = Math.min(0.05, dtMs / 1000);
+
+            if (this._fadeOutTimer > 0) {
+                this._fadeOutTimer = Math.max(0, this._fadeOutTimer - dt);
             }
 
-            // "Tap to Start" button - rounded rect centered below
-            // the instructions, gently pulsing so it reads as the
-            // primary target. Rect is cached on startButton so the
-            // pointer handler can hit-test it precisely; any tap
-            // outside still starts the game too for forgiving input.
-            const pulse = 0.78 + 0.22 * Math.abs(Math.sin(now * 0.004));
-            const btnW = 180;
-            const btnH = 48;
-            const btnX = Math.round((VIEW_W - btnW) / 2);
-            const btnY = Math.round(instructY + lines.length * lineGap + 24);
-            startButton.rect.x = btnX;
-            startButton.rect.y = btnY;
-            startButton.rect.w = btnW;
-            startButton.rect.h = btnH;
+            // Auto-advance past non-final scenes when their timer
+            // elapses.
+            const cur = this.scenes[this._index];
+            const elapsed = (performance.now() - this._started) / 1000;
+            if (isFinite(cur.duration) && elapsed >= cur.duration) {
+                this.nextScene();
+            }
 
-            ctx.globalAlpha = pulse;
-            roundRectPath(ctx, btnX, btnY, btnW, btnH, 10);
-            ctx.fillStyle = "#ffd166";
-            ctx.fill();
-            ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
-            ctx.lineWidth = 2;
-            ctx.stroke();
+            for (let i = 0; i < this._motes.length; i++) {
+                const m = this._motes[i];
+                m.life += dt;
+                m.x += m.vx * dt;
+                m.y -= m.vy * dt;
+                if (m.y < -10 || m.life >= m.maxLife) {
+                    this._motes[i] = this._newMote(false);
+                }
+            }
+        },
 
-            ctx.globalAlpha = 1;
-            drawShadowedText(
-                "TAP TO START",
-                btnX + btnW / 2, btnY + btnH / 2,
-                "#1a1a24",
-                "bold 18px system-ui, sans-serif"
-            );
-        }
+        // Fade-out trigger. Called by the skip path when input
+        // confirms the game should start: begin a 0.45 s fade to
+        // black, then the gameplay state takes over.
+        beginFadeOut() {
+            if (this._fadeOutTimer > 0) return;
+            this._fadeOutTimer = 0.45;
+        },
+        isFading() { return this._fadeOutTimer > 0; },
+        fadeDone() { return this._fadeOutTimer <= 0 && this._fadeStartRequested; },
 
-        ctx.restore();
-    }
+        // --- Draw --------------------------------------------------
+        draw() {
+            const cur = this.scenes[this._index];
+            const elapsed = (performance.now() - this._started) / 1000;
+            const dur = isFinite(cur.duration) ? cur.duration : 6.0;
+            const progress = Math.min(1, elapsed / dur);
+
+            // Fade-in at the top of each scene (first 18%) and
+            // fade-out at the bottom (last 18%), except the final
+            // scene which only fades in.
+            let sceneAlpha = 1;
+            if (progress < 0.18) sceneAlpha = progress / 0.18;
+            else if (isFinite(cur.duration) && progress > 0.82) {
+                sceneAlpha = 1 - (progress - 0.82) / 0.18;
+            }
+
+            // Background + scene-specific painter
+            this._paintBackdrop(cur.paint, elapsed, sceneAlpha);
+
+            // Ambient motes - drawn above the backdrop, faded by
+            // sceneAlpha so they come and go with the narration.
+            ctx.save();
+            ctx.globalAlpha = sceneAlpha * 0.85;
+            for (const m of this._motes) {
+                const frac = m.life / m.maxLife;
+                const fade = frac < 0.2
+                    ? frac / 0.2
+                    : frac > 0.7
+                        ? 1 - (frac - 0.7) / 0.3
+                        : 1;
+                ctx.globalAlpha = sceneAlpha * fade * 0.75;
+                ctx.fillStyle = m.hue;
+                ctx.beginPath();
+                ctx.arc(m.x, m.y, m.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.restore();
+
+            // Narration
+            this._drawNarration(cur, sceneAlpha, progress);
+
+            // Skip hint - always visible bottom-right so the player
+            // knows they can fast-forward. On the final scene it
+            // becomes a TAP-TO-START prompt instead.
+            this._drawFootHint(progress);
+
+            // Global fade-out (entering the game). Draws on top of
+            // everything so the world reveal underneath reads clean.
+            if (this._fadeOutTimer > 0) {
+                const f = 1 - (this._fadeOutTimer / 0.45);
+                ctx.save();
+                ctx.globalAlpha = f;
+                ctx.fillStyle = "#000";
+                ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+                ctx.restore();
+            }
+        },
+
+        _paintBackdrop(kind, elapsed, alpha) {
+            ctx.save();
+            // Base: deep indigo gradient for every scene.
+            const grad = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+            grad.addColorStop(0, "#0a0a18");
+            grad.addColorStop(0.6, "#10101e");
+            grad.addColorStop(1, "#06060e");
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+            if (kind === "starfield") {
+                // Static twinkling star field. Hash-based so the
+                // pattern is stable across frames; sin on the phase
+                // adds a subtle breathe.
+                ctx.globalAlpha = alpha;
+                for (let i = 0; i < 60; i++) {
+                    const h = ((i * 9301 + 49297) % 233280) / 233280;
+                    const h2 = ((i * 2971 + 14177) % 193939) / 193939;
+                    const sx = h * VIEW_W;
+                    const sy = h2 * VIEW_H * 0.85;
+                    const tw = 0.5 + 0.5 * Math.sin(elapsed * 1.2 + i);
+                    ctx.globalAlpha = alpha * (0.3 + 0.55 * tw);
+                    ctx.fillStyle = i % 5 === 0 ? "#8ad9ff" : "#ffd166";
+                    ctx.fillRect(Math.round(sx), Math.round(sy), 1, 1);
+                }
+                ctx.globalAlpha = 1;
+            } else if (kind === "crown") {
+                // Central crown silhouette with a breathing halo -
+                // the "kind light" holding back the dark. Camera
+                // drift is a 2 px horizontal sway.
+                const drift = Math.sin(elapsed * 0.4) * 2;
+                const cx = VIEW_W / 2 + drift;
+                const cy = VIEW_H / 2 - 20;
+                // Halo - radial gold glow.
+                const g = ctx.createRadialGradient(cx, cy, 8, cx, cy, 220);
+                g.addColorStop(0, `rgba(255, 235, 140, ${alpha * 0.7})`);
+                g.addColorStop(0.4, `rgba(255, 220, 130, ${alpha * 0.28})`);
+                g.addColorStop(1, "rgba(255, 220, 130, 0)");
+                ctx.fillStyle = g;
+                ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+                // Crown silhouette - 3-prong, large.
+                ctx.globalAlpha = alpha;
+                ctx.fillStyle = "#ffd166";
+                const cw = 84;
+                ctx.fillRect(cx - cw / 2, cy - 4, cw, 14);
+                ctx.fillStyle = "#c9963a";
+                ctx.fillRect(cx - cw / 2, cy + 7, cw, 3);
+                ctx.fillStyle = "#ffd166";
+                ctx.fillRect(cx - 28, cy - 20, 10, 20);
+                ctx.fillRect(cx - 5,  cy - 28, 10, 28);
+                ctx.fillRect(cx + 18, cy - 20, 10, 20);
+                // Gem tips
+                ctx.fillStyle = "#fff6d6";
+                ctx.fillRect(cx - 24, cy - 22, 4, 4);
+                ctx.fillRect(cx - 1,  cy - 30, 4, 4);
+                ctx.fillRect(cx + 22, cy - 22, 4, 4);
+                ctx.globalAlpha = 1;
+            } else if (kind === "abyss") {
+                // Dark bloom rising from below - the stirring deep.
+                // Radial gradient centered bottom, violet + crimson.
+                const cx = VIEW_W / 2;
+                const cy = VIEW_H + 60;
+                const bloom = 280 + Math.sin(elapsed * 2) * 20;
+                const g = ctx.createRadialGradient(cx, cy, 20, cx, cy, bloom);
+                g.addColorStop(0, `rgba(176, 30, 180, ${alpha * 0.55})`);
+                g.addColorStop(0.5, `rgba(90, 20, 110, ${alpha * 0.35})`);
+                g.addColorStop(1, "rgba(20, 10, 30, 0)");
+                ctx.fillStyle = g;
+                ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+                // Crimson flickers drifting up, not the usual motes.
+                ctx.globalAlpha = alpha * 0.7;
+                for (let i = 0; i < 10; i++) {
+                    const t = (elapsed * 0.35 + i * 0.19) % 1;
+                    const fx = (i * 97.3) % VIEW_W;
+                    const fy = VIEW_H - t * VIEW_H;
+                    ctx.fillStyle = i % 2 ? "#e06666" : "#b070ff";
+                    ctx.fillRect(Math.round(fx), Math.round(fy), 2, 2);
+                }
+                ctx.globalAlpha = 1;
+            } else if (kind === "title") {
+                // Soft gold bloom behind the title wordmark.
+                const cx = VIEW_W / 2;
+                const cy = VIEW_H / 2 - 20;
+                const bloom = 240 + Math.sin(elapsed * 0.8) * 8;
+                const g = ctx.createRadialGradient(cx, cy, 16, cx, cy, bloom);
+                g.addColorStop(0, `rgba(255, 235, 140, ${alpha * 0.45})`);
+                g.addColorStop(1, "rgba(20, 10, 30, 0)");
+                ctx.fillStyle = g;
+                ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+                // Wordmark
+                ctx.globalAlpha = alpha;
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                drawShadowedText(
+                    "ETHEREON",
+                    VIEW_W / 2, cy,
+                    "#ffd166",
+                    "bold 64px system-ui, sans-serif"
+                );
+                ctx.globalAlpha = alpha * 0.75;
+                drawShadowedText(
+                    "a small action-RPG",
+                    VIEW_W / 2, cy + 46,
+                    "#a0a0b8",
+                    "14px system-ui, sans-serif"
+                );
+                ctx.globalAlpha = 1;
+            }
+            ctx.restore();
+        },
+
+        _drawNarration(cur, sceneAlpha, progress) {
+            const textY = VIEW_H * 0.75;
+            ctx.save();
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.globalAlpha = sceneAlpha;
+            if (cur.line1) {
+                drawShadowedText(
+                    cur.line1,
+                    VIEW_W / 2, textY,
+                    "#fff6d6",
+                    "italic 16px system-ui, sans-serif"
+                );
+            }
+            if (cur.line2) {
+                drawShadowedText(
+                    cur.line2,
+                    VIEW_W / 2, textY + 26,
+                    "#e8e8f0",
+                    "italic 14px system-ui, sans-serif"
+                );
+            }
+            ctx.restore();
+        },
+
+        _drawFootHint(progress) {
+            const lastIdx = this.scenes.length - 1;
+            const isFinal = this._index >= lastIdx;
+            if (isFinal) {
+                // Pulsing TAP TO START button.
+                const pulse = 0.78 + 0.22 *
+                    Math.abs(Math.sin(performance.now() * 0.004));
+                const btnW = 200;
+                const btnH = 50;
+                const btnX = Math.round((VIEW_W - btnW) / 2);
+                const btnY = Math.round(VIEW_H - btnH - 40);
+                startButton.rect.x = btnX;
+                startButton.rect.y = btnY;
+                startButton.rect.w = btnW;
+                startButton.rect.h = btnH;
+
+                ctx.save();
+                ctx.globalAlpha = pulse;
+                roundRectPath(ctx, btnX, btnY, btnW, btnH, 10);
+                ctx.fillStyle = "#ffd166";
+                ctx.fill();
+                ctx.strokeStyle = "rgba(255, 255, 255, 0.5)";
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                ctx.globalAlpha = 1;
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                drawShadowedText(
+                    "TAP TO START",
+                    btnX + btnW / 2, btnY + btnH / 2,
+                    "#1a1a24",
+                    "bold 18px system-ui, sans-serif"
+                );
+                ctx.restore();
+            } else {
+                // Compact "tap to skip" hint bottom-right. Starts
+                // invisible and fades in after 1 s so players don't
+                // skip accidentally in the first beat.
+                const skipAlpha = Math.min(1,
+                    ((performance.now() - this._started) / 1000 - 1) / 0.6);
+                if (skipAlpha <= 0) return;
+                ctx.save();
+                ctx.globalAlpha = skipAlpha * 0.7;
+                ctx.textAlign = "right";
+                ctx.textBaseline = "bottom";
+                drawShadowedText(
+                    "tap to skip",
+                    VIEW_W - 16, VIEW_H - 16,
+                    "#a0a0b8",
+                    "11px system-ui, sans-serif"
+                );
+                ctx.restore();
+            }
+        },
+
+        reset() {
+            this._started = performance.now();
+            this._index = 0;
+            this._fadeOutTimer = 0;
+            this._fadeStartRequested = false;
+            if (this._motes) {
+                for (let i = 0; i < this._motes.length; i++) {
+                    this._motes[i] = this._newMote(true);
+                }
+            }
+        },
+    };
 
     function drawPlayer() {
         // Aura and cloak stay visible during hit-flicker so the
