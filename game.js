@@ -9386,6 +9386,7 @@
                     tribals:      (player.tribals || []).map(t => ({ ...t })),
                     factionRep:   factionRep.save(),
                     crownInfluence: (typeof crown !== "undefined" ? crown.influence : 0) | 0,
+                    worldMap:     (typeof worldMap !== "undefined" ? worldMap.save() : []),
                     weaponIndex: player.weaponIndex,
                 },
                 stats: {
@@ -9535,6 +9536,12 @@
                     data.player.crownInfluence | 0
                 ));
             }
+            if (typeof worldMap !== "undefined") {
+                worldMap.load(data.player.worldMap);
+                // Current zone is always discovered on load since
+                // the player is STANDING there.
+                worldMap.markDiscovered(currentLevel && currentLevel.id);
+            }
             // Squad: dismiss any current followers back to their
             // home zones first, then rehire from the snapshot roster
             // so the live followers array matches the save's squad.
@@ -9666,10 +9673,21 @@
         // holds the live leaderboard + yesterday's champions. The
         // ANIME / Resume / Save / Load rows stay visible on both
         // tabs so saving never scrolls off.
-        activeTab: "journal",   // journal | board
+        activeTab: "journal",   // journal | world | board
+        // Selected region on the WORLD tab. `null` means the list
+        // view is showing; a set id means the detail panel is
+        // open. Separate from activeTab so a back-button in the
+        // detail panel doesn't rebuild the whole tab state.
+        worldSelectedRegion: null,
         rects: {
             tabJournal: { x: 0, y: 0, w: 0, h: 0 },
+            tabWorld:   { x: 0, y: 0, w: 0, h: 0 },
             tabBoard:   { x: 0, y: 0, w: 0, h: 0 },
+            worldBack:  { x: 0, y: 0, w: 0, h: 0 },
+            // Region click-targets are populated lazily by the
+            // world-tab draw path so there's one rect per visible
+            // region tile. Cleared before every world draw.
+            regionTiles: [],
             anime:      { x: 0, y: 0, w: 0, h: 0 },
             resume:     { x: 0, y: 0, w: 0, h: 0 },
             save:       { x: 0, y: 0, w: 0, h: 0 },
@@ -9686,8 +9704,31 @@
         },
 
         handleAction(name) {
-            if (name === "tabJournal") { this.activeTab = "journal"; return; }
-            if (name === "tabBoard")   { this.activeTab = "board";   return; }
+            if (name === "tabJournal") {
+                this.activeTab = "journal";
+                this.worldSelectedRegion = null;
+                return;
+            }
+            if (name === "tabWorld") {
+                this.activeTab = "world";
+                return;
+            }
+            if (name === "tabBoard") {
+                this.activeTab = "board";
+                this.worldSelectedRegion = null;
+                return;
+            }
+            if (name === "worldBack") {
+                this.worldSelectedRegion = null;
+                return;
+            }
+            if (name.startsWith("region:")) {
+                const id = name.slice(7);
+                if (worldMap.isDiscovered(id)) {
+                    this.worldSelectedRegion = id;
+                }
+                return;
+            }
             if (name === "resume") {
                 paused = false;
                 return;
@@ -9719,6 +9760,7 @@
 
         handlePointer(x, y) {
             for (const [name, r] of Object.entries(this.rects)) {
+                if (name === "regionTiles") continue; // list, handled below
                 // Skip stale rects for the hidden tab - a lingering
                 // mission row from the last frame shouldn't swallow
                 // a tap on the leaderboard tab. Every rect gets
@@ -9728,6 +9770,17 @@
                 if (x >= r.x && x <= r.x + r.w &&
                     y >= r.y && y <= r.y + r.h) {
                     this.handleAction(name);
+                    return true;
+                }
+            }
+            // Region tile hit-test - each entry has { id, x, y, w, h }.
+            // Populated by the world tab's draw path; empty on other
+            // tabs so taps fall through.
+            for (const t of this.rects.regionTiles) {
+                if (!t) continue;
+                if (x >= t.x && x <= t.x + t.w &&
+                    y >= t.y && y <= t.y + t.h) {
+                    this.handleAction("region:" + t.id);
                     return true;
                 }
             }
@@ -13607,6 +13660,128 @@
             greeting: "The reptilian watches with amber eyes.",
             recruitName: "Reptilian",
         },
+    };
+
+    // ---------------------------------------------------------------
+    // World map data
+    //
+    // Metadata for every level the player can visit, ordered for a
+    // stable grid layout on the World Map tab. Each region carries
+    // a display name, the faction (if any) that holds it, the
+    // dungeons it contains, and a short description shown in the
+    // detail panel.
+    //
+    // Discovery is tracked as a Set of level ids. Grove starts
+    // discovered (it's the opening zone) and any transitionTo()
+    // call marks the entered level as discovered too. Interior
+    // levels (shop_interior, home_interior, etc.) never surface
+    // in the map so they're not part of this catalog.
+    //
+    // Lightweight by design: the map tab reads this data on draw;
+    // nothing runs per-frame during gameplay.
+    // ---------------------------------------------------------------
+    const WORLD_REGIONS = [
+        {
+            id: "grove", name: "Sunlit Grove", category: "Safe",
+            faction: null, factionLabel: "Village",
+            dungeons: [],
+            summary: "The home city. Markets, guild, tavern, homes - your hub.",
+        },
+        {
+            id: "port_halen", name: "Port Halen", category: "Safe",
+            faction: null, factionLabel: "Harbor Town",
+            dungeons: [],
+            summary: "Coastal sister-city south of the grove. Fishmarket, lighthouse.",
+        },
+        {
+            id: "emberhold", name: "Emberhold", category: "Safe",
+            faction: null, factionLabel: "Forge City",
+            dungeons: [],
+            summary: "Mountain forge city west of the grove. Carvers and miners.",
+        },
+        {
+            id: "caverns", name: "Echo Caverns", category: "Dungeon",
+            faction: null, factionLabel: "Unclaimed",
+            dungeons: [{ id: "thronewarden", name: "Throne Warden", levelId: "caverns" }],
+            summary: "Underground maze east of the grove. Throne Warden mid-boss.",
+        },
+        {
+            id: "shrine", name: "Ethereon Shrine", category: "Dungeon",
+            faction: null, factionLabel: "Unclaimed",
+            dungeons: [{ id: "shrinekeeper", name: "Shrine Keeper", levelId: "shrine" }],
+            summary: "Sealed sanctum past the caverns. The Keeper waits within.",
+        },
+        {
+            id: "abyss", name: "The Abyss", category: "Dungeon",
+            faction: null, factionLabel: "Corrupted",
+            dungeons: [],
+            summary: "Forgotten depths under the shrine. Corruption runs here.",
+        },
+        {
+            id: "deeper_caverns", name: "Deeper Caverns", category: "Dungeon",
+            faction: null, factionLabel: "Corrupted",
+            dungeons: [{ id: "abyssherald", name: "Abyss Herald", levelId: "deeper_caverns" }],
+            summary: "The Awakening arc's finale - Abyss Herald lives below.",
+        },
+        {
+            id: "grass_plains", name: "Verdant Plains", category: "Giant biome",
+            faction: null, factionLabel: "Giants",
+            dungeons: [],
+            summary: "Open plains north of the grove. Six elemental giants roam here.",
+        },
+        {
+            id: "mountain_region", name: "Stonewild Reaches", category: "Tribal",
+            faction: "bigfoot", factionLabel: "Bigfoot Tribe",
+            dungeons: [],
+            summary: "Bigfoot territory west of Emberhold. Neutral unless provoked.",
+        },
+        {
+            id: "swamp_region", name: "Drowned Marsh", category: "Tribal",
+            faction: "dogmen", factionLabel: "Dogmen Pack",
+            dungeons: [],
+            summary: "Dogmen territory east of Port Halen. Hostile on sight.",
+        },
+        {
+            id: "desert_region", name: "Salt Flats", category: "Tribal",
+            faction: "reptilian", factionLabel: "Reptilian Clan",
+            dungeons: [],
+            summary: "Reptilian territory east of the plains. Neutral, watchful.",
+        },
+    ];
+
+    const worldMap = {
+        _discovered: new Set(["grove"]),
+        markDiscovered(levelId) {
+            if (!levelId) return;
+            // Interior levels skip the map entirely so walking
+            // into a shop doesn't "discover" anything new.
+            const L = LEVELS[levelId];
+            if (L && L.isInterior) return;
+            // Only map entries we have metadata for.
+            const has = WORLD_REGIONS.some(r => r.id === levelId);
+            if (!has) return;
+            if (!this._discovered.has(levelId)) {
+                this._discovered.add(levelId);
+                if (typeof questLog !== "undefined") {
+                    const r = WORLD_REGIONS.find(x => x.id === levelId);
+                    if (r) questLog.showToast(`New region - ${r.name}`, 2.4);
+                }
+            }
+        },
+        isDiscovered(id) { return this._discovered.has(id); },
+        list() { return this._discovered; },
+        save() { return [...this._discovered]; },
+        load(arr) {
+            this._discovered = new Set(["grove"]);
+            if (Array.isArray(arr)) {
+                for (const id of arr) {
+                    if (WORLD_REGIONS.some(r => r.id === id)) {
+                        this._discovered.add(id);
+                    }
+                }
+            }
+        },
+        reset() { this._discovered = new Set(["grove"]); },
     };
 
     // ---------------------------------------------------------------
@@ -20234,6 +20409,11 @@
         if (typeof chapterTwo !== "undefined") {
             chapterTwo.onZoneEntered(id);
         }
+        // World map discovery. Harmless for interior / unknown
+        // levels (worldMap.markDiscovered no-ops on those).
+        if (typeof worldMap !== "undefined") {
+            worldMap.markDiscovered(id);
+        }
 
         // Explicit arrival point (used by interiors / building
         // entries) wins over side-based warp.
@@ -20471,6 +20651,7 @@
         if (typeof factionRep !== "undefined") factionRep.reset();
         if (typeof factionWar !== "undefined") factionWar.reset();
         if (typeof crown !== "undefined") crown.influence = 0;
+        if (typeof worldMap !== "undefined") worldMap.reset();
         // Leaderboard - fresh run zeroes the live stats but keeps
         // the persistent top-10 board intact so the player still
         // sees their prior best between runs.
@@ -22525,11 +22706,13 @@
         const tabY = y + 60;
         const tabH = 30;
         const tabGap = 6;
-        const tabW = Math.floor((w - 40 - tabGap) / 2);
         const tabDefs = [
-            { id: "tabJournal", label: "JOURNAL",     active: pauseMenu.activeTab === "journal" },
-            { id: "tabBoard",   label: "LEADERBOARD", active: pauseMenu.activeTab === "board"   },
+            { id: "tabJournal", label: "JOURNAL",  active: pauseMenu.activeTab === "journal" },
+            { id: "tabWorld",   label: "WORLD",    active: pauseMenu.activeTab === "world"   },
+            { id: "tabBoard",   label: "BOARD",    active: pauseMenu.activeTab === "board"   },
         ];
+        // Three pills share the same horizontal budget.
+        const tabW = Math.floor((w - 40 - tabGap * 2) / 3);
         for (let i = 0; i < tabDefs.length; i++) {
             const t = tabDefs[i];
             const tx = x + 20 + i * (tabW + tabGap);
@@ -22858,6 +23041,242 @@
         }
 
         }   // end JOURNAL tab
+
+        // --- WORLD TAB --------------------------------------------
+        // Region grid. Discovered regions show their faction /
+        // dungeons / summary; undiscovered regions are fogged
+        // "???" placeholders. Tapping a discovered tile opens a
+        // detail sub-panel (still inside the world tab) with a
+        // Back button.
+        //
+        // Rects for the tiles are cached on pauseMenu.rects.
+        // regionTiles so handlePointer can dispatch clicks.
+        pauseMenu.rects.regionTiles.length = 0;
+        if (pauseMenu.activeTab === "world") {
+
+        ctx.textAlign = "left";
+
+        // Clear the back-button rect unless we're in detail view.
+        pauseMenu.rects.worldBack.w = 0;
+        pauseMenu.rects.worldBack.h = 0;
+
+        if (pauseMenu.worldSelectedRegion) {
+            // --- DETAIL VIEW ---
+            const region = WORLD_REGIONS.find(
+                r => r.id === pauseMenu.worldSelectedRegion);
+            if (!region || !worldMap.isDiscovered(region.id)) {
+                pauseMenu.worldSelectedRegion = null;
+            } else {
+                // Back button top-right.
+                const backW = 72, backH = 24;
+                const backX = x + w - backW - 20;
+                const backY = sy - 4;
+                const bR = pauseMenu.rects.worldBack;
+                bR.x = backX; bR.y = backY; bR.w = backW; bR.h = backH;
+                ctx.save();
+                roundRectPath(ctx, backX, backY, backW, backH, 5);
+                ctx.fillStyle = "rgba(40, 40, 54, 0.95)";
+                ctx.fill();
+                ctx.strokeStyle = "rgba(255, 209, 102, 0.45)";
+                ctx.lineWidth = 1;
+                ctx.stroke();
+                ctx.fillStyle = "#e8e8f0";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.font = "bold 11px system-ui, sans-serif";
+                ctx.fillText("< BACK", backX + backW / 2, backY + backH / 2);
+                ctx.restore();
+
+                ctx.textAlign = "left";
+                ctx.textBaseline = "top";
+                drawShadowedText(region.name, x + 20, sy,
+                    "#ffd166", "bold 15px system-ui, sans-serif");
+                sy += 22;
+                drawShadowedText(region.category, x + 20, sy,
+                    "#8ad9ff", "italic 11px system-ui, sans-serif");
+                sy += 18;
+
+                // Summary - wraps across 2 lines at most.
+                const wrapped = wrapText(region.summary,
+                    w - 40, "12px system-ui, sans-serif");
+                for (let i = 0; i < Math.min(3, wrapped.length); i++) {
+                    drawShadowedText(wrapped[i], x + 20, sy,
+                        "#c8c8d8", "12px system-ui, sans-serif");
+                    sy += 16;
+                }
+                sy += 8;
+
+                // Faction + reputation if any.
+                if (region.faction && TRIBAL_FACTIONS[region.faction]) {
+                    const f = TRIBAL_FACTIONS[region.faction];
+                    drawShadowedText("FACTION", x + 20, sy,
+                        "#8ad9ff", "bold 11px system-ui, sans-serif");
+                    sy += 16;
+                    drawShadowedText(f.name, x + 20, sy,
+                        "#e8e8f0", "bold 13px system-ui, sans-serif");
+                    drawShadowedText(region.factionLabel, x + 120, sy + 1,
+                        "#a0a0b8", "italic 11px system-ui, sans-serif");
+                    sy += 20;
+
+                    const rep = factionRep.get(region.faction);
+                    const tier = factionRep.tierFor(region.faction);
+                    const barW = w - 40;
+                    const barH = 6;
+                    const barX = x + 20;
+                    ctx.fillStyle = "rgba(18, 18, 30, 0.85)";
+                    ctx.fillRect(barX - 1, sy - 1, barW + 2, barH + 2);
+                    ctx.fillStyle = "rgba(120, 120, 144, 0.3)";
+                    ctx.fillRect(barX, sy, barW, barH);
+                    const cx_mid = barX + barW / 2;
+                    const frac = Math.max(-1, Math.min(1, rep / 100));
+                    if (frac >= 0) {
+                        ctx.fillStyle = "#7ad17a";
+                        ctx.fillRect(cx_mid, sy, (barW / 2) * frac, barH);
+                    } else {
+                        ctx.fillStyle = "#e06666";
+                        const w2 = (barW / 2) * -frac;
+                        ctx.fillRect(cx_mid - w2, sy, w2, barH);
+                    }
+                    ctx.fillStyle = "#fff6d6";
+                    ctx.fillRect(cx_mid - 0.5, sy - 2, 1, barH + 4);
+                    sy += barH + 6;
+                    drawShadowedText(
+                        `${tier.label}   (${rep > 0 ? "+" : ""}${rep})`,
+                        x + 20, sy,
+                        tier.color, "bold 12px system-ui, sans-serif");
+                    sy += 20;
+                } else {
+                    drawShadowedText("FACTION", x + 20, sy,
+                        "#8ad9ff", "bold 11px system-ui, sans-serif");
+                    sy += 16;
+                    drawShadowedText(region.factionLabel || "Unclaimed",
+                        x + 20, sy,
+                        "#a0a0b8", "italic 12px system-ui, sans-serif");
+                    sy += 20;
+                }
+
+                // Dungeons
+                drawShadowedText("DUNGEONS", x + 20, sy,
+                    "#8ad9ff", "bold 11px system-ui, sans-serif");
+                sy += 16;
+                if (!region.dungeons || region.dungeons.length === 0) {
+                    drawShadowedText("(none known)", x + 28, sy,
+                        "#787888", "11px system-ui, sans-serif");
+                    sy += 16;
+                } else {
+                    for (const d of region.dungeons) {
+                        const cleared = defeatedBosses.has(d.levelId);
+                        const label = `${cleared ? "[cleared]" : "[locked]"}  ${d.name}`;
+                        drawShadowedText(label, x + 28, sy,
+                            cleared ? "#7ad17a" : "#e8e8f0",
+                            "12px system-ui, sans-serif");
+                        sy += 16;
+                    }
+                }
+            }
+        }
+        if (!pauseMenu.worldSelectedRegion) {
+            // --- LIST / GRID VIEW ---
+            const total = WORLD_REGIONS.length;
+            const discovered = [...worldMap.list()].length;
+            drawShadowedText("KNOWN WORLD", x + 20, sy,
+                "#8ad9ff", "bold 11px system-ui, sans-serif");
+            ctx.textAlign = "right";
+            drawShadowedText(
+                `${discovered} / ${total} discovered`,
+                x + w - 20, sy,
+                "#a0a0b8", "10px system-ui, sans-serif");
+            ctx.textAlign = "left";
+            sy += 18;
+            drawShadowedText(
+                "tap a known region for details",
+                x + 20, sy,
+                "#787888", "italic 10px system-ui, sans-serif");
+            sy += 14;
+
+            // 2-column grid of region tiles.
+            const cols = 2;
+            const gridW = w - 40;
+            const tileGap = 8;
+            const tileW = Math.floor((gridW - tileGap) / cols);
+            const tileH = 62;
+            for (let i = 0; i < WORLD_REGIONS.length; i++) {
+                const region = WORLD_REGIONS[i];
+                const col = i % cols;
+                const row = Math.floor(i / cols);
+                const tx = x + 20 + col * (tileW + tileGap);
+                const ty = sy + row * (tileH + tileGap);
+                const discovered = worldMap.isDiscovered(region.id);
+                const current = currentLevel && currentLevel.id === region.id;
+
+                ctx.save();
+                roundRectPath(ctx, tx, ty, tileW, tileH, 6);
+                ctx.fillStyle = discovered
+                    ? (current ? "rgba(255, 209, 102, 0.18)"
+                               : "rgba(40, 40, 54, 0.92)")
+                    : "rgba(20, 20, 28, 0.9)";
+                ctx.fill();
+                ctx.strokeStyle = current
+                    ? "#ffd166"
+                    : discovered
+                        ? "rgba(138, 217, 255, 0.45)"
+                        : "rgba(90, 90, 110, 0.4)";
+                ctx.lineWidth = current ? 2 : 1;
+                ctx.stroke();
+
+                if (discovered) {
+                    // Name
+                    ctx.textBaseline = "top";
+                    drawShadowedText(region.name, tx + 10, ty + 8,
+                        "#ffd166", "bold 12px system-ui, sans-serif");
+                    // Category + faction tag
+                    drawShadowedText(region.category, tx + 10, ty + 24,
+                        "#8ad9ff", "italic 10px system-ui, sans-serif");
+                    if (region.faction && TRIBAL_FACTIONS[region.faction]) {
+                        const f = TRIBAL_FACTIONS[region.faction];
+                        const tier = factionRep.tierFor(region.faction);
+                        // Faction color dot + name
+                        ctx.fillStyle = f.trim || "#a0a0b8";
+                        ctx.beginPath();
+                        ctx.arc(tx + 14, ty + 46, 4, 0, Math.PI * 2);
+                        ctx.fill();
+                        drawShadowedText(tier.label, tx + 22, ty + 40,
+                            tier.color, "bold 10px system-ui, sans-serif");
+                    } else if (region.factionLabel) {
+                        drawShadowedText(region.factionLabel, tx + 10, ty + 40,
+                            "#a0a0b8", "italic 10px system-ui, sans-serif");
+                    }
+                    // Dungeon count badge top-right
+                    if (region.dungeons && region.dungeons.length > 0) {
+                        const cleared = region.dungeons.filter(
+                            d => defeatedBosses.has(d.levelId)).length;
+                        ctx.textAlign = "right";
+                        drawShadowedText(
+                            `D ${cleared}/${region.dungeons.length}`,
+                            tx + tileW - 10, ty + 8,
+                            "#a0a0b8", "bold 10px system-ui, sans-serif");
+                        ctx.textAlign = "left";
+                    }
+                } else {
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "middle";
+                    drawShadowedText("? ? ?",
+                        tx + tileW / 2, ty + tileH / 2,
+                        "#787888", "bold 14px system-ui, sans-serif");
+                    ctx.textAlign = "left";
+                }
+                ctx.restore();
+
+                pauseMenu.rects.regionTiles.push({
+                    id: region.id,
+                    x: tx, y: ty, w: tileW, h: tileH,
+                });
+            }
+            const rows = Math.ceil(WORLD_REGIONS.length / cols);
+            sy += rows * (tileH + tileGap);
+        }
+
+        }   // end WORLD tab
 
         // --- BOARD TAB --------------------------------------------
         // Live leaderboard + yesterday's champions. Polling runs on
