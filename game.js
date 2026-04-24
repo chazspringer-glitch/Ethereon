@@ -15373,6 +15373,21 @@
     }
 
     function drawNpc(ctx, n) {
+        // Slight size variation (set by villagerPopulation). Scale
+        // around the sprite's foot center so the shadow stays
+        // anchored. 1.0 means no transform - no cost for regular
+        // NPCs that don't set _sizeScale.
+        const sizeScale = n._sizeScale || 1;
+        let scaled = false;
+        if (sizeScale !== 1) {
+            ctx.save();
+            const cx = n.x + 16;
+            const cy = n.y + 32;
+            ctx.translate(cx, cy);
+            ctx.scale(sizeScale, sizeScale);
+            ctx.translate(-cx, -cy);
+            scaled = true;
+        }
         const x = Math.round(n.x);
         const y = Math.round(n.y);
         // Walk bob rides on top of everything but the shadow, so
@@ -15482,6 +15497,8 @@
                 ctx.fillText("!", x + 16, y - 7);
             }
         }
+        // Close the size-scale transform if one was applied.
+        if (scaled) ctx.restore();
     }
 
     // --- Companions ---
@@ -17459,6 +17476,145 @@
     // is O(npcs) at a throttled cadence. Nothing runs outside safe
     // zones, so dungeons stay unaffected.
     // ---------------------------------------------------------------
+
+    // ---------------------------------------------------------------
+    // Base villager population
+    //
+    // Cheap crowd-filler NPCs added on top of each safe zone's
+    // hand-authored roster. Used purely for density - they wander,
+    // cluster via the existing assignCityClusters draft, and emit
+    // the generic chat-bubble lines through cityChat. No role on
+    // the recruit / warrior / worker paths.
+    //
+    // Generated procedurally with a random color palette + a slight
+    // size scale (0.88 - 1.08) so the crowd reads as a mix of
+    // people, not clones. Per-zone cap keeps the cull budget bounded.
+    //
+    // Spawn runs once per zone per run (tracked in _spawnedIn) so
+    // crossing back to the grove doesn't double the population.
+    // ---------------------------------------------------------------
+    const VILLAGER_PALETTES = [
+        { robe: "#a88a6a", trim: "#6a4a2a", sash: "#f0d090", hat: "#4a2818" },
+        { robe: "#6c8a60", trim: "#384a28", sash: "#c0d0a0", hat: "#243820" },
+        { robe: "#8a6a8a", trim: "#4a3050", sash: "#e0c0e0", hat: "#301830" },
+        { robe: "#b08458", trim: "#6a4628", sash: "#e8b874", hat: "#4c2c14" },
+        { robe: "#6a7a88", trim: "#384050", sash: "#a8b8c8", hat: "#202838" },
+        { robe: "#b88888", trim: "#683636", sash: "#e8b4a4", hat: "#4a1e1e" },
+        { robe: "#907050", trim: "#503820", sash: "#c8a878", hat: "#2c1a0c" },
+        { robe: "#5a6e88", trim: "#2c3e58", sash: "#a8c0e0", hat: "#182438" },
+        { robe: "#9e8458", trim: "#584028", sash: "#d8b078", hat: "#3a2610" },
+        { robe: "#788068", trim: "#3c4434", sash: "#b0b898", hat: "#1e261a" },
+    ];
+    const VILLAGER_GREETINGS = [
+        '"Morning, traveler."',
+        '"Busy day in the grove."',
+        '"Have you seen the Elder lately?"',
+        '"Watch the news from the east."',
+        '"Safe travels, friend."',
+        '"Been quiet since you showed up."',
+        '"Tend your own path, stranger."',
+        '"If you\'re hungry, the tavern keeps a kind fire."',
+        '"Mind the gates after dusk."',
+        '"My cousin says the shrine hums at night."',
+    ];
+    const VILLAGER_NAMES = [
+        "Villager", "Citizen", "Townsfolk", "Resident",
+    ];
+
+    // Per-zone villager cap. Low caps keep the cull budget small
+    // on mobile; grove gets the largest crowd since it's the main
+    // hub.
+    const VILLAGER_COUNTS = {
+        grove:       10,
+        port_halen:  6,
+        emberhold:   6,
+    };
+
+    const villagerPopulation = {
+        // Zones we've already populated. Tracks across re-entries
+        // so a trip to the caverns and back doesn't double the
+        // crowd.
+        _spawnedIn: new Set(),
+
+        ensure(levelId) {
+            const cfg = VILLAGER_COUNTS[levelId];
+            if (!cfg) return;
+            if (this._spawnedIn.has(levelId)) return;
+            const level = LEVELS[levelId];
+            if (!level || !level.safe || !level.npcs) return;
+
+            for (let i = 0; i < cfg; i++) {
+                const palette = VILLAGER_PALETTES[
+                    Math.floor(Math.random() * VILLAGER_PALETTES.length)
+                ];
+                const greeting = VILLAGER_GREETINGS[
+                    Math.floor(Math.random() * VILLAGER_GREETINGS.length)
+                ];
+                const name = VILLAGER_NAMES[
+                    Math.floor(Math.random() * VILLAGER_NAMES.length)
+                ];
+                // Slight size scale. 0.88..1.08 range - small
+                // enough to feel like variation without making
+                // anyone obviously "wrong-sized".
+                const sizeScale = 0.88 + Math.random() * 0.2;
+                // Find a non-building spawn point. The level has
+                // building rects; reject 20 attempts before giving
+                // up (and landing on whatever the last roll was).
+                let sx = 0, sy = 0;
+                for (let t = 0; t < 20; t++) {
+                    sx = 120 + Math.random() * (WORLD_W - 240);
+                    sy = 120 + Math.random() * (WORLD_H - 240);
+                    if (!this._inBuilding(level, sx, sy)) break;
+                }
+                const npc = new Npc({
+                    id: `villager_${levelId}_${i}_${Date.now()}`,
+                    name,
+                    role: "villager",
+                    x: sx, y: sy,
+                    width: 32, height: 32,
+                    interactRange: 46,
+                    wanderRadius: 90,
+                    speed: 18 + Math.random() * 14,
+                    idleMin: 1.2, idleMax: 3.4,
+                    walkMin: 2.0, walkMax: 4.2,
+                    colors: palette,
+                    dialogue: {
+                        greeting,
+                        options: [{ label: "Goodbye.", close: true }],
+                    },
+                });
+                // Render-time size scale, honored by drawNpc.
+                npc._sizeScale = sizeScale;
+                level.npcs.push(npc);
+            }
+            this._spawnedIn.add(levelId);
+        },
+
+        _inBuilding(level, x, y) {
+            const bs = level.buildings;
+            if (!bs) return false;
+            for (const b of bs) {
+                if (b.stall) continue;
+                if (x >= b.x - 4 && x <= b.x + b.w + 4 &&
+                    y >= b.y - 4 && y <= b.y + b.h + 4) return true;
+            }
+            return false;
+        },
+
+        // Fresh run -> forget where we've been AND purge any
+        // villager instances already sitting on zone rosters from
+        // the previous run. Without the purge a restart would
+        // double the population on the next visit.
+        reset() {
+            for (const id of this._spawnedIn) {
+                const level = LEVELS[id];
+                if (!level || !level.npcs) continue;
+                level.npcs = level.npcs.filter(n => n.role !== "villager");
+            }
+            this._spawnedIn = new Set();
+        },
+    };
+
     const CITY_CLUSTERS = {
         grove: [
             { id: "plaza",    x: 1600, y: 1220, radius: 90, capacity: 5 },
@@ -18218,6 +18374,7 @@
     // and restartGame hit these paths too, but their function
     // bodies close over the names at call time, so they'll always
     // see the live cityChat binding by the time they run.
+    villagerPopulation.ensure(currentLevel && currentLevel.id);
     ensureCityClustersFor(currentLevel && currentLevel.id);
     cityChat.reset();
     cityEvents.reset();
@@ -20508,6 +20665,14 @@
         }
         animals.spawnAll();
         maybeSpawnWildLightCreature(currentLevel);
+        // Base villager population - crowd-filler for safe zones.
+        // First visit to a city adds a small crew of generic
+        // wanderers that the cluster draft below can fold into
+        // plaza / tavern / market groups. No-op for non-safe /
+        // non-listed zones or zones already populated.
+        if (typeof villagerPopulation !== "undefined") {
+            villagerPopulation.ensure(currentLevel && currentLevel.id);
+        }
         ensureCityClustersFor(currentLevel && currentLevel.id);
         cityChat.reset();
         cityEvents.reset();
@@ -20596,6 +20761,14 @@
         }
         animals.spawnAll();
         maybeSpawnWildLightCreature(currentLevel);
+        // Base villager population - crowd-filler for safe zones.
+        // First visit to a city adds a small crew of generic
+        // wanderers that the cluster draft below can fold into
+        // plaza / tavern / market groups. No-op for non-safe /
+        // non-listed zones or zones already populated.
+        if (typeof villagerPopulation !== "undefined") {
+            villagerPopulation.ensure(currentLevel && currentLevel.id);
+        }
         ensureCityClustersFor(currentLevel && currentLevel.id);
         cityChat.reset();
         cityEvents.reset();
@@ -20652,6 +20825,11 @@
         if (typeof factionWar !== "undefined") factionWar.reset();
         if (typeof crown !== "undefined") crown.influence = 0;
         if (typeof worldMap !== "undefined") worldMap.reset();
+        // Clear the villager population gate so a fresh run
+        // re-seeds the safe zones on first entry.
+        if (typeof villagerPopulation !== "undefined") {
+            villagerPopulation.reset();
+        }
         // Leaderboard - fresh run zeroes the live stats but keeps
         // the persistent top-10 board intact so the player still
         // sees their prior best between runs.
