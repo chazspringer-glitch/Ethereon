@@ -3304,6 +3304,7 @@
         novaButton.layout();
         interactButton.layout();
         pauseButton.layout();
+        if (typeof itemBar !== "undefined") itemBar.layout();
     });
     // Button layouts need to be valid before the first frame, but
     // resizeDisplay() runs before any of these objects exist. Kick
@@ -3316,6 +3317,10 @@
     novaButton.layout();
     interactButton.layout();
     pauseButton.layout();
+    // itemBar is defined further down in the IIFE; the onLayout
+    // callback above runs at every resize so the eventual layouts
+    // line up. The boot-kick lives in startGame() instead, since
+    // itemBar references must wait for its const declaration.
 
     // ---------------------------------------------------------------
     // Restart button (game-over only)
@@ -3563,6 +3568,20 @@
             return;
         }
 
+        // Item bar - tap a slot to consume one charge. Only active
+        // during gameplay (skip during modals so tapping a slot
+        // through a dialogue isn't possible).
+        if (gameState === "playing" && !paused &&
+            !dialogue.isOpen() && !shop.isOpen() &&
+            !cinematic.isOpen() && !scriptedDialogue.isOpen()) {
+            const slotIdx = itemBar.slotAt(x, y);
+            if (slotIdx >= 0) {
+                itemBar.use(slotIdx);
+                e.preventDefault();
+                return;
+            }
+        }
+
         // If the joystick is already active and a SECOND finger
         // lands on an empty area, convert the gesture into a pinch
         // zoom. Suppress the joystick for the duration so the
@@ -3676,6 +3695,18 @@
 
         // Collected items, flat array of ids from the ITEMS catalog.
         inventory: [],
+
+        // 4-slot quick-use item bar (HP / Magic / Crown). Each slot
+        // is { type, count }. type === null means an unassigned
+        // slot. Drives the on-screen item bar HUD + the 1-4 keyboard
+        // bindings below. Pickups (health_vial / magic_vial /
+        // crown_charge) feed counts into the matching typed slot.
+        items: [
+            { type: "health", count: 3 },
+            { type: "magic",  count: 3 },
+            { type: "crown",  count: 2 },
+            { type: null,     count: 0 },
+        ],
 
         // Gold coins - the purse. Coins are picked up automatically
         // on contact (routed here instead of `inventory`) and spent
@@ -6227,6 +6258,29 @@
             magicValue: 10,
             use(_player) {},
         },
+        // --- Quick-use bar items --------------------------------
+        // These three pickups route to player.items[] (the 4-slot
+        // bar) rather than running their effect on contact. Marked
+        // by `itemBarType` so updateDrops dispatches them cleanly.
+        // The actual effect lives on ITEM_BAR_TYPES below.
+        health_vial: {
+            id: "health_vial",
+            name: "Health Vial",
+            color: "#7ad17a",
+            itemBarType: "health",
+        },
+        magic_vial: {
+            id: "magic_vial",
+            name: "Magic Vial",
+            color: "#e63946",
+            itemBarType: "magic",
+        },
+        crown_charge: {
+            id: "crown_charge",
+            name: "Crown Charge",
+            color: "#ffd166",
+            itemBarType: "crown",
+        },
     };
 
     // Helpers on the player. Defined here (rather than as methods on
@@ -6247,6 +6301,289 @@
         player.inventory.splice(index, 1);
         tmpl.use(player);
     }
+
+    // ---------------------------------------------------------------
+    // Item bar (4 quick-use slots)
+    //
+    // Player-facing bottom-center HUD with up to four item slots.
+    // Each slot stores a `{ type, count }` pair on `player.items`.
+    // Pressing 1-4 (desktop) or tapping a slot (mobile) consumes
+    // one charge and runs the type's effect immediately. Per-type
+    // cooldown stops a held key from chugging the entire stack
+    // in a single frame.
+    //
+    // Effects route through the existing `healPlayer`, `player.magic`
+    // and `crown.add` chokepoints so they compose cleanly with
+    // armor / level scaling / Crown Mode.
+    //
+    // Drop pipeline: pickups carrying `itemBarType` (health_vial,
+    // magic_vial, crown_charge) call itemBar.tryPickup(type). If
+    // the player already has a slot of that type, the count is
+    // incremented; otherwise the first null slot is claimed for
+    // the type. Pickups that find no home (all slots full of
+    // OTHER types at max count) silently fizzle.
+    // ---------------------------------------------------------------
+    const ITEM_BAR_MAX = 9;          // per-slot stack ceiling
+    const ITEM_BAR_COOLDOWN = 0.6;   // seconds between uses (per type)
+
+    const ITEM_BAR_TYPES = {
+        health: {
+            id: "health",
+            label: "HP",
+            color: "#7ad17a",
+            // Restores 30 hp. Tied to the same healPlayer chokepoint
+            // existing potions use, so resists / overheal logic stays
+            // consistent.
+            effect() { healPlayer(30); },
+            pulseColor: "rgba(122, 209, 122, 0.55)",
+        },
+        magic: {
+            id: "magic",
+            label: "MP",
+            color: "#e63946",
+            effect() {
+                player.magic = Math.min(player.maxMagic, player.magic + 30);
+            },
+            pulseColor: "rgba(230, 57, 70, 0.55)",
+        },
+        crown: {
+            id: "crown",
+            label: "CR",
+            color: "#ffd166",
+            // Crown charge: dumps 25 into the energy bar; if that
+            // tops it off, crown.add naturally activates Crown Mode.
+            effect() { crown.add(25); flash.trigger(0.4, 0.18); },
+            pulseColor: "rgba(255, 209, 102, 0.55)",
+        },
+    };
+
+    const itemBar = {
+        slots: [],               // wired to player.items at boot
+        cooldowns: { health: 0, magic: 0, crown: 0 },
+        rects: [null, null, null, null],
+        // Brief "I just used this" highlight per slot, ticks down
+        // each frame so the slot flashes a frame after a use.
+        useFlash: [0, 0, 0, 0],
+
+        // Sync the live array - lets a save load swap player.items
+        // without losing the binding.
+        bind() { this.slots = player.items; },
+
+        // Layout the bottom-center 4-slot strip. Slot rects are
+        // cached so pointer hit tests don't need to recompute.
+        layout() {
+            const slotW = 52;
+            const slotH = 52;
+            const gap = 8;
+            const totalW = slotW * 4 + gap * 3;
+            const x0 = Math.floor((VIEW_W - totalW) / 2);
+            const y = VIEW_H - slotH - 12;
+            for (let i = 0; i < 4; i++) {
+                this.rects[i] = {
+                    x: x0 + i * (slotW + gap),
+                    y, w: slotW, h: slotH,
+                };
+            }
+        },
+
+        // Public: try to use the slot at `index`. Returns true if a
+        // charge was consumed.
+        use(index) {
+            const slot = this.slots[index];
+            if (!slot || !slot.type || slot.count <= 0) return false;
+            if ((this.cooldowns[slot.type] || 0) > 0) return false;
+            const type = ITEM_BAR_TYPES[slot.type];
+            if (!type) return false;
+
+            slot.count--;
+            this.cooldowns[slot.type] = ITEM_BAR_COOLDOWN;
+            this.useFlash[index] = 0.32;
+            type.effect();
+            this._spawnPulse(type);
+            sound.play("coin");
+            return true;
+        },
+
+        _spawnPulse(type) {
+            // Spawn a one-shot ring pulse around the player. The
+            // existing flash module already handles full-screen
+            // light pulses; this ring adds the per-type colour so
+            // health / magic / crown read distinctly.
+            playerPulse.spawn(type.pulseColor);
+        },
+
+        // Pickup routing - increments an existing typed slot or
+        // claims a free one. Returns true on accept.
+        tryPickup(type) {
+            if (!type || !ITEM_BAR_TYPES[type]) return false;
+            for (const s of this.slots) {
+                if (s.type === type && s.count < ITEM_BAR_MAX) {
+                    s.count++;
+                    return true;
+                }
+            }
+            for (const s of this.slots) {
+                if (s.type == null) {
+                    s.type = type;
+                    s.count = 1;
+                    return true;
+                }
+            }
+            return false;
+        },
+
+        update(dt) {
+            for (const k of Object.keys(this.cooldowns)) {
+                if (this.cooldowns[k] > 0) {
+                    this.cooldowns[k] = Math.max(0, this.cooldowns[k] - dt);
+                }
+            }
+            for (let i = 0; i < this.useFlash.length; i++) {
+                if (this.useFlash[i] > 0) {
+                    this.useFlash[i] = Math.max(0, this.useFlash[i] - dt);
+                }
+            }
+        },
+
+        // Pointer hit-test - returns the slot index or -1.
+        slotAt(x, y) {
+            for (let i = 0; i < 4; i++) {
+                const r = this.rects[i];
+                if (!r) continue;
+                if (x >= r.x && x <= r.x + r.w &&
+                    y >= r.y && y <= r.y + r.h) return i;
+            }
+            return -1;
+        },
+
+        draw(ctx) {
+            for (let i = 0; i < 4; i++) {
+                const r = this.rects[i];
+                const slot = this.slots[i];
+                if (!r) continue;
+                const empty = !slot || !slot.type;
+                const type = !empty ? ITEM_BAR_TYPES[slot.type] : null;
+                const cd = !empty ? (this.cooldowns[slot.type] || 0) : 0;
+                const flashAlpha = this.useFlash[i];
+
+                ctx.save();
+                // Frame
+                ctx.globalAlpha = empty ? 0.5 : 0.92;
+                roundRectPath(ctx, r.x, r.y, r.w, r.h, 8);
+                ctx.fillStyle = "rgba(18, 18, 30, 0.86)";
+                ctx.fill();
+                ctx.lineWidth = 1.5;
+                ctx.strokeStyle = empty
+                    ? "rgba(120, 120, 144, 0.45)"
+                    : (type && type.color) || "rgba(255, 209, 102, 0.65)";
+                ctx.stroke();
+
+                if (!empty && type) {
+                    // Icon: a coloured pellet. Cheap, readable,
+                    // matches the world-drop visual.
+                    const cx = r.x + r.w / 2;
+                    const cy = r.y + r.h / 2 - 4;
+                    ctx.globalAlpha = 1;
+                    ctx.fillStyle = type.color;
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, 11, 0, Math.PI * 2);
+                    ctx.fill();
+                    // Inner highlight for depth.
+                    ctx.fillStyle = "rgba(255, 255, 255, 0.45)";
+                    ctx.beginPath();
+                    ctx.arc(cx - 3, cy - 4, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                    // Type label across the icon.
+                    ctx.fillStyle = "#1a1a24";
+                    ctx.font = "bold 9px system-ui, sans-serif";
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "middle";
+                    ctx.fillText(type.label, cx, cy + 1);
+
+                    // Count pip bottom-right.
+                    ctx.fillStyle = "#e8e8f0";
+                    ctx.font = "bold 11px system-ui, sans-serif";
+                    ctx.textAlign = "right";
+                    ctx.textBaseline = "bottom";
+                    ctx.fillText(String(slot.count), r.x + r.w - 5, r.y + r.h - 2);
+                }
+
+                // Key hint top-left (1-4).
+                ctx.globalAlpha = empty ? 0.5 : 0.85;
+                ctx.fillStyle = "#a0a0b8";
+                ctx.font = "bold 10px system-ui, sans-serif";
+                ctx.textAlign = "left";
+                ctx.textBaseline = "top";
+                ctx.fillText(String(i + 1), r.x + 5, r.y + 4);
+
+                // Cooldown overlay (semi-transparent darken).
+                if (cd > 0) {
+                    const frac = Math.min(1, cd / ITEM_BAR_COOLDOWN);
+                    ctx.globalAlpha = 0.5;
+                    ctx.fillStyle = "#000";
+                    roundRectPath(ctx, r.x, r.y + r.h * (1 - frac),
+                        r.w, r.h * frac, 8);
+                    ctx.fill();
+                }
+
+                // Recent-use flash overlay (briefly tints the slot).
+                if (flashAlpha > 0 && type) {
+                    ctx.globalAlpha = flashAlpha * 0.7;
+                    ctx.fillStyle = type.color;
+                    roundRectPath(ctx, r.x, r.y, r.w, r.h, 8);
+                    ctx.fill();
+                }
+                ctx.restore();
+            }
+        },
+    };
+
+    // Player-centered ring pulse, spawned by item-bar uses. Pool of
+    // a few slots so rapid uses (e.g. drink potion + crown charge)
+    // can stack without allocating per-call.
+    const playerPulse = {
+        pool: [],
+        cap: 4,
+        spawn(color) {
+            // Reuse a dead pulse if one's idle, otherwise push.
+            for (const p of this.pool) {
+                if (!p.alive) {
+                    p.alive = true; p.life = 0; p.color = color; return;
+                }
+            }
+            if (this.pool.length < this.cap) {
+                this.pool.push({ alive: true, life: 0, color, maxLife: 0.45 });
+            }
+        },
+        update(dt) {
+            for (const p of this.pool) {
+                if (!p.alive) continue;
+                p.life += dt;
+                if (p.life >= p.maxLife) p.alive = false;
+            }
+        },
+        draw(ctx) {
+            const cx = player.x + player.width / 2;
+            const cy = player.y + player.height / 2;
+            for (const p of this.pool) {
+                if (!p.alive) continue;
+                const t = p.life / p.maxLife;
+                const r = 14 + t * 36;
+                const a = 1 - t;
+                ctx.save();
+                ctx.globalAlpha = a * 0.85;
+                ctx.strokeStyle = p.color;
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(cx, cy, r, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.restore();
+            }
+        },
+        reset() {
+            for (const p of this.pool) p.alive = false;
+        },
+    };
 
     // World drops - stay in world space, picked up on overlap.
     const drops = [];
@@ -7674,10 +8011,15 @@
         // Bosses always leave a purse plus a potion and a pair of
         // magic orbs - a big reward for the long fight. Coins arc
         // out in a short circle so pickup feels like a burst.
+        // Plus one quick-use bar pickup of each type so the player
+        // walks out of a boss fight with a visibly stocked bar.
         if (enemy.isBoss) {
             spawnDrop(cx, cy - 20, "potion");
             spawnDrop(cx - 18, cy - 20, "magic_orb");
             spawnDrop(cx + 18, cy - 20, "magic_orb");
+            spawnDrop(cx - 28, cy + 4, "health_vial");
+            spawnDrop(cx + 28, cy + 4, "magic_vial");
+            spawnDrop(cx, cy + 24, "crown_charge");
             const coinCount = 8;
             for (let i = 0; i < coinCount; i++) {
                 const angle = (i / coinCount) * Math.PI * 2;
@@ -7689,6 +8031,22 @@
                 );
             }
             return;
+        }
+
+        // Quick-use bar drop pre-roll. Independent from the regular
+        // table so a kill can yield BOTH (e.g. a coin and a magic
+        // vial). Per-spec rarities: vials are uncommon, crown
+        // charges rare.
+        //   health vial - 6%
+        //   magic vial  - 10%
+        //   crown charge - 2%
+        const qr = Math.random();
+        if (qr < 0.06) {
+            spawnDrop(cx + 6, cy - 6, "health_vial");
+        } else if (qr < 0.16) {
+            spawnDrop(cx + 6, cy - 6, "magic_vial");
+        } else if (qr < 0.18) {
+            spawnDrop(cx + 6, cy - 6, "crown_charge");
         }
 
         // Regular enemy table:
@@ -7727,7 +8085,18 @@
                 pyMin < dyMax && pyMax > dyMin
             ) {
                 const tmpl = ITEMS[d.itemId];
-                if (tmpl && tmpl.currency) {
+                if (tmpl && tmpl.itemBarType) {
+                    // Quick-use bar drop - lands on the matching
+                    // typed slot (or claims a free slot for that
+                    // type). If the bar can't accept it (all four
+                    // slots taken by OTHER types at max), the
+                    // drop fizzles silently.
+                    if (typeof itemBar !== "undefined") {
+                        itemBar.tryPickup(tmpl.itemBarType);
+                    }
+                    sound.play("coin");
+                    tutorial.onPickup();
+                } else if (tmpl && tmpl.currency) {
                     // Currency drop - goes into the purse, not the
                     // inventory. `value` defaults to 1 when unset.
                     player.coins += tmpl.value ?? 1;
@@ -7936,6 +8305,7 @@
                     magic: player.magic, maxMagic: player.maxMagic,
                     coins: player.coins,
                     inventory: [...player.inventory],
+                    items: player.items.map(s => ({ ...s })),
                     squad: player.squad.map(m => ({ ...m })),
                     lightCreatures: player.lightCreatures.map(c => ({ ...c })),
                     weaponIndex: player.weaponIndex,
@@ -8033,6 +8403,17 @@
             player.coins = data.player.coins;
             player.inventory.length = 0;
             for (const id of data.player.inventory) player.inventory.push(id);
+            // Restore quick-use bar - falls back to the default
+            // loadout when an old save predates the items field.
+            if (Array.isArray(data.player.items) &&
+                data.player.items.length === 4) {
+                for (let i = 0; i < 4; i++) {
+                    const s = data.player.items[i] || {};
+                    player.items[i].type = s.type ?? null;
+                    player.items[i].count = Math.max(0, s.count | 0);
+                }
+            }
+            if (typeof itemBar !== "undefined") itemBar.bind();
             // Squad: dismiss any current followers back to their
             // home zones first, then rehire from the snapshot roster
             // so the live followers array matches the save's squad.
@@ -16209,9 +16590,25 @@
             debugOverlay = !debugOverlay;
         }
 
-        // Weapon switching - edge-triggered, alive-only.
-        if (keysJustPressed["1"]) player.weaponIndex = 0;
-        if (keysJustPressed["2"]) player.weaponIndex = 1;
+        // Quick-use item bar - 1 / 2 / 3 / 4 consume a charge from
+        // the matching slot. When slot 1 or 2 is EMPTY the key falls
+        // through to the original weapon-swap binding so muscle
+        // memory on that pair survives. Tab is added as an
+        // alternate that ALWAYS swaps weapons regardless of slot
+        // state, so desktop players have a clean swap key.
+        const slotKeys = ["1", "2", "3", "4"];
+        for (let i = 0; i < 4; i++) {
+            if (!keysJustPressed[slotKeys[i]]) continue;
+            if (itemBar.use(i)) continue;
+            // Slot 1 / 2 fallback -> weapon swap.
+            if (i === 0) player.weaponIndex = 0;
+            else if (i === 1) player.weaponIndex = 1;
+        }
+        if (keysJustPressed["Tab"]) {
+            // Tab swaps between the two weapons. Edge-triggered so
+            // holding the key doesn't cycle every frame.
+            player.weaponIndex = (player.weaponIndex + 1) % 2;
+        }
 
         // NPC interact - E key or the mobile TALK button. Opens the
         // nearest NPC's dialogue box; a stray press with no NPC in
@@ -16276,6 +16673,8 @@
         playerTrail.update(dt);
         ambientParticles.update(dt);
         cinematicFx.update(dt);
+        itemBar.update(dt);
+        playerPulse.update(dt);
         shake.update(dt);
         if (typeof chapterTwo !== "undefined") chapterTwo.tick(dt);
         flash.update(dt);
@@ -16436,6 +16835,11 @@
     function startGame() {
         gameState = "playing";
         lastTime = performance.now();
+        // Item bar binds to player.items here so a save/load that
+        // swaps the array still wires through. Layout fires too in
+        // case the canvas resized between intro and gameplay.
+        itemBar.bind();
+        itemBar.layout();
         // Clear any held keys that might be stuck from the input
         // that dismissed the intro.
         for (const k in keys) keys[k] = false;
@@ -16671,6 +17075,20 @@
         player.inventory.length = 0;
         player.coins = 0;
         player.magic = 0;
+        // Quick-use bar - fresh run gets the starting loadout
+        // back. Re-bind so itemBar.slots points at the new array.
+        player.items = [
+            { type: "health", count: 3 },
+            { type: "magic",  count: 3 },
+            { type: "crown",  count: 2 },
+            { type: null,     count: 0 },
+        ];
+        if (typeof itemBar !== "undefined") {
+            itemBar.bind();
+            itemBar.cooldowns = { health: 0, magic: 0, crown: 0 };
+            itemBar.useFlash = [0, 0, 0, 0];
+        }
+        if (typeof playerPulse !== "undefined") playerPulse.reset();
         // Squad - fresh run recruits no one by default.
         companions.reset();
         // Light creatures - fresh run = empty roster + no wild
@@ -16964,6 +17382,10 @@
         novaButton.draw(ctx);
         interactButton.draw(ctx);
         if (gameState === "playing") pauseButton.draw(ctx);
+        // Quick-use item bar - bottom-center HUD strip. Always
+        // visible during gameplay so the player knows their
+        // potion stack at a glance.
+        if (gameState === "playing") itemBar.draw(ctx);
         drawQuestPanel();
         drawSquadIndicator();
         drawMinimap();
@@ -17949,6 +18371,9 @@
         // than obscuring it.
         chargeFx.draw(ctx);
         playerTrail.draw(ctx);
+        // Item-bar use rings - per-type coloured pulse around the
+        // player sprite, ticked by playerPulse.update.
+        playerPulse.draw(ctx);
         // Cinematic FX (sparks + residues) draw above the player
         // sprite but below the world-transform close, so they're
         // still camera-locked with the world.
